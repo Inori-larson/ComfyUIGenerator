@@ -5,7 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 from PySide6.QtCore import QEvent, Qt, QTimer
-from PySide6.QtWidgets import QComboBox, QCompleter
+from PySide6.QtWidgets import (
+    QButtonGroup, QComboBox, QCompleter, QGridLayout, QPushButton,
+    QStackedWidget, QVBoxLayout, QWidget,
+)
 
 
 class SearchComboBox(QComboBox):
@@ -152,3 +155,75 @@ class SearchComboBox(QComboBox):
             self.show_popup_search()
             return
         super().keyPressEvent(event)
+
+
+class WrappingTabs(QWidget):
+    """Tab-like selector whose buttons wrap to new rows instead of scrolling."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._buttons = []
+        self._group = QButtonGroup(self)
+        self._group.setExclusive(True)
+        self._last_width = 0
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        self._bar = QWidget()
+        self._grid = QGridLayout(self._bar)
+        self._grid.setContentsMargins(0, 0, 0, 0)
+        self._grid.setSpacing(6)
+        layout.addWidget(self._bar)
+        self.stack = QStackedWidget()
+        layout.addWidget(self.stack, 1)
+
+    def addTab(self, widget, title):
+        index = self.stack.addWidget(widget)
+        button = QPushButton(title)
+        button.setCheckable(True)
+        button.setObjectName("Tab")
+        button.clicked.connect(lambda _checked=False, i=index: self.setCurrentIndex(i))
+        self._group.addButton(button, index)
+        self._buttons.append(button)
+        self._relayout()
+        if index == 0:
+            self.setCurrentIndex(0)
+        return index
+
+    def setCurrentIndex(self, index):
+        if 0 <= index < len(self._buttons):
+            self._buttons[index].setChecked(True)
+            self.stack.setCurrentIndex(index)
+
+    def currentIndex(self):
+        return self.stack.currentIndex()
+
+    def count(self):
+        return self.stack.count()
+
+    def _relayout(self):
+        width = self._bar.width() or self.width() - 20
+        if width <= 40:
+            return
+        while self._grid.count():
+            self._grid.takeAt(0)
+        x = 0
+        row = 0
+        col = 0
+        for button in self._buttons:
+            step = button.sizeHint().width() + 8
+            if x + step > width and x > 0:
+                row += 1
+                col = 0
+                x = 0
+            self._grid.addWidget(button, row, col)
+            col += 1
+            x += step
+        self._bar.adjustSize()
+        self._bar.updateGeometry()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if abs(self.width() - self._last_width) > 4:
+            self._last_width = self.width()
+            QTimer.singleShot(0, self._relayout)

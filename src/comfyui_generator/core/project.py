@@ -125,6 +125,28 @@ def trash_dir(root: Path, project_id: str) -> Path:
     return path
 
 
+TRASH_INDEX = "index.json"
+
+
+def _trash_index_path(root: Path, project_id: str) -> Path:
+    return trash_dir(root, project_id) / TRASH_INDEX
+
+
+def _load_index(root: Path, project_id: str) -> dict[str, str]:
+    path = _trash_index_path(root, project_id)
+    if path.is_file():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+    return {}
+
+
+def _save_index(root: Path, project_id: str, index: dict[str, str]) -> None:
+    path = _trash_index_path(root, project_id)
+    path.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def move_to_trash(path: str | Path, project_id: str, root: Path) -> Path:
     src = Path(path)
     if not src.is_file():
@@ -136,12 +158,54 @@ def move_to_trash(path: str | Path, project_id: str, root: Path) -> Path:
         dest = dest_dir / ("%s_%d%s" % (src.stem, counter, src.suffix))
         counter += 1
     shutil.move(str(src), str(dest))
+    index = _load_index(root, project_id)
+    index[dest.name] = str(src.resolve())
+    _save_index(root, project_id, index)
     return dest
 
 
-def restore_from_trash(path: str | Path, target_dir: str | Path) -> Path:
+def trash_original(path: str | Path, project_id: str, root: Path) -> str:
+    return _load_index(root, project_id).get(Path(path).name, "")
+
+
+def list_trash(root: Path, project_id: str) -> list[Path]:
+    folder = trash_dir(root, project_id)
+    return sorted(p for p in folder.iterdir() if p.is_file() and p.name != TRASH_INDEX)
+
+
+def restore_from_trash(path: str | Path, target_dir: str | Path | None = None,
+                       root: Path | None = None, project_id: str | None = None) -> Path:
     src = Path(path)
-    target = Path(target_dir) / src.name
+    target: Path | None = None
+    if target_dir is not None:
+        target = Path(target_dir) / src.name
+    elif root is not None and project_id is not None:
+        original = _load_index(root, project_id).get(src.name)
+        if original:
+            target = Path(original)
+    if target is None:
+        raise ValueError("No restore target for %s" % src)
+    if target.exists():
+        target = target.with_name("%s_restored%s" % (target.stem, target.suffix))
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(src), str(target))
+    if root is not None and project_id is not None:
+        index = _load_index(root, project_id)
+        index.pop(src.name, None)
+        _save_index(root, project_id, index)
     return target
+
+
+def delete_from_trash(path: str | Path, root: Path, project_id: str) -> None:
+    src = Path(path)
+    if src.is_file():
+        src.unlink()
+    index = _load_index(root, project_id)
+    index.pop(src.name, None)
+    _save_index(root, project_id, index)
+
+
+def clear_trash(root: Path, project_id: str) -> None:
+    for item in list_trash(root, project_id):
+        item.unlink()
+    _save_index(root, project_id, {})

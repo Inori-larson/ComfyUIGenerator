@@ -11,14 +11,14 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QSize, Qt, QTimer
-from PySide6.QtGui import QBrush, QIcon, QImage, QPixmap
+from PySide6.QtGui import QAction, QBrush, QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox,
-    QFileDialog, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-    QListView, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
-    QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy,
-    QSpinBox, QSplitter, QStackedWidget, QTableWidget, QTableWidgetItem,
-    QTabWidget, QVBoxLayout, QWidget,
+    QFileDialog, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
+    QLineEdit, QListView, QListWidget, QListWidgetItem, QMainWindow, QMenu,
+    QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea,
+    QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QTableWidget,
+    QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from comfyui_generator.core.assets import Assets
@@ -26,17 +26,21 @@ from comfyui_generator.core.comfy import ComfyClient
 from comfyui_generator.core.config import (
     AppConfig, load_config, load_template, resolve_template, save_config,
 )
-from comfyui_generator.core.detailers import build_detailer_choices
-from comfyui_generator.core.jobs import build_tasks
-from comfyui_generator.core.moods import MOODS, resolve_mood
-from comfyui_generator.core.project import new_project, save_project
+from comfyui_generator.core.detailers import build_detailer_choices, local_detectors
+from comfyui_generator.core.jobs import Task, build_tasks
+from comfyui_generator.core.lora_info import is_style_lora, lora_tag_info
+from comfyui_generator.core.lora_sources import lora_entries
+from comfyui_generator.core.project import (
+    list_projects, load_project, move_to_trash, new_project, save_project,
+)
 from comfyui_generator.core.services import ComfyService
 from comfyui_generator.core.single import FRAMING_TAGS, SingleOptions
 from comfyui_generator.core.storyboard import StoryboardOptions, slugify
-from comfyui_generator.core.tags import append_tags
+from comfyui_generator.core.tags import append_tags, estimate_tokens
+from comfyui_generator.ui.dialogs import CompareDialog, ProjectDialog, TagReferenceDialog, TrashDialog
 from comfyui_generator.ui.settings_dialog import SettingsDialog
-from comfyui_generator.ui.widgets import SearchComboBox
-from comfyui_generator.ui.workers import ConnectWorker, PromptWorker, RenderWorker
+from comfyui_generator.ui.widgets import SearchComboBox, WrappingTabs
+from comfyui_generator.ui.workers import AssetsWorker, ConnectWorker, LoraTagsWorker, PromptWorker, RenderWorker, TagPickWorker
 
 RESOLUTIONS = [
     ("竖屏 832x1216", 832, 1216),
@@ -79,6 +83,7 @@ class MainWindow(QMainWindow):
         self.connected = False
 
         self.connect_worker: ConnectWorker | None = None
+        self.assets_worker: AssetsWorker | None = None
         self.prompt_worker: PromptWorker | None = None
         self.render_worker: RenderWorker | None = None
         self.tasks_by_id: dict[str, Any] = {}
@@ -87,13 +92,24 @@ class MainWindow(QMainWindow):
         self.previews: dict[str, bytes] = {}
         self.final_bytes: dict[str, bytes] = {}
         self._icon_last: dict[str, float] = {}
+        self._lora_info_cache: dict[str, dict] = {}
+        self._reference_tags: list[str] = []
+        self.tag_pick_worker: TagPickWorker | None = None
+        self._lora_paths: dict[str, str] = {}
+        self._online_tried: set[str] = set()
+        self.lora_tags_worker: LoraTagsWorker | None = None
+        self._character_lora_names: set[str] = set()
+        self._style_lora_names: set[str] = set()
+        self._syncing_tags = False
         self.current_pixmap: QPixmap | None = None
         self.current_task_id: str | None = None
         self.project: dict[str, Any] | None = None
         self.detailer_rows: list[tuple[str, QCheckBox, QDoubleSpinBox, dict[str, Any]]] = []
         self._render_after_prompt = False
+        self._rewrite_row: int | None = None
 
         self._build_ui()
+        self._build_menu()
         self._init_defaults()
         if os.environ.get("CUI_NO_AUTOCONNECT") != "1":
             QTimer.singleShot(300, self.connect_services)
@@ -121,6 +137,32 @@ class MainWindow(QMainWindow):
         root.addWidget(vsplit, 1)
         self.setCentralWidget(central)
         self.statusBar().showMessage("就绪")
+
+    def _build_menu(self) -> None:
+        file_menu = self.menuBar().addMenu("文件")
+        actions = [
+            ("新建项目", "Ctrl+N", self.new_project_clicked),
+            ("打开项目…", "Ctrl+O", self.open_project_clicked),
+            ("保存项目", "Ctrl+S", self.save_project_clicked),
+            (None, None, None),
+            ("打开输出目录", None, self.open_output_dir),
+            ("退出", None, self.close),
+        ]
+        for text, shortcut, slot in actions:
+            if text is None:
+                file_menu.addSeparator()
+                continue
+            action = QAction(text, self)
+            if shortcut:
+                action.setShortcut(shortcut)
+            action.triggered.connect(slot)
+            file_menu.addAction(action)
+
+        tools_menu = self.menuBar().addMenu("工具")
+        for text, slot in (("回收站…", self.open_trash), ("变体对比…", self.compare_variants)):
+            action = QAction(text, self)
+            action.triggered.connect(slot)
+            tools_menu.addAction(action)
 
     def _build_topbar(self) -> QWidget:
         bar = QWidget()
@@ -243,11 +285,12 @@ class MainWindow(QMainWindow):
         row.addWidget(self.btn_story_prompt, 1)
         layout.addLayout(row)
 
-        self.shot_table = QTableWidget(0, 3)
-        self.shot_table.setHorizontalHeaderLabels(["镜号", "名称", "画面提示词（可编辑）"])
+        self.shot_table = QTableWidget(0, 4)
+        self.shot_table.setHorizontalHeaderLabels(["锁", "镜号", "名称", "画面提示词（可编辑）"])
         self.shot_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.shot_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        self.shot_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.shot_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.shot_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self.shot_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.shot_table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked
                                         | QAbstractItemView.EditTrigger.EditKeyPressed)
@@ -260,6 +303,10 @@ class MainWindow(QMainWindow):
             btn.clicked.connect(slot)
             tools.addWidget(btn)
         layout.addLayout(tools)
+
+        self.btn_rewrite_shot = QPushButton("改写选中镜…")
+        self.btn_rewrite_shot.clicked.connect(self.rewrite_selected_shot)
+        layout.addWidget(self.btn_rewrite_shot)
 
         self.chk_selected = QCheckBox("只生成选中的镜头")
         layout.addWidget(self.chk_selected)
@@ -303,9 +350,10 @@ class MainWindow(QMainWindow):
         inner = QWidget()
         layout = QVBoxLayout(inner)
         layout.setContentsMargins(4, 10, 10, 10)
-        self.tabs = QTabWidget()
+        self.tabs = WrappingTabs()
         self.tabs.addTab(self._build_models_tab(), "模型")
         self.tabs.addTab(self._build_character_tab(), "角色")
+        self.tabs.addTab(self._build_style_lora_tab(), "风格")
         self.tabs.addTab(self._build_picture_tab(), "画面")
         self.tabs.addTab(self._build_hires_tab(), "高清")
         self.tabs.addTab(self._build_detailer_tab(), "重绘")
@@ -342,22 +390,50 @@ class MainWindow(QMainWindow):
         form.addStretch(1)
         return page
 
+    def _make_lora_table(self) -> QTableWidget:
+        table = QTableWidget(0, 2)
+        table.setHorizontalHeaderLabels(["名称", "强度"])
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        table.verticalHeader().setVisible(False)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        return table
+
     def _build_character_tab(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setSpacing(8)
-        layout.addWidget(_label("LoRA（可多选）"))
-        self.lora_table = QTableWidget(0, 2)
-        self.lora_table.setHorizontalHeaderLabels(["名称", "强度"])
-        self.lora_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.lora_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        self.lora_table.verticalHeader().setVisible(False)
-        self.lora_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        layout.addWidget(_label("角色 LoRA（可多选）"))
+        self.lora_table = self._make_lora_table()
+        self.lora_table.itemChanged.connect(self._on_lora_item_changed)
+        self.lora_table.cellClicked.connect(
+            lambda row, col: self._toggle_lora_row(self.lora_table, row, col))
         layout.addWidget(self.lora_table, 1)
-        layout.addWidget(_label("角色标签（Danbooru）"))
+        hint = _label("勾选 LoRA 会自动生成少量激活标签；全部标签放在「参考标签」里按需挑选", "Hint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.btn_scan_loras_char = QPushButton("重新扫描 LoRA")
+        self.btn_scan_loras_char.clicked.connect(self.refresh_loras)
+        layout.addWidget(self.btn_scan_loras_char)
+        layout.addWidget(_label("激活标签（写进 prompt）"))
         self.tags_edit = QPlainTextEdit()
-        self.tags_edit.setFixedHeight(100)
+        self.tags_edit.setFixedHeight(110)
+        self.tags_edit.textChanged.connect(self._update_tag_estimate)
         layout.addWidget(self.tags_edit)
+        self.tag_estimate = _label("标签 0 · 约 2 tokens", "Hint")
+        layout.addWidget(self.tag_estimate)
+        row_tags = QHBoxLayout()
+        self.btn_reference = QPushButton("参考标签（0）")
+        self.btn_reference.setEnabled(False)
+        self.btn_reference.clicked.connect(self.open_reference_tags)
+        self.btn_pick_tags = QPushButton("让模型挑选")
+        self.btn_pick_tags.clicked.connect(self.pick_tags_with_llm)
+        self.btn_clear_tags = QPushButton("清空")
+        self.btn_clear_tags.clicked.connect(self.tags_edit.clear)
+        row_tags.addWidget(self.btn_reference)
+        row_tags.addWidget(self.btn_pick_tags)
+        row_tags.addWidget(self.btn_clear_tags)
+        layout.addLayout(row_tags)
         layout.addWidget(_label("角色参考图（IPAdapter，可选）"))
         row = QHBoxLayout()
         self.char_ref = QLineEdit()
@@ -379,15 +455,30 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
         return page
 
+    def _build_style_lora_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setSpacing(8)
+        layout.addWidget(_label("风格 LoRA（可多选）"))
+        self.style_lora_table = self._make_lora_table()
+        self.style_lora_table.cellClicked.connect(
+            lambda row, col: self._toggle_lora_row(self.style_lora_table, row, col))
+        layout.addWidget(self.style_lora_table, 1)
+        hint = _label(
+            "文件名含 style / screencap / hrf / aesthetic 等会自动归入这里；"
+            "风格 LoRA 不影响角色标签。", "Hint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.btn_scan_loras_style = QPushButton("重新扫描 LoRA")
+        self.btn_scan_loras_style.clicked.connect(self.refresh_loras)
+        layout.addWidget(self.btn_scan_loras_style)
+        layout.addStretch(1)
+        return page
+
     def _build_picture_tab(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setSpacing(8)
-        layout.addWidget(_label("画面氛围"))
-        self.mood_combo = SearchComboBox()
-        for key, (label, _pos, _neg) in MOODS.items():
-            self.mood_combo.addItem(label, key)
-        layout.addWidget(self.mood_combo)
 
         layout.addWidget(_label("分辨率"))
         self.res_combo = SearchComboBox()
@@ -493,6 +584,12 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.addWidget(_label("勾选需要重绘的部位；denoise 越高改动越大"))
+        self.detailer_hint = _label("等待扫描检测模型…", "Hint")
+        self.detailer_hint.setWordWrap(True)
+        layout.addWidget(self.detailer_hint)
+        self.btn_scan_assets = QPushButton("重新扫描模型")
+        self.btn_scan_assets.clicked.connect(self.refresh_assets)
+        layout.addWidget(self.btn_scan_assets)
         self.detailer_box = QVBoxLayout()
         self.detailer_box.setSpacing(6)
         layout.addLayout(self.detailer_box)
@@ -561,6 +658,8 @@ class MainWindow(QMainWindow):
         self.queue_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.queue_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.queue_table.currentCellChanged.connect(self._on_queue_selected)
+        self.queue_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.queue_table.customContextMenuRequested.connect(self._queue_menu)
         self.bottom_tabs.addTab(self.queue_table, "队列")
 
         self.log_view = QPlainTextEdit()
@@ -576,6 +675,8 @@ class MainWindow(QMainWindow):
         self.gallery.setMovement(QListView.Movement.Static)
         self.gallery.setSpacing(6)
         self.gallery.itemDoubleClicked.connect(self._open_gallery_item)
+        self.gallery.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.gallery.customContextMenuRequested.connect(self._gallery_menu)
         self.bottom_tabs.addTab(self.gallery, "画廊")
         return self.bottom_tabs
 
@@ -609,8 +710,6 @@ class MainWindow(QMainWindow):
         self.hires_denoise.setValue(float(hires.get("denoise", 0.4)))
         self.hires_steps.setValue(int(hires.get("steps", 20)))
         self.variants_spin.setValue(int(template.get("variants") or 1))
-        mood = self.cfg.generation.mood or "bright"
-        self.mood_combo.setCurrentIndex(max(0, self.mood_combo.findData(mood)))
         wildcard_dir = (self.cfg.generation.wildcards or {}).get("dir", "")
         if not wildcard_dir and self.cfg.comfy.base_dir:
             wildcard_dir = str(Path(self.cfg.comfy.base_dir) / "user" / "default" / "wildcards")
@@ -705,36 +804,320 @@ class MainWindow(QMainWindow):
         self._populate_loras()
         self._populate_detailers()
 
+    def _read_lora_table(self, table: QTableWidget) -> dict[str, tuple[bool, float]]:
+        data: dict[str, tuple[bool, float]] = {}
+        for row in range(table.rowCount()):
+            item = table.item(row, 0)
+            spin = table.cellWidget(row, 1)
+            if item and spin:
+                data[item.data(Qt.ItemDataRole.UserRole)] = (
+                    item.checkState() == Qt.CheckState.Checked, spin.value())
+        return data
+
+    def _fill_lora_table(self, table: QTableWidget, names: list[str],
+                         configured: dict[str, float],
+                         current: dict[str, tuple[bool, float]]) -> None:
+        table.blockSignals(True)
+        try:
+            table.setRowCount(0)
+            for name in names:
+                row = table.rowCount()
+                table.insertRow(row)
+                item = QTableWidgetItem(Path(name).name)
+                item.setData(Qt.ItemDataRole.UserRole, name)
+                item.setToolTip(name)
+                item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+                checked, strength = current.get(name, (name in configured, configured.get(name, 0.9)))
+                item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+                table.setItem(row, 0, item)
+                spin = QDoubleSpinBox()
+                spin.setRange(0, 2)
+                spin.setSingleStep(0.05)
+                spin.setValue(strength)
+                table.setCellWidget(row, 1, spin)
+        finally:
+            table.blockSignals(False)
+
+    def _collect_lora_names(self, configured: dict[str, float]) -> tuple[list[str], list[str]]:
+        comfy = list(self.assets.loras)
+        fallback = comfy or list(configured)
+        char_dir = self.cfg.lora.character_dir
+        style_dir = self.cfg.lora.style_dir
+        if char_dir:
+            character = [entry["name"] for entry in lora_entries(char_dir, comfy)]
+        else:
+            character = [name for name in fallback if not is_style_lora(name)]
+        if style_dir:
+            styles = [entry["name"] for entry in lora_entries(style_dir, comfy)]
+        else:
+            styles = [name for name in fallback if is_style_lora(name)]
+
+        if char_dir:
+            character_set = {name.lower() for name in character}
+            styles = [name for name in styles if name.lower() not in character_set]
+        if style_dir:
+            style_set = {name.lower() for name in styles}
+            character = [name for name in character if name.lower() not in style_set]
+
+        for name in configured:
+            target_style = name in styles or (name not in character and is_style_lora(name))
+            if target_style and name not in styles:
+                styles.append(name)
+            elif not target_style and name not in character:
+                character.append(name)
+
+        def unique(values: list[str]) -> list[str]:
+            seen: set[str] = set()
+            result: list[str] = []
+            for value in values:
+                key = value.lower()
+                if key not in seen:
+                    seen.add(key)
+                    result.append(value)
+            return result
+
+        return unique(character), unique(styles)
+
     def _populate_loras(self) -> None:
         configured: dict[str, float] = {}
         for lora in (self.template.get("loras") or
                      ([self.template["lora"]] if self.template.get("lora") else [])):
             if lora.get("name"):
                 configured[lora["name"]] = float(lora.get("strength", 0.9))
-        names = list(self.assets.loras) if self.assets.loras else list(configured)
-        current = {}
+        character_names, style_names = self._collect_lora_names(configured)
+        if self.assets.loras and (self.cfg.lora.character_dir or self.cfg.lora.style_dir):
+            for folder in (self.cfg.lora.character_dir, self.cfg.lora.style_dir):
+                for entry in lora_entries(folder, self.assets.loras):
+                    if not entry["resolved"]:
+                        self.append_log(
+                            "警告：%s 不在 ComfyUI LoRA 列表中，请加入搜索路径" % entry["display"])
+        self._character_lora_names = set(character_names)
+        self._style_lora_names = set(style_names)
+        self._lora_paths = {
+            name: self._resolve_lora_path(name)
+            for name in set(character_names + style_names)
+        }
+        self._fill_lora_table(self.lora_table, character_names, configured,
+                              self._read_lora_table(self.lora_table))
+        self._fill_lora_table(self.style_lora_table, style_names, configured,
+                              self._read_lora_table(self.style_lora_table))
+        self._refresh_reference_tags()
+
+    def refresh_loras(self) -> None:
+        self._lora_info_cache.clear()
+        self._online_tried.clear()
+        if self.connected:
+            self.refresh_assets()
+        else:
+            self._populate_loras()
+            self.append_log("已重新扫描 LoRA：角色 %d / 风格 %d" % (
+                self.lora_table.rowCount(), self.style_lora_table.rowCount()))
+
+    def _resolve_lora_path(self, name: str) -> str:
+        direct = Path(name)
+        if direct.is_file():
+            return str(direct)
+        for folder in (self.cfg.lora.character_dir, self.cfg.lora.style_dir):
+            if not folder:
+                continue
+            for entry in lora_entries(folder, self.assets.loras):
+                if entry["name"] == name:
+                    return entry["path"]
+        base = self.cfg.comfy.base_dir
+        if base:
+            root = Path(base) / "models" / "loras"
+            relative = Path(str(name).replace("\\", os.sep).replace("/", os.sep))
+            candidate = root / relative
+            if candidate.is_file():
+                return str(candidate)
+            basename = Path(str(name).replace("\\", "/")).name.lower()
+            for file in root.rglob("*"):
+                if file.is_file() and file.name.lower() == basename:
+                    return str(file)
+        return name
+
+    def _on_lora_item_changed(self, item: QTableWidgetItem) -> None:
+        if self._syncing_tags or item.column() != 0:
+            return
+        self._sync_character_tags()
+
+    def _toggle_lora_row(self, table: QTableWidget, row: int, column: int) -> None:
+        if row < 0 or column == 0:
+            return
+        item = table.item(row, 0)
+        if item is None:
+            return
+        if item.checkState() != Qt.CheckState.Checked:
+            item.setCheckState(Qt.CheckState.Checked)
+        elif table is self.lora_table:
+            self._sync_character_tags()
+
+    def _update_tag_estimate(self) -> None:
+        text = self.tags_edit.toPlainText()
+        count = len([tag for tag in text.split(",") if tag.strip()])
+        tokens = estimate_tokens(text)
+        self.tag_estimate.setText("标签 %d · 约 %d tokens" % (count, tokens))
+
+    def _checked_character_loras(self) -> list[tuple[str, str]]:
+        result: list[tuple[str, str]] = []
         for row in range(self.lora_table.rowCount()):
             item = self.lora_table.item(row, 0)
-            spin = self.lora_table.cellWidget(row, 1)
-            if item and spin:
-                current[item.data(Qt.ItemDataRole.UserRole)] = (
-                    item.checkState() == Qt.CheckState.Checked, spin.value())
-        self.lora_table.setRowCount(0)
-        for name in names:
-            row = self.lora_table.rowCount()
-            self.lora_table.insertRow(row)
-            item = QTableWidgetItem(Path(name).name)
-            item.setData(Qt.ItemDataRole.UserRole, name)
-            item.setToolTip(name)
-            item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
-            checked, strength = current.get(name, (name in configured, configured.get(name, 0.9)))
-            item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
-            self.lora_table.setItem(row, 0, item)
-            spin = QDoubleSpinBox()
-            spin.setRange(0, 2)
-            spin.setSingleStep(0.05)
-            spin.setValue(strength)
-            self.lora_table.setCellWidget(row, 1, spin)
+            if item and item.checkState() == Qt.CheckState.Checked:
+                name = item.data(Qt.ItemDataRole.UserRole)
+                path = self._lora_paths.get(name) or self._resolve_lora_path(name)
+                result.append((name, path))
+        return result
+
+    def _lora_info(self, path: str) -> dict:
+        info = self._lora_info_cache.get(path)
+        if info is None:
+            info = lora_tag_info(path, online=False)
+            self._lora_info_cache[path] = info
+        return info
+
+    @staticmethod
+    def _combine_tags(lists: list[list[str]]) -> list[str]:
+        seen: set[str] = set()
+        result: list[str] = []
+        for tags in lists:
+            for tag in tags:
+                key = str(tag).lower().strip()
+                if key and key not in seen:
+                    seen.add(key)
+                    result.append(str(tag))
+        return result
+
+    def _refresh_reference_tags(self) -> None:
+        entries = self._checked_character_loras()
+        self._reference_tags = self._combine_tags([
+            self._lora_info(path)["reference"] for _name, path in entries
+        ])
+        self.btn_reference.setText("参考标签（%d）" % len(self._reference_tags))
+        self.btn_reference.setEnabled(bool(self._reference_tags))
+
+    def _sync_character_tags(self) -> None:
+        entries = self._checked_character_loras()
+        if not entries:
+            self._reference_tags = []
+            self.btn_reference.setText("参考标签（0）")
+            self.btn_reference.setEnabled(False)
+            return
+        references: list[list[str]] = []
+        triggers: list[list[str]] = []
+        sources: set[str] = set()
+        pending: list[tuple[str, str]] = []
+        for name, path in entries:
+            info = self._lora_info(path)
+            references.append(info["reference"])
+            triggers.append(info["triggers"])
+            sources.add(info["source"])
+            if (self.cfg.lora.online_lookup and path not in self._online_tried
+                    and not info["source"].startswith("safetensors")
+                    and Path(path).is_file()):
+                pending.append((name, path))
+
+        self._reference_tags = self._combine_tags(references)
+        self.btn_reference.setText("参考标签（%d）" % len(self._reference_tags))
+        self.btn_reference.setEnabled(bool(self._reference_tags))
+
+        activation = self._combine_tags(triggers)
+        self._syncing_tags = True
+        try:
+            self.tags_edit.setPlainText(", ".join(activation))
+        finally:
+            self._syncing_tags = False
+        if activation:
+            self.append_log("激活标签 %d 个｜参考标签 %d 个（%s）" % (
+                len(activation), len(self._reference_tags), "、".join(sorted(sources))))
+        elif self._reference_tags:
+            self.append_log("没有默认触发词，请从参考标签中挑选")
+        else:
+            self.append_log("未从 LoRA 元数据提取到标签（可手动填写）")
+
+        if pending and not (self.lora_tags_worker and self.lora_tags_worker.isRunning()):
+            for _name, path in pending:
+                self._online_tried.add(path)
+            worker = LoraTagsWorker(pending, self.cfg.lora.civitai_base or "https://civitai.red")
+            worker.done.connect(self._on_lora_tags_done)
+            worker.failed.connect(self._on_lora_tags_failed)
+            worker.finished.connect(self._on_lora_tags_finished)
+            self.lora_tags_worker = worker
+            self.append_log("正在访问 Civitai 查询 %d 个 LoRA 的触发词…" % len(pending))
+            worker.start()
+
+    def _on_lora_tags_done(self, results: list[tuple[str, str, dict]]) -> None:
+        for _name, path, info in results:
+            self._lora_info_cache[path] = info
+            if info["reference"]:
+                self.append_log("Civitai 返回 %d 个参考标签（%s）" % (
+                    len(info["reference"]), Path(path).name))
+            else:
+                self.append_log("Civitai 未找到触发词（%s）" % Path(path).name)
+        self._sync_character_tags()
+
+    def _on_lora_tags_failed(self, message: str) -> None:
+        self.append_log("Civitai 查询失败：%s" % message)
+
+    def _on_lora_tags_finished(self) -> None:
+        self.lora_tags_worker = None
+        self._sync_character_tags()
+
+    def open_reference_tags(self) -> None:
+        if not self._reference_tags:
+            QMessageBox.information(self, "提示", "先勾选角色 LoRA。")
+            return
+        dialog = TagReferenceDialog(self._reference_tags, self)
+        if dialog.exec():
+            selected = dialog.selected_tags()
+            combined = append_tags(self.tags_edit.toPlainText(), ", ".join(selected))
+            self.tags_edit.setPlainText(combined)
+            self.append_log("已加入 %d 个参考标签" % len(selected))
+
+    def _tag_context(self) -> str:
+        if self._current_mode() == "single":
+            return self.single_desc.toPlainText().strip() or self.single_prompt.toPlainText().strip()
+        row = self.shot_table.currentRow()
+        if row >= 0:
+            prompt = self.shot_table.item(row, 3).text() if self.shot_table.item(row, 3) else ""
+            if prompt.strip():
+                return prompt.strip()
+        return self.story_premise.toPlainText().strip()
+
+    def pick_tags_with_llm(self) -> None:
+        if self.tag_pick_worker and self.tag_pick_worker.isRunning():
+            return
+        if not self.connected or not self._llm():
+            QMessageBox.information(self, "提示", "请先连接 ComfyUI / Ollama 并选择模型。")
+            return
+        if not self._reference_tags:
+            QMessageBox.information(self, "提示", "先勾选角色 LoRA，生成参考标签。")
+            return
+        worker = TagPickWorker(
+            self.cfg, self._llm(), self._reference_tags,
+            self._tag_context(), self.tags_edit.toPlainText(),
+            required=self._combine_tags([
+                self._lora_info(path).get("identity", [])
+                for _name, path in self._checked_character_loras()
+            ]))
+        worker.done.connect(self._on_tags_picked)
+        worker.failed.connect(self._on_tags_pick_failed)
+        worker.finished.connect(self._on_tags_pick_finished)
+        self.tag_pick_worker = worker
+        self.btn_pick_tags.setEnabled(False)
+        self.append_log("模型正在从 %d 个参考标签中挑选…" % len(self._reference_tags))
+        worker.start()
+
+    def _on_tags_picked(self, tags: list[str]) -> None:
+        self.tags_edit.setPlainText(", ".join(tags))
+        self.append_log("模型已挑选 %d 个标签，已写入激活标签（生成时使用）" % len(tags))
+
+    def _on_tags_pick_failed(self, message: str) -> None:
+        self.append_log("模型挑选标签失败：%s" % message)
+        self.statusBar().showMessage("模型挑选标签失败")
+
+    def _on_tags_pick_finished(self) -> None:
+        self.tag_pick_worker = None
+        self.btn_pick_tags.setEnabled(True)
 
     def _populate_detailers(self) -> None:
         checked = {key for key, box, _spin, _choice in self.detailer_rows if box.isChecked()}
@@ -745,7 +1128,15 @@ class MainWindow(QMainWindow):
             if widget:
                 widget.deleteLater()
         self.detailer_rows.clear()
-        for choice in build_detailer_choices(self.assets.detectors):
+        detectors = self.assets.detectors or local_detectors(self.cfg.comfy.base_dir)
+        choices = build_detailer_choices(detectors)
+        if choices:
+            self.detailer_hint.setText(
+                "已扫描到 %d 个检测模型（models/ultralytics，新增文件后点重新扫描）" % len(choices))
+        else:
+            self.detailer_hint.setText(
+                "未扫描到检测模型。把 .pt 放入 ComfyUI 的 models/ultralytics/bbox 或 segm 后点重新扫描。")
+        for choice in choices:
             row = QWidget()
             layout = QHBoxLayout(row)
             layout.setContentsMargins(0, 0, 0, 0)
@@ -762,13 +1153,32 @@ class MainWindow(QMainWindow):
             self.detailer_box.addWidget(row)
             self.detailer_rows.append((choice["key"], box, spin, choice))
 
+    def refresh_assets(self) -> None:
+        if not self.connected:
+            QMessageBox.information(self, "提示", "请先连接 ComfyUI。")
+            return
+        if self.assets_worker and self.assets_worker.isRunning():
+            return
+        self.btn_scan_assets.setEnabled(False)
+        self.statusBar().showMessage("正在重新扫描模型…")
+        worker = AssetsWorker(self.cfg)
+        worker.done.connect(self._on_assets_refreshed)
+        worker.failed.connect(self._on_assets_failed)
+        worker.finished.connect(lambda: self.btn_scan_assets.setEnabled(True))
+        self.assets_worker = worker
+        worker.start()
+
+    def _on_assets_refreshed(self, assets: Assets) -> None:
+        self.assets = assets
+        self._populate_from_assets(self.ollama_models)
+        self.append_log("模型列表已刷新：检测器 %d 个" % len(assets.detectors))
+        self.statusBar().showMessage("模型列表已刷新")
+
+    def _on_assets_failed(self, message: str) -> None:
+        self.append_log("刷新模型失败：%s" % message)
+        self.statusBar().showMessage("刷新模型失败")
+
     # ---------------------------------------------------------------- template / project
-
-    def _mood_key(self) -> str:
-        return self.mood_combo.currentData() or "bright"
-
-    def _mood_text(self) -> str:
-        return MOODS.get(self._mood_key(), MOODS["bright"])[1]
 
     def _style_positive(self) -> str:
         return (self.template.get("style") or {}).get("positive", "")
@@ -776,14 +1186,11 @@ class MainWindow(QMainWindow):
     def _character_tags(self) -> str:
         return self.tags_edit.toPlainText().strip()
 
+    def _activation_tags(self) -> list[str]:
+        return [tag.strip() for tag in self.tags_edit.toPlainText().split(",") if tag.strip()]
+
     def _build_style(self) -> dict[str, Any]:
         style = copy.deepcopy(self.template.get("style") or {})
-        position, negative = resolve_mood(self._mood_key())
-        if position:
-            style["suffix"] = append_tags(style.get("suffix", ""), position)
-            style["mood"] = position
-        if negative:
-            style["negative"] = append_tags(style.get("negative", ""), negative)
         extra_pos = self.positive_extra.toPlainText().strip()
         extra_neg = self.negative_extra.toPlainText().strip()
         if extra_pos:
@@ -792,14 +1199,17 @@ class MainWindow(QMainWindow):
             style["negative"] = append_tags(style.get("negative", ""), extra_neg)
         return style
 
-    def _build_loras(self) -> list[dict[str, Any]]:
+    def _selected_loras(self, table: QTableWidget) -> list[dict[str, Any]]:
         result = []
-        for row in range(self.lora_table.rowCount()):
-            item = self.lora_table.item(row, 0)
-            spin = self.lora_table.cellWidget(row, 1)
+        for row in range(table.rowCount()):
+            item = table.item(row, 0)
+            spin = table.cellWidget(row, 1)
             if item and spin and item.checkState() == Qt.CheckState.Checked:
                 result.append({"name": item.data(Qt.ItemDataRole.UserRole), "strength": spin.value()})
         return result
+
+    def _build_loras(self) -> list[dict[str, Any]]:
+        return self._selected_loras(self.lora_table) + self._selected_loras(self.style_lora_table)
 
     def _build_detailers(self) -> list[dict[str, Any]]:
         cfg_value = float(self.cfg_spin.value())
@@ -913,10 +1323,10 @@ class MainWindow(QMainWindow):
         options = SingleOptions(
             model=self._llm(),
             framing=self.framing.currentData(),
-            mood=self._mood_text(),
             setting="",
             character_tags=self._character_tags(),
             style_positive=self._style_positive(),
+            reference_tags=self._reference_tags,
             log=self.append_log,
         )
         self._set_generation_enabled(False)
@@ -953,9 +1363,10 @@ class MainWindow(QMainWindow):
             return
         options = StoryboardOptions(
             model=self._llm(), shots=self.story_shots.value(), chunk=12,
-            mood=self._mood_text(), setting="",
+            setting="",
             character_tags=self._character_tags(),
             style_positive=self._style_positive(),
+            reference_tags=self._reference_tags,
             log=self.append_log,
         )
         self._set_generation_enabled(False)
@@ -969,27 +1380,55 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _on_story_ready(self, shots: list[dict[str, str]]) -> None:
+        locked = self._locked_rows()
         self._fill_shot_table(shots)
+        for row, shot in locked:
+            while self.shot_table.rowCount() <= row:
+                self.shot_table.insertRow(self.shot_table.rowCount())
+            self._set_shot_row(row, shot, locked=True)
         self.append_log("分镜已生成：%d 镜" % len(shots))
         self.statusBar().showMessage("分镜已生成（共 %d 镜）" % len(shots))
 
-    def _fill_shot_table(self, shots: list[dict[str, str]]) -> None:
+    def _set_shot_row(self, row: int, shot: dict[str, Any], locked: bool = False) -> None:
+        lock_item = QTableWidgetItem("")
+        lock_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+        lock_item.setCheckState(Qt.CheckState.Checked if (locked or shot.get("locked")) else Qt.CheckState.Unchecked)
+        lock_item.setToolTip("锁定后重新生成分镜时会保留此镜")
+        self.shot_table.setItem(row, 0, lock_item)
+        self.shot_table.setItem(row, 1, QTableWidgetItem(str(shot.get("id", "%02d" % (row + 1)))))
+        self.shot_table.setItem(row, 2, QTableWidgetItem(str(shot.get("name", ""))))
+        self.shot_table.setItem(row, 3, QTableWidgetItem(str(shot.get("prompt", ""))))
+
+    def _fill_shot_table(self, shots: list[dict[str, Any]]) -> None:
         self.shot_table.setRowCount(0)
         for shot in shots:
             row = self.shot_table.rowCount()
             self.shot_table.insertRow(row)
-            self.shot_table.setItem(row, 0, QTableWidgetItem(str(shot.get("id", "%02d" % (row + 1)))))
-            self.shot_table.setItem(row, 1, QTableWidgetItem(str(shot.get("name", ""))))
-            self.shot_table.setItem(row, 2, QTableWidgetItem(str(shot.get("prompt", ""))))
+            self._set_shot_row(row, shot)
+
+    def _row_data(self, row: int) -> dict[str, Any]:
+        lock_item = self.shot_table.item(row, 0)
+        return {
+            "locked": bool(lock_item and lock_item.checkState() == Qt.CheckState.Checked),
+            "id": self.shot_table.item(row, 1).text() if self.shot_table.item(row, 1) else "",
+            "name": self.shot_table.item(row, 2).text() if self.shot_table.item(row, 2) else "",
+            "prompt": self.shot_table.item(row, 3).text() if self.shot_table.item(row, 3) else "",
+        }
+
+    def _locked_rows(self) -> list[tuple[int, dict[str, Any]]]:
+        result = []
+        for row in range(self.shot_table.rowCount()):
+            data = self._row_data(row)
+            if data["locked"]:
+                result.append((row, data))
+        return result
 
     def add_shot_row(self) -> None:
         row = self.shot_table.rowCount()
         self.shot_table.insertRow(row)
-        self.shot_table.setItem(row, 0, QTableWidgetItem("%02d" % (row + 1)))
-        self.shot_table.setItem(row, 1, QTableWidgetItem("shot_%02d" % (row + 1)))
-        self.shot_table.setItem(row, 2, QTableWidgetItem(""))
+        self._set_shot_row(row, {"id": "%02d" % (row + 1), "name": "shot_%02d" % (row + 1), "prompt": ""})
         self.shot_table.selectRow(row)
-        self.shot_table.editItem(self.shot_table.item(row, 2))
+        self.shot_table.editItem(self.shot_table.item(row, 3))
 
     def remove_shot_row(self) -> None:
         rows = sorted({index.row() for index in self.shot_table.selectedIndexes()}, reverse=True)
@@ -1004,18 +1443,15 @@ class MainWindow(QMainWindow):
         target = row + delta
         if row < 0 or not (0 <= target < self.shot_table.rowCount()):
             return
-        values = [self.shot_table.item(row, col).text() if self.shot_table.item(row, col) else ""
-                  for col in range(3)]
-        other = [self.shot_table.item(target, col).text() if self.shot_table.item(target, col) else ""
-                 for col in range(3)]
-        for col in range(3):
-            self.shot_table.item(row, col).setText(other[col])
-            self.shot_table.item(target, col).setText(values[col])
+        first = self._row_data(row)
+        second = self._row_data(target)
+        self._set_shot_row(row, second, locked=second["locked"])
+        self._set_shot_row(target, first, locked=first["locked"])
         self.shot_table.selectRow(target)
 
     def _renumber_shots(self) -> None:
         for row in range(self.shot_table.rowCount()):
-            item = self.shot_table.item(row, 0)
+            item = self.shot_table.item(row, 1)
             if item:
                 item.setText("%02d" % (row + 1))
 
@@ -1034,9 +1470,10 @@ class MainWindow(QMainWindow):
         initial = [{"id": "01", "name": slugify(prompt, "single") or "single", "prompt": prompt}]
         options = StoryboardOptions(
             model=self._llm(), shots=total, chunk=12,
-            mood=self._mood_text(), setting="",
+            setting="",
             character_tags=self._character_tags(),
             style_positive=self._style_positive(),
+            reference_tags=self._reference_tags,
             log=self.append_log,
         )
         self._set_generation_enabled(False)
@@ -1075,19 +1512,19 @@ class MainWindow(QMainWindow):
             return
         self.start_render("single")
 
-    def _collect_shots(self, selected_only: bool) -> list[dict[str, str]]:
+    def _collect_shots(self, selected_only: bool) -> list[dict[str, Any]]:
         rows = sorted({index.row() for index in self.shot_table.selectedIndexes()}) \
             if selected_only else list(range(self.shot_table.rowCount()))
         shots = []
         for row in rows:
-            prompt = (self.shot_table.item(row, 2).text() if self.shot_table.item(row, 2) else "").strip()
+            data = self._row_data(row)
+            prompt = data["prompt"].strip()
             if not prompt:
                 continue
-            shot_id = (self.shot_table.item(row, 0).text().strip() if self.shot_table.item(row, 0) else "")
-            name = (self.shot_table.item(row, 1).text().strip() if self.shot_table.item(row, 1) else "")
-            shots.append({"id": shot_id or "%02d" % (len(shots) + 1),
-                          "name": name or "shot_%02d" % (len(shots) + 1),
-                          "prompt": prompt})
+            shots.append({"id": data["id"].strip() or "%02d" % (len(shots) + 1),
+                          "name": data["name"].strip() or "shot_%02d" % (len(shots) + 1),
+                          "prompt": prompt,
+                          "locked": data["locked"]})
         return shots
 
     def start_render(self, mode: str) -> None:
@@ -1110,9 +1547,15 @@ class MainWindow(QMainWindow):
                 return
             text = self.story_premise.toPlainText().strip() or shots[0]["prompt"]
 
-        self.project = self._build_project(mode, shots, text)
+        project = self._build_project(mode, shots, text)
+        self._reuse_project_identity(project)
+        self.project = project
         save_project(self.project, self.cfg.root)
         self.append_log("项目已保存：%s" % self.project["id"])
+        char_tags = (self.project.get("character") or {}).get("tags", "")
+        if char_tags:
+            self.append_log("本次生成携带角色标签 %d 个：%s" % (
+                len([tag for tag in char_tags.split(",") if tag.strip()]), char_tags[:240]))
         settings = self.project["settings"]
         tasks = build_tasks(self.project, shots, int(self.project["variants"]),
                             settings.get("seed_mode", "increment"), int(settings.get("base_seed", 1)))
@@ -1275,6 +1718,7 @@ class MainWindow(QMainWindow):
             local = cache / (task.label + ".png")
             local.write_bytes(data)
         item.setData(Qt.ItemDataRole.UserRole, str(local))
+        item.setData(Qt.ItemDataRole.UserRole + 1, task.id)
         self.gallery.addItem(item)
 
     def _open_gallery_item(self, item: QListWidgetItem) -> None:
@@ -1284,6 +1728,453 @@ class MainWindow(QMainWindow):
             os.startfile(path)  # noqa: S606
         else:
             QMessageBox.information(self, "提示", "找不到图片文件。")
+
+    # ---------------------------------------------------------------- M2: project / trash / compare
+
+    def _current_mode(self) -> str:
+        return "single" if self.left_stack.currentIndex() == 0 else "story"
+
+    def _current_text(self) -> str:
+        if self._current_mode() == "single":
+            return self.single_desc.toPlainText().strip() or self.single_prompt.toPlainText().strip()
+        return self.story_premise.toPlainText().strip()
+
+    def _reuse_project_identity(self, project: dict[str, Any]) -> None:
+        if self.project and self.project.get("id") and self.project.get("mode") == project.get("mode"):
+            project["id"] = self.project["id"]
+            project["created"] = self.project.get("created", project.get("created"))
+            project["outputs"] = list(self.project.get("outputs") or [])
+
+    def _save_current_project(self) -> dict[str, Any] | None:
+        mode = self._current_mode()
+        text = self._current_text()
+        if mode == "single":
+            prompt = self.single_prompt.toPlainText().strip()
+            shots = [{"id": "01", "name": slugify(prompt, "single") or "single", "prompt": prompt}] if prompt else []
+        else:
+            shots = self._collect_shots(False)
+        if not text and not shots:
+            QMessageBox.information(self, "提示", "没有可保存的内容。")
+            return None
+        project = self._build_project(mode, shots, text or "untitled")
+        self._reuse_project_identity(project)
+        self.project = project
+        path = save_project(project, self.cfg.root)
+        self.append_log("项目已保存：%s" % path)
+        self.statusBar().showMessage("项目已保存")
+        return project
+
+    def save_project_clicked(self) -> None:
+        self._save_current_project()
+
+    def new_project_clicked(self) -> None:
+        if self.render_worker and self.render_worker.isRunning():
+            QMessageBox.information(self, "提示", "还有任务在生成，请先等待或取消。")
+            return
+        if self.shot_table.rowCount() or self.single_prompt.toPlainText().strip():
+            answer = QMessageBox.question(self, "新建项目", "清空当前内容并新建项目？")
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self.project = None
+        self.single_desc.clear()
+        self.single_prompt.clear()
+        self.story_premise.clear()
+        self.output_name.clear()
+        self.shot_table.setRowCount(0)
+        self.queue_table.setRowCount(0)
+        self.gallery.clear()
+        self.previews.clear()
+        self.final_bytes.clear()
+        self.tasks_by_id.clear()
+        self.task_rows.clear()
+        self.row_task_ids.clear()
+        self.current_task_id = None
+        self.preview_label.setPixmap(QPixmap())
+        self.preview_label.setText("生成时在这里显示实时预览")
+        self.preview_info.setText("等待生成")
+        self.progress.setValue(0)
+        self._switch_mode(0)
+        self.btn_mode_single.setChecked(True)
+        self.btn_mode_story.setChecked(False)
+        self.append_log("已新建项目")
+        self.statusBar().showMessage("新建项目")
+
+    def open_project_clicked(self) -> None:
+        if self.render_worker and self.render_worker.isRunning():
+            QMessageBox.information(self, "提示", "还有任务在生成，请先等待或取消。")
+            return
+        projects = list_projects(self.cfg.root)
+        if not projects:
+            QMessageBox.information(self, "提示", "还没有保存过项目。")
+            return
+        dialog = ProjectDialog(projects, self.cfg.root, self)
+        if dialog.exec() and dialog.selected_path:
+            self._apply_project(load_project(dialog.selected_path))
+
+    def _ensure_combo_value(self, combo: SearchComboBox, value: str) -> None:
+        if not value:
+            return
+        if combo.findData(value) < 0:
+            items = [(combo.itemText(i), combo.itemData(i)) for i in range(combo.count())]
+            items.append((value, value))
+            combo.setItems(items)
+        combo.selectValue(value)
+
+    def _append_lora_row(self, table: QTableWidget, name: str, strength: float,
+                         checked: bool) -> None:
+        row = table.rowCount()
+        table.insertRow(row)
+        item = QTableWidgetItem(Path(name).name)
+        item.setData(Qt.ItemDataRole.UserRole, name)
+        item.setToolTip(name)
+        item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+        item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+        table.setItem(row, 0, item)
+        spin = QDoubleSpinBox()
+        spin.setRange(0, 2)
+        spin.setSingleStep(0.05)
+        spin.setValue(float(strength))
+        table.setCellWidget(row, 1, spin)
+
+    def _apply_table_loras(self, table: QTableWidget, desired: dict[str, float]) -> None:
+        table.blockSignals(True)
+        try:
+            existing = {table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+                        for row in range(table.rowCount()) if table.item(row, 0)}
+            for name, strength in desired.items():
+                if name not in existing:
+                    self._append_lora_row(table, name, strength, True)
+            for row in range(table.rowCount()):
+                item = table.item(row, 0)
+                spin = table.cellWidget(row, 1)
+                if not item or not spin:
+                    continue
+                name = item.data(Qt.ItemDataRole.UserRole)
+                item.setCheckState(Qt.CheckState.Checked if name in desired else Qt.CheckState.Unchecked)
+                if name in desired:
+                    spin.setValue(desired[name])
+        finally:
+            table.blockSignals(False)
+
+    def _apply_loras(self, loras: list[dict[str, Any]]) -> None:
+        desired = {item["name"]: float(item.get("strength", 0.9)) for item in loras if item.get("name")}
+        character: dict[str, float] = {}
+        styles: dict[str, float] = {}
+        for name, strength in desired.items():
+            if name in self._style_lora_names:
+                styles[name] = strength
+            elif name in self._character_lora_names:
+                character[name] = strength
+            elif is_style_lora(name):
+                styles[name] = strength
+            else:
+                character[name] = strength
+        self._apply_table_loras(self.lora_table, character)
+        self._apply_table_loras(self.style_lora_table, styles)
+
+    def _apply_project(self, project: dict[str, Any]) -> None:
+        self.project = project
+        mode = project.get("mode", "story")
+        if mode == "single":
+            self.btn_mode_single.setChecked(True)
+            self.btn_mode_story.setChecked(False)
+            self._switch_mode(0)
+        else:
+            self.btn_mode_story.setChecked(True)
+            self.btn_mode_single.setChecked(False)
+            self._switch_mode(1)
+
+        premise = project.get("premise", "")
+        self.single_desc.setPlainText(premise)
+        self.story_premise.setPlainText(premise)
+        shots = project.get("shots") or []
+        self._fill_shot_table(shots)
+        if mode == "single" and shots:
+            self.single_prompt.setPlainText(shots[0].get("prompt", ""))
+        else:
+            self.single_prompt.clear()
+
+        s = project.get("settings") or {}
+        self.width_spin.setValue(int(s.get("width", 1024)))
+        self.height_spin.setValue(int(s.get("height", 1344)))
+        index = self.res_combo.findData((self.width_spin.value(), self.height_spin.value()))
+        self.res_combo.setCurrentIndex(index if index >= 0 else self.res_combo.count() - 1)
+        self.steps_spin.setValue(int(s.get("steps", 30)))
+        self.cfg_spin.setValue(float(s.get("cfg", 5.0)))
+        self._ensure_combo_value(self.sampler_combo, s.get("sampler", "euler_ancestral"))
+        self._ensure_combo_value(self.scheduler_combo, s.get("scheduler", "normal"))
+        mode_index = self.seed_mode.findData(s.get("seed_mode", "increment"))
+        if mode_index >= 0:
+            self.seed_mode.setCurrentIndex(mode_index)
+        self.seed_spin.setValue(int(s.get("base_seed", 1)))
+        self.variants_spin.setValue(int(project.get("variants") or 1))
+        self.clip_skip.setValue(int(project.get("clip_skip", -2)))
+
+        hires = s.get("hires") or {}
+        self.hires_check.setChecked(bool(hires.get("enabled", True)))
+        self.hires_scale.setValue(float(hires.get("scale", 1.5)))
+        self.hires_denoise.setValue(float(hires.get("denoise", 0.4)))
+        self.hires_steps.setValue(int(hires.get("steps", 20)))
+        self._ensure_combo_value(self.upscaler_combo, hires.get("upscale_model", ""))
+
+        self._ensure_combo_value(self.ckpt_combo, project.get("model", ""))
+        loras = project.get("loras") or ([project["lora"]] if project.get("lora") else [])
+        self._apply_loras(loras)
+
+        character = project.get("character") or {}
+        self.tags_edit.setPlainText(character.get("tags", ""))
+        ip = character.get("ipadapter") or {}
+        if character.get("use_ipadapter") and ip.get("reference"):
+            self.char_ref.setText(str(ip["reference"]).replace("/", "\\"))
+            self.char_ref_weight.setValue(float(ip.get("weight", 0.6)))
+        else:
+            self.char_ref.clear()
+            self.char_ref_weight.setValue(0.6)
+        style_ref = project.get("style_ref") or {}
+        self.style_ref_check.setChecked(bool(style_ref.get("enabled")))
+        self.style_ref_edit.setText(str(style_ref.get("image", "")).replace("/", "\\") if style_ref.get("image") else "")
+        self.style_ref_weight.setValue(float(style_ref.get("weight", 0.8)))
+
+        detailer_models = {item.get("model"): item for item in (project.get("detailers") or [])}
+        for _key, box, spin, choice in self.detailer_rows:
+            match = detailer_models.get(choice["detector"])
+            box.setChecked(match is not None)
+            if match is not None:
+                spin.setValue(float(match.get("denoise", choice["denoise"])))
+        wildcards = project.get("wildcards") or {}
+        self.wildcard_check.setChecked(bool(wildcards.get("enabled")))
+        self.wildcard_dir.setText(str(wildcards.get("dir", "")))
+        self.output_name.setText(project.get("name", ""))
+
+        self.gallery.clear()
+        self.previews.clear()
+        self.final_bytes.clear()
+        self.tasks_by_id.clear()
+        self.task_rows.clear()
+        self.row_task_ids.clear()
+        self.queue_table.setRowCount(0)
+        self.current_task_id = None
+        self.preview_label.setPixmap(QPixmap())
+        self.preview_label.setText("生成时在这里显示实时预览")
+        self.preview_info.setText("已打开项目：%s" % project.get("name", ""))
+        self.progress.setValue(0)
+        self.append_log("已打开项目：%s（%s）" % (project.get("name"), project.get("id")))
+        self.statusBar().showMessage("已打开项目：%s" % project.get("name", ""))
+        self._refresh_reference_tags()
+
+    def open_trash(self) -> None:
+        if not self.project:
+            QMessageBox.information(self, "提示", "先保存或打开一个项目。")
+            return
+        TrashDialog(self.cfg.root, self.project["id"], self).exec()
+
+    def _gallery_menu(self, pos) -> None:
+        item = self.gallery.itemAt(pos)
+        if item is None:
+            return
+        self.gallery.setCurrentItem(item)
+        menu = QMenu(self)
+        act_open = menu.addAction("打开文件")
+        act_trash = menu.addAction("移到回收站")
+        chosen = menu.exec(self.gallery.viewport().mapToGlobal(pos))
+        if chosen is act_open:
+            self._open_gallery_item(item)
+        elif chosen is act_trash:
+            self._trash_gallery_item(item)
+
+    def _remove_project_output(self, path: str | Path) -> None:
+        if not self.project:
+            return
+        name = Path(str(path).replace("\\", "/")).name
+        outputs = self.project.get("outputs") or []
+        self.project["outputs"] = [o for o in outputs if Path(str(o).replace("\\", "/")).name != name]
+        save_project(self.project, self.cfg.root)
+
+    def _trash_gallery_item(self, item: QListWidgetItem) -> None:
+        if not self.project:
+            QMessageBox.information(self, "提示", "先保存或打开一个项目。")
+            return
+        path = item.data(Qt.ItemDataRole.UserRole)
+        if not path or not Path(path).is_file():
+            QMessageBox.information(self, "提示", "找不到图片文件。")
+            return
+        try:
+            dest = move_to_trash(path, self.project["id"], self.cfg.root)
+        except Exception as exc:
+            QMessageBox.warning(self, "移动失败", str(exc))
+            return
+        self._remove_project_output(path)
+        task_id = item.data(Qt.ItemDataRole.UserRole + 1)
+        if task_id:
+            task = self.tasks_by_id.get(task_id)
+            if task:
+                task.state = "discarded"
+            self.final_bytes.pop(task_id, None)
+            self.previews.pop(task_id, None)
+            row = self.task_rows.get(task_id)
+            if row is not None:
+                self.queue_table.item(row, 1).setText("已丢弃")
+        self.gallery.takeItem(self.gallery.row(item))
+        self.append_log("已移入回收站：%s" % dest.name)
+
+    def _remove_gallery_task(self, task_id: str) -> None:
+        for index in range(self.gallery.count() - 1, -1, -1):
+            item = self.gallery.item(index)
+            if item.data(Qt.ItemDataRole.UserRole + 1) == task_id:
+                self.gallery.takeItem(index)
+
+    def _discard_entry(self, entry: dict[str, Any]) -> None:
+        path = entry.get("path") or ""
+        if path and Path(path).is_file() and self.project:
+            try:
+                move_to_trash(path, self.project["id"], self.cfg.root)
+            except Exception as exc:
+                self.append_log("丢弃失败：%s" % exc)
+                return
+            self._remove_project_output(path)
+        task = self.tasks_by_id.get(entry["id"])
+        if task:
+            task.state = "discarded"
+            row = self.task_rows.get(task.id)
+            if row is not None:
+                self.queue_table.item(row, 1).setText("已丢弃")
+        self._remove_gallery_task(entry["id"])
+        self.final_bytes.pop(entry["id"], None)
+        self.previews.pop(entry["id"], None)
+        self.append_log("已丢弃变体：%s" % entry.get("label"))
+
+    def compare_variants(self) -> None:
+        row = self.queue_table.currentRow()
+        task_id = self.row_task_ids.get(row)
+        task = self.tasks_by_id.get(task_id) if task_id else None
+        if task is None:
+            QMessageBox.information(self, "提示", "先在队列里选中一个已完成的图。")
+            return
+        group = [t for t in self.tasks_by_id.values()
+                 if t.shot_id == task.shot_id and t.state == "done" and t.image]
+        if len(group) < 2:
+            QMessageBox.information(self, "提示", "这个镜头没有多个已完成的变体。")
+            return
+        entries = []
+        for variant in group:
+            data = self.final_bytes.get(variant.id)
+            local = None
+            if data is None:
+                try:
+                    data, local = self._fetch_image(variant.image)
+                except Exception as exc:
+                    self.append_log("读取变体失败：%s" % exc)
+                    continue
+            if data:
+                entries.append({"id": variant.id, "label": variant.label,
+                                "data": data, "path": str(local) if local else ""})
+        if len(entries) < 2:
+            QMessageBox.information(self, "提示", "可对比的变体不足。")
+            return
+        dialog = CompareDialog(task.label, entries, self)
+        if dialog.exec():
+            for entry in dialog.discarded():
+                self._discard_entry(entry)
+
+    def _queue_menu(self, pos) -> None:
+        row = self.queue_table.rowAt(pos.y())
+        if row < 0:
+            return
+        self.queue_table.selectRow(row)
+        menu = QMenu(self)
+        act_same = menu.addAction("重试（同 seed）")
+        act_new = menu.addAction("重试（换 seed）")
+        act_compare = menu.addAction("变体对比")
+        chosen = menu.exec(self.queue_table.viewport().mapToGlobal(pos))
+        if chosen is act_same:
+            self._retry_task(False)
+        elif chosen is act_new:
+            self._retry_task(True)
+        elif chosen is act_compare:
+            self.compare_variants()
+
+    def _retry_task(self, new_seed: bool) -> None:
+        if self.render_worker and self.render_worker.isRunning():
+            QMessageBox.information(self, "提示", "还有任务在生成，请先等待或取消。")
+            return
+        if not self.project:
+            QMessageBox.information(self, "提示", "没有可重试的项目。")
+            return
+        row = self.queue_table.currentRow()
+        old_id = self.row_task_ids.get(row)
+        old = self.tasks_by_id.get(old_id) if old_id else None
+        if old is None:
+            return
+        seed = random.randint(0, 2 ** 31 - 1) if new_seed else old.seed
+        task = Task(shot_id=old.shot_id, shot_name=old.shot_name, variant=old.variant,
+                    seed=seed, shot=old.shot, label=old.label)
+        self.tasks_by_id[task.id] = task
+        self.task_rows[task.id] = row
+        self.row_task_ids[row] = task.id
+        self.current_task_id = task.id
+        for col, text in ((0, task.label), (1, "等待"), (2, ""), (3, ""), (4, str(seed))):
+            self.queue_table.item(row, col).setText(text)
+        self.queue_table.item(row, 0).setIcon(QIcon())
+        self.progress.setValue(0)
+        hires = bool((self.project.get("settings") or {}).get("hires", {}).get("enabled", True))
+        worker = RenderWorker(self.cfg, self.project, [task], hires)
+        worker.task_updated.connect(self._on_task_update)
+        worker.preview.connect(self._on_preview)
+        worker.log.connect(self.append_log)
+        worker.finished_ok.connect(self._on_render_finished)
+        worker.failed.connect(self._on_render_failed)
+        worker.finished.connect(lambda: self._set_generation_enabled(True))
+        self.render_worker = worker
+        self._set_generation_enabled(False)
+        self.btn_cancel.setEnabled(True)
+        self.append_log("重试：%s（seed %d）" % (task.label, seed))
+        self.statusBar().showMessage("正在重试 %s…" % task.label)
+        worker.start()
+
+    def rewrite_selected_shot(self) -> None:
+        row = self.shot_table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "提示", "先在分镜表里选中一行。")
+            return
+        data = self._row_data(row)
+        if data["locked"]:
+            QMessageBox.information(self, "提示", "该镜头已锁定，先取消锁定再改写。")
+            return
+        if not data["prompt"].strip():
+            QMessageBox.information(self, "提示", "该镜头没有提示词。")
+            return
+        if not self.connected or not self._llm():
+            QMessageBox.information(self, "提示", "请先连接 ComfyUI / Ollama 并选择模型。")
+            return
+        instruction, ok = QInputDialog.getText(
+            self, "改写镜头", "改写要求（例：半身、回头看镜头、黄昏逆光）")
+        if not ok or not instruction.strip():
+            return
+        worker = PromptWorker(
+            self.cfg, "rewrite", self.story_premise.toPlainText(),
+            model=self._llm(),
+            current_prompt=data["prompt"],
+            instruction=instruction.strip(),
+            character_tags=self._character_tags(),
+            style_positive=self._style_positive(),
+            reference_tags=self._reference_tags)
+        self._rewrite_row = row
+        worker.rewritten.connect(self._on_rewritten)
+        worker.failed.connect(self._on_prompt_failed)
+        worker.log.connect(self.append_log)
+        worker.finished.connect(self._on_prompt_worker_finished)
+        self.prompt_worker = worker
+        self._set_generation_enabled(False)
+        self.statusBar().showMessage("Ollama 模型正在改写镜头…")
+        worker.start()
+
+    def _on_rewritten(self, prompt: str) -> None:
+        row = self._rewrite_row
+        self._rewrite_row = None
+        if row is not None and 0 <= row < self.shot_table.rowCount():
+            self.shot_table.item(row, 3).setText(prompt)
+        self.append_log("镜头已改写：%s" % prompt)
+        self.statusBar().showMessage("镜头已改写")
 
     def _on_queue_selected(self, row: int, _col: int, _prev_row: int, _prev_col: int) -> None:
         task_id = self.row_task_ids.get(row)
@@ -1333,7 +2224,7 @@ class MainWindow(QMainWindow):
 
     def _set_generation_enabled(self, enabled: bool) -> None:
         for widget in (self.btn_single_prompt, self.btn_single_render, self.btn_story_prompt,
-                       self.btn_story_render, self.tabs):
+                       self.btn_story_render, self.btn_rewrite_shot, self.tabs):
             widget.setEnabled(enabled)
         self.btn_single_render.setEnabled(enabled)
         self.btn_story_render.setEnabled(enabled)
@@ -1375,6 +2266,8 @@ class MainWindow(QMainWindow):
         self.cfg.ensure_dirs()
         self.template_path = resolve_template(self.cfg)
         self.template = load_template(self.cfg)
+        self._lora_info_cache.clear()
+        self._online_tried.clear()
         self.comfy_service = ComfyService(self.cfg)
         self._init_defaults()
         answer = QMessageBox.question(

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from comfyui_generator.core.ollama import OllamaClient
+from comfyui_generator.core.tags import limit_tags
 
 SHOT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -43,22 +44,21 @@ BEATS_SCHEMA: dict[str, Any] = {
 }
 
 SYSTEM_PROMPT = (
-    "You are an anime storyboard artist. You turn a one-line premise into a continuous sequence of "
-    "shots for a text-to-image model (SDXL / Illustrious, Danbooru tags).\n"
-    "Rules:\n"
+    "You are a professional NSFW anime storyboard prompt engineer.\n"
+    "Task: Generate a multi-panel continuous English prompt in Danbooru style based on the plot given by the user.\n"
+    "The following rules must be adhered to, otherwise it will be considered a failure:\n"
     "1. Output ONLY JSON matching the schema, no prose, no markdown.\n"
-    "2. Each `prompt` is comma-separated ENGLISH Danbooru tags, 8-20 tags, no sentences.\n"
-    "3. Start with shot size (wide shot / medium shot / close-up / full body), then camera angle "
+    "2. Each `prompt` is comma-separated ENGLISH Danbooru tags (up to 200), no sentences.\n"
+    "3. The appearance description of the character must remain completely consistent across all grids, with no changes to hair color, eye color, body type, etc.\n"
+    "4. The clothing/nudity, posture, movements, expressions, and camera angles must progress and change with the plot, maintaining logical coherence.\n"
+    "5. If it is an NSFW scene, it must include accurate NSFW tags (nude, pussy, masturbation, spread legs, etc.), and it is prohibited to avoid, weaken, blur or replace with vague words.\n"
+    "6. The beginning must be preceded by: masterpiece, best quality, absurdres, newest."
+    "7. Start with shot size (wide shot / medium shot / close-up / full body), then camera angle "
     "(from behind, from side, from above, dutch angle...), then pose/action, expression, location, "
-    "time of day, weather, lighting, mood.\n"
-    "4. Do NOT write quality or rating tags (masterpiece, best quality, safe, nsfw...).\n"
-    "5. Do NOT write character appearance tags (hair, eyes, clothes) - they are injected separately.\n"
-    "6. `name` is ascii snake_case, `id` is a two-digit string like \"01\".\n"
-    "7. Shots must form ONE continuous arc (establishing -> development -> climax -> ending) with "
-    "consistent location and continuity, and vary shot sizes like a manga page.\n"
-    "8. DEFAULT MOOD: bright, cheerful and well lit. Use daytime, sunny, clear sky, vivid colors, "
-    "cheerful atmosphere, and keep the character clearly visible. Do NOT write night, rain, dark or "
-    "gloomy scenes unless the premise explicitly requires them."
+    "time of day, weather, lighting.\n"
+    "8. `name` is ascii snake_case, `id` is a two-digit string like \"01\".\n"
+    "9. Shots must form ONE continuous arc (establishing -> development -> climax -> ending) with "
+    "consistent location and continuity, and vary shot sizes like a manga page."
 )
 
 
@@ -94,7 +94,8 @@ def normalize(raw: dict[str, Any] | list[Any], wanted: int, fallback_prefix: str
             name = "%s_%d" % (base, counter)
             counter += 1
         used.add(name.lower())
-        shots.append({"id": "%02d" % (start + len(shots)), "name": name, "prompt": prompt})
+        shots.append({"id": "%02d" % (start + len(shots)), "name": name,
+                      "prompt": limit_tags(prompt)})
     if not shots:
         raise ValueError("Model returned no usable shots.")
     return shots
@@ -109,17 +110,18 @@ class StoryboardOptions:
     num_predict: int = 0
     num_ctx: int = 0
     keep_alive: str = "5m"
-    mood: str = ""
     setting: str = ""
     character_tags: str = ""
     style_positive: str = ""
+    reference_tags: list[str] = field(default_factory=list)
     log: Callable[[str], None] = field(default=lambda _msg: None)
 
 
 def build_messages(premise: str, shots: int, character_tags: str, style_positive: str,
-                   setting: str, mood: str, prior: list[dict[str, str]],
+                   setting: str, prior: list[dict[str, str]],
                    total: int | None = None,
-                   beats: list[str] | None = None) -> list[dict[str, str]]:
+                   beats: list[str] | None = None,
+                   reference_tags: list[str] | None = None) -> list[dict[str, str]]:
     user = [
         "Premise: %s" % premise,
         "Number of shots to write now: %d%s" % (
@@ -128,9 +130,11 @@ def build_messages(premise: str, shots: int, character_tags: str, style_positive
         "Visual style: %s" % (style_positive or ""),
     ]
     if setting.strip():
-        user.append("Setting / mood direction: %s" % setting.strip())
-    if mood:
-        user.append("Preferred atmosphere and lighting (follow this): %s" % mood)
+        user.append("Setting / art direction: %s" % setting.strip())
+    if reference_tags:
+        user.append(
+            "REFERENCE TAGS (complete supported vocabulary; select only the few tags that fit "
+            "this shot, never echo the list): %s" % ", ".join(reference_tags))
     if beats:
         user.append("Follow these story beats IN ORDER, exactly one shot per beat:\n" +
                     "\n".join("%d. %s" % (len(prior) + index + 1, beat)
@@ -151,14 +155,13 @@ def build_messages(premise: str, shots: int, character_tags: str, style_positive
 
 
 def _plan_beats(client: OllamaClient, model: str, premise: str, shots: int,
-                character_tags: str, mood: str) -> list[str]:
+                character_tags: str) -> list[str]:
     messages = [
         {"role": "system", "content":
          "You are a screenwriter. Break a premise into exactly %d ordered story beats. "
          "Each beat is ONE short English sentence describing what happens in one illustration. "
          "Beats must form a continuous arc with no repeated action. Output JSON only." % shots},
-        {"role": "user", "content": "Premise: %s\nCharacter: %s\nPreferred mood: %s" %
-         (premise, character_tags, mood or "bright and cheerful")},
+        {"role": "user", "content": "Premise: %s\nCharacter: %s" % (premise, character_tags)},
     ]
     raw = client.chat_json(
         model, messages, schema=BEATS_SCHEMA,
@@ -195,7 +198,7 @@ def generate_storyboard(client: OllamaClient, premise: str,
     if shots > chunk and not initial:
         log("Planning %d story beats ..." % shots)
         beats = _plan_beats(client, options.model, premise, shots,
-                            options.character_tags, options.mood)
+                            options.character_tags)
 
     tries = 0
     max_tries = (shots // chunk) + 4
@@ -204,9 +207,11 @@ def generate_storyboard(client: OllamaClient, premise: str,
         beat_slice = beats[len(result):len(result) + need] if beats else None
         messages = build_messages(
             premise, need, options.character_tags, options.style_positive,
-            options.setting, options.mood, result, shots, beat_slice)
+            options.setting, result, shots, beat_slice,
+            options.reference_tags)
         num_predict = options.num_predict or min(16384, 400 + 220 * need)
-        num_ctx = options.num_ctx or min(16384, 4096 + 80 * len(result))
+        num_ctx = options.num_ctx or min(
+            32768, 4096 + 80 * len(result) + 10 * len(options.reference_tags))
         raw = client.chat_json(
             options.model, messages, schema=SHOT_SCHEMA,
             temperature=options.temperature,

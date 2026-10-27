@@ -56,7 +56,6 @@ src/comfyui_generator/
 │  ├─ services.py        # ComfyUI/Ollama 进程托管、健康检查、重启
 │  ├─ assets.py          # /object_info 资源列表（兼容 0.4x COMBO 格式）
 │  ├─ detailers.py       # 脸部/眼睛/嘴/表情/手 预设与回退
-│  ├─ moods.py           # 明亮/温馨/户外/动感/不限制
 │  ├─ project.py         # 项目、profile、trash
 │  └─ config.py
 ├─ cli.py                # CLI（story / image / expand / run / doctor）
@@ -77,7 +76,7 @@ UI（M1）只订阅 core 事件：任务更新、预览帧、完成、错误；�
 顶部：单图 / 连续剧情 | ComfyUI、Ollama 状态 | 重新连接 / 重启 / 设置 / 输出目录
 左侧：单图（描述→提示词→出图）；剧情（剧情→分镜表→出图）
 中间：实时预览 + 阶段/步数/seed + 进度 + 取消
-右侧：模型 / 角色 / 画面 / 高清 / 重绘 / 提示词 / 参考图
+右侧：模型 / 角色 / 风格 / 画面 / 高清 / 重绘 / 提示词 / 参考图
 底部：队列（每任务缩略图）/ 日志 / 画廊（双击打开）
 ```
 
@@ -86,8 +85,25 @@ UI（M1）只订阅 core 事件：任务更新、预览帧、完成、错误；�
 - 分镜表可编辑镜号/名称/提示词，支持增删、上下移动、只生成选中行
 - 单图完成后可“扩写成分镜”，自动切换到剧情模式并保留第 1 镜
 - 渲染期间冻结参数面板；取消会中断当前 ComfyUI 任务
-- 所有下拉（模型、底模、采样器、调度器、分辨率、氛围、构图、放大模型、语言等）均可输入搜索，只能从扫描结果中选择
+- 所有下拉（模型、底模、采样器、调度器、分辨率、构图、放大模型、语言等）均可输入搜索，只能从扫描结果中选择
 - 点击下拉即展开完整列表并全选当前文字，直接输入过滤，无需先删除原内容
+- 右侧工具标签使用自动换行布局，宽度不够时换到下一行，不使用左右滚动箭头
+- 重绘 pass 不写死：从 ComfyUI `/object_info` 或 `models/ultralytics` 动态扫描，所有检测模型都可勾选；支持手动重新扫描
+- 勾选角色 LoRA：默认生成少量激活标签（触发词/标题；没有则取前 12 个，不做内容过滤）；safetensors 全部标签进入「参考标签」，可搜索勾选加入
+- 「让模型挑选」：从参考列表中按场景需要选择（最多 200 个，强制子集校验），不做内容过滤，显示标签数与估算 tokens
+- 自然语言转提示词（单图/分镜/单镜改写）把完整参考表交给模型挑选；每个 prompt 最多 200 个标签并去重，避免整表复读
+- 无内置元数据时：可从 LoRA 伴随文件 / 链接中解析模型 ID，访问 `civitai.red`（可配置）查询作者推荐触发词；优先 API，再解析页面 `__NEXT_DATA__` / Trigger Words；设置中可关闭
+- 角色 / 风格 LoRA 分页：文件名含 style / screencap / hrf / aesthetic 等自动归入「风格」，风格 LoRA 不参与角色标签
+- LoRA 数据源可配置：设置里分别指定角色 / 风格目录（递归扫描 `.safetensors/.pt/.ckpt`）；留空则用 ComfyUI LoRA 列表按文件名分类。自定义目录需在 ComfyUI 的 LoRA 搜索路径内，否则界面会提示未索引
+
+### M2 交互
+
+- 文件菜单：新建 / 打开 / 保存项目（Ctrl+S）；渲染时自动保存
+- 画廊右键：移入项目回收站；工具菜单回收站支持还原 / 永久删除 / 清空
+- 变体对比：队列右键或工具菜单，取消勾选的变体会移入回收站
+- 失败重试：队列右键「同 seed / 换 seed」，只重跑该任务
+- 单镜改写：选中分镜 → 输入要求 → 模型只重写该镜提示词
+- 镜头锁定：分镜表第一列；重新生成分镜时按位置保留锁定行
 
 ---
 
@@ -144,7 +160,8 @@ Task 状态：`pending → submitted → running(stage) → done | failed | canc
     "auto_start": true, "keep_running_on_exit": false
   },
   "ollama": { "host": "127.0.0.1", "port": 11434, "exe": "...", "default_model": "..." },
-  "generation": { "template": "...", "mood": "bright", "variants": 1 },
+  "generation": { "template": "...", "variants": 1 },
+  "lora": { "character_dir": "", "style_dir": "", "online_lookup": true, "civitai_base": "https://civitai.red" },
   "ui": { "language": "zh-CN" }
 }
 ```
@@ -158,7 +175,7 @@ cui doctor
 cui image "晴天，仪玄在公园长椅上吃冰淇淋" --plan-only
 cui image "..." --no-hires --variants 2 --save-previews data\previews
 cui image "..." --expand 4          # 单图 → 直接扩成 4 镜并渲染
-cui story "晴天，少女和猫在天台晒太阳" --shots 6 --mood bright
+cui story "晴天，少女和猫在天台晒太阳" --shots 6
 cui expand <single-project.json> --shots 5
 cui run <project.json> --shots 02,03 --variants 2
 ```
@@ -171,9 +188,9 @@ cui run <project.json> --shots 02,03 --variants 2
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| M0 | core 包、进程托管、预览解析、CLI、单图/分镜/扩展、43 单测 | ✅ 完成 |
+| M0 | core 包、进程托管、预览解析、CLI、单图/分镜/扩展、72 单测 | ✅ 完成 |
 | M1 | PySide6 UI：模式切换、分镜编辑、独立预览缩略图、参数面板、画廊、队列 | ✅ 第一版 |
-| M2 | 参考图/重绘/变体对比/项目保存/回收站/错误恢复/P1 小功能 | 4–6 天 |
+| M2 | 项目打开保存、回收站、变体对比、失败重试、单镜改写、镜头锁定 | ✅ 第一版 |
 | M3 | 首次启动向导、中英双语、CI 打包、安装器、README/截图 | 3–5 天 |
 
 验收（M1）：

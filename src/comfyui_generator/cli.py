@@ -16,9 +16,8 @@ from comfyui_generator.core.comfy import ComfyClient
 from comfyui_generator.core.config import (
     AppConfig, default_config_path, load_config, load_template, resolve_template, save_config,
 )
-from comfyui_generator.core.detailers import resolve_detailers
+from comfyui_generator.core.detailers import local_detectors, resolve_detailers
 from comfyui_generator.core.jobs import TaskRunner, build_tasks
-from comfyui_generator.core.moods import resolve_mood
 from comfyui_generator.core.ollama import OllamaClient, OllamaError
 from comfyui_generator.core.preview import PreviewFrame
 from comfyui_generator.core.project import (
@@ -111,7 +110,7 @@ def _apply_overrides(data: dict[str, Any], cfg: AppConfig, args: argparse.Namesp
 
     if getattr(args, "detailers", None) is not None:
         detectors = Assets().detectors
-        resolved = resolve_detailers(args.detailers, detectors)
+        resolved = resolve_detailers(args.detailers, detectors or local_detectors(cfg.comfy.base_dir))
         data["detailers"] = [{
             "model": item["detector"],
             "prompt": item.get("prompt", ""),
@@ -128,13 +127,7 @@ def _apply_overrides(data: dict[str, Any], cfg: AppConfig, args: argparse.Namesp
     elif data.get("wildcards") is None:
         data["wildcards"] = {"enabled": False, "dir": ""}
 
-    mood_pos, mood_neg = resolve_mood(getattr(args, "mood", None) or generation.mood)
     style = data.setdefault("style", {})
-    if mood_pos:
-        style["suffix"] = _append_tags(style.get("suffix", ""), mood_pos)
-        style["mood"] = mood_pos
-    if mood_neg:
-        style["negative"] = _append_tags(style.get("negative", ""), mood_neg)
     if getattr(args, "positive_extra", None):
         style["suffix"] = _append_tags(style.get("suffix", ""), args.positive_extra)
     if getattr(args, "negative_extra", None):
@@ -219,14 +212,13 @@ def cmd_story(args: argparse.Namespace) -> int:
         raise SystemExit("Please provide a premise.")
     character_tags = (data.get("character") or {}).get("tags", "")
     style_positive = (data.get("style") or {}).get("positive", "")
-    mood = (data.get("style") or {}).get("mood", "")
 
     client, llm = _ensure_ollama(cfg, args.model)
 
     _print("[1/2] Ollama 模型（%s）正在写 %d 镜分镜 ..." % (llm, args.shots))
     options = StoryboardOptions(
         model=llm, shots=args.shots, chunk=args.chunk, temperature=args.temperature,
-        mood=mood, setting=args.setting, character_tags=character_tags,
+        setting=args.setting, character_tags=character_tags,
         style_positive=style_positive, log=lambda msg: _print("      " + msg))
     started = time.time()
     shots = generate_storyboard(client, premise, options)
@@ -286,7 +278,6 @@ def cmd_image(args: argparse.Namespace) -> int:
     started = time.time()
     options = SingleOptions(
         model=llm, framing=args.framing,
-        mood=(data.get("style") or {}).get("mood", ""),
         setting=args.setting,
         character_tags=(data.get("character") or {}).get("tags", ""),
         style_positive=(data.get("style") or {}).get("positive", ""),
@@ -364,7 +355,6 @@ def _expand_from_project(cfg: AppConfig, source: dict[str, Any],
         shots=total,
         chunk=getattr(args, "chunk", 12),
         temperature=getattr(args, "temperature", 0.8),
-        mood=style.get("mood", ""),
         setting=getattr(args, "setting", ""),
         character_tags=(source.get("character") or {}).get("tags", ""),
         style_positive=style.get("positive", ""),
@@ -389,7 +379,7 @@ def _expand_from_project(cfg: AppConfig, source: dict[str, Any],
             "model": item["detector"], "prompt": item.get("prompt", ""),
             "denoise": item.get("denoise", 0.35), "guide_size": item.get("guide_size", 1024),
             "steps": 20, "cfg": story.get("settings", {}).get("cfg", 5), "feather": 5,
-        } for item in resolve_detailers(args.detailers, Assets().detectors)]
+        } for item in resolve_detailers(args.detailers, Assets().detectors or local_detectors(cfg.comfy.base_dir))]
 
     out_path = Path(args.out) if getattr(args, "out", None) else save_project(story, cfg.root)
     if getattr(args, "out", None):
@@ -436,7 +426,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             "model": item["detector"], "prompt": item.get("prompt", ""),
             "denoise": item.get("denoise", 0.35), "guide_size": item.get("guide_size", 1024),
             "steps": 20, "cfg": data.get("settings", {}).get("cfg", 5), "feather": 5,
-        } for item in resolve_detailers(args.detailers, Assets().detectors)]
+        } for item in resolve_detailers(args.detailers, Assets().detectors or local_detectors(cfg.comfy.base_dir))]
     hires = bool((data.get("settings") or {}).get("hires", {}).get("enabled", True))
     data.setdefault("prefix", "anime_story/" + (data.get("name") or "story"))
     service, started_comfy = _ensure_comfy(cfg, args.restart_comfy, args.no_auto_start)
@@ -562,7 +552,6 @@ def _add_common(p: argparse.ArgumentParser, include_shots: bool = True) -> None:
     p.add_argument("--variants", type=int, default=None)
     p.add_argument("--chunk", type=int, default=12)
     p.add_argument("--temperature", type=float, default=0.8)
-    p.add_argument("--mood", default="bright")
     p.add_argument("--setting", default="")
     p.add_argument("--lora", default=None, help="name[:strength], comma separated")
     p.add_argument("--lora-strength", type=float, default=None)

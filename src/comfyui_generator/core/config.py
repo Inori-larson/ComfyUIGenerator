@@ -182,7 +182,6 @@ class GenerationDefaults:
     hires_denoise: float = 0.4
     hires_steps: int = 20
     upscaler: str = ""
-    mood: str = "bright"
     detailers: list[dict[str, Any]] = field(default_factory=list)
     wildcards: dict[str, Any] = field(default_factory=lambda: {"enabled": False, "dir": ""})
 
@@ -194,10 +193,19 @@ class UIConfig:
 
 
 @dataclass
+class LoraConfig:
+    character_dir: str = ""
+    style_dir: str = ""
+    online_lookup: bool = True
+    civitai_base: str = "https://civitai.red"
+
+
+@dataclass
 class AppConfig:
     comfy: ComfyConfig = field(default_factory=ComfyConfig)
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
     generation: GenerationDefaults = field(default_factory=GenerationDefaults)
+    lora: LoraConfig = field(default_factory=LoraConfig)
     ui: UIConfig = field(default_factory=UIConfig)
     storage_root: str = ""
 

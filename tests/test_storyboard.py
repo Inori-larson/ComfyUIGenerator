@@ -29,20 +29,20 @@ def test_normalize_start_index_and_existing_names():
     assert shots[0]["name"] == "a_2"
 
 
-def test_build_messages_contains_mood_and_bright_rule():
+def test_build_messages_contains_setting_and_continuity_rule():
     messages = build_messages("cat on roof", 2, "yixuan, solo", "masterpiece",
-                              "sunny park", "bright daylight", [], 2)
+                              "sunny park", [], 2)
     user = messages[1]["content"]
-    assert "Preferred atmosphere" in user
-    assert "bright daylight" in user
+    assert "Preferred atmosphere" not in user
+    assert "Setting / art direction: sunny park" in user
     assert "Number of shots" in user
-    assert "bright, cheerful" in SYSTEM_PROMPT
-    assert "Do NOT write night" in SYSTEM_PROMPT
+    assert "bright, cheerful" not in SYSTEM_PROMPT
+    assert "Do NOT write night" not in SYSTEM_PROMPT
 
 
 def test_build_messages_with_prior_and_beats():
     prior = [{"id": "01", "prompt": "wide shot, standing"}]
-    messages = build_messages("story", 2, "", "", "", "", prior, 3,
+    messages = build_messages("story", 2, "", "", "", prior, 3,
                               ["first beat", "second beat"])
     user = messages[1]["content"]
     assert "part 2-3 of 3" in user
@@ -61,7 +61,7 @@ def test_storyboard_options_defaults():
     opts = StoryboardOptions(model="qwen")
     assert opts.shots == 6
     assert opts.chunk == 12
-    assert opts.mood == ""
+    assert opts.setting == ""
     opts.log("noop")
 
 

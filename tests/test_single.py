@@ -18,17 +18,17 @@ class FakeClient:
         return dict(self.response)
 
 
-def test_build_messages_contains_framing_and_mood():
-    options = SingleOptions(model="qwen", framing="upper_body", mood="bright daylight",
+def test_build_messages_contains_framing_and_setting():
+    options = SingleOptions(model="qwen", framing="upper_body",
                             setting="park", character_tags="yixuan, solo",
                             style_positive="masterpiece")
     messages = build_single_messages("girl reading", options)
     user = messages[1]["content"]
     assert "Framing preference: upper body, medium shot" in user
-    assert "Preferred atmosphere" in user
+    assert "Preferred atmosphere" not in user
     assert "Extra art direction: park" in user
     assert "yixuan, solo" in user
-    assert "bright, cheerful" in messages[0]["content"]
+    assert "bright, cheerful" not in messages[0]["content"]
 
 
 def test_generate_single_prompt_passes_schema_and_prefixes_framing():

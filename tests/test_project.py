@@ -1,7 +1,8 @@
 import json
+from pathlib import Path
 
 from comfyui_generator.core.project import (
-    list_projects,
+    clear_trash, delete_from_trash, list_trash, list_projects,
     load_project,
     load_profile,
     move_to_trash,
@@ -85,3 +86,26 @@ def test_trash_collision(tmp_path):
     second = move_to_trash(image, "p", tmp_path)
     assert first != second
     assert second.name.startswith("shot_2")
+
+
+def test_trash_index_restore_and_clear(tmp_path):
+    output = tmp_path / "output"
+    output.mkdir()
+    image = output / "shot.png"
+    image.write_bytes(b"png")
+    trash = move_to_trash(image, "p", tmp_path)
+    assert list_trash(tmp_path, "p") == [trash]
+    restored = restore_from_trash(trash, root=tmp_path, project_id="p")
+    assert Path(restored).resolve() == image.resolve()
+    assert list_trash(tmp_path, "p") == []
+
+    image.write_bytes(b"png2")
+    trash2 = move_to_trash(image, "p", tmp_path)
+    delete_from_trash(trash2, tmp_path, "p")
+    assert not trash2.exists()
+    assert list_trash(tmp_path, "p") == []
+
+    image.write_bytes(b"png3")
+    move_to_trash(image, "p", tmp_path)
+    clear_trash(tmp_path, "p")
+    assert list_trash(tmp_path, "p") == []

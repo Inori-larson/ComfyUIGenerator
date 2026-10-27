@@ -12,14 +12,24 @@ import re
 from typing import Any
 
 
+def _tag_key(tag: str) -> str:
+    text = tag.lower().replace("\\", "")
+    text = re.sub(r"\([^)]*\)", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def join_tags(*parts: Any) -> str:
     values: list[str] = []
+    seen: set[str] = set()
     for part in parts:
         if not part:
             continue
-        text = str(part).strip().strip(",")
-        if text:
-            values.append(text)
+        for token in str(part).split(","):
+            tag = token.strip()
+            key = _tag_key(tag)
+            if tag and key not in seen:
+                seen.add(key)
+                values.append(tag)
     return ", ".join(values)
 
 

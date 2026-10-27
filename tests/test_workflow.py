@@ -22,7 +22,7 @@ def cfg():
         "character": {"tags": "yixuan, solo", "use_ipadapter": True,
                       "ipadapter": {"reference": "anime_story/ref.png", "weight": 0.6}},
         "style": {"positive": "masterpiece", "negative": "bad quality",
-                  "suffix": "sunny", "mood": "bright daylight"},
+                  "suffix": "sunny"},
         "style_ref": {"enabled": True, "image": "anime_story/style.png", "weight": 0.8},
         "settings": {
             "width": 832, "height": 1216, "steps": 12, "cfg": 5,

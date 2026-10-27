@@ -39,6 +39,12 @@ QPushButton#Mode {
     background: #eef2f7; border: none; border-radius: 15px; padding: 5px 18px; color: #5b6773;
 }
 QPushButton#Mode:checked { background: #2d6cdf; color: #ffffff; font-weight: 600; }
+QPushButton#Tab {
+    background: #eef2f7; border: none; border-radius: 12px;
+    padding: 5px 12px; color: #5b6773;
+}
+QPushButton#Tab:checked { background: #2d6cdf; color: #ffffff; font-weight: 600; }
+QPushButton#Tab:disabled { color: #aab3c0; background: #f6f8fb; }
 QLineEdit, QPlainTextEdit, QTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {
     background: #ffffff; border: 1px solid #d5dbe3; border-radius: 5px; padding: 4px 6px;
     selection-background-color: #cfe0ff;

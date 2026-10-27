@@ -12,3 +12,30 @@ def append_tags(existing: str | None, extra: str | None) -> str:
             items.append(token)
             seen.add(token.lower())
     return ", ".join(items)
+
+
+def estimate_tokens(tags: str | list[str]) -> int:
+    """Rough token estimate for prompt size (not a hard model limit)."""
+    items = tags if isinstance(tags, list) else str(tags or "").split(",")
+    total = 2  # start/end tokens
+    for tag in items:
+        clean = str(tag).strip()
+        if not clean:
+            continue
+        total += max(1, (len(clean) + 3) // 4) + 1
+    return total
+
+
+def limit_tags(text: str, limit: int = 200) -> str:
+    """Dedupe and cap a single-image prompt at 200 tags by default."""
+    tags: list[str] = []
+    seen: set[str] = set()
+    for token in str(text or "").split(","):
+        tag = token.strip()
+        key = tag.lower()
+        if tag and key not in seen:
+            seen.add(key)
+            tags.append(tag)
+        if len(tags) >= limit:
+            break
+    return ", ".join(tags)

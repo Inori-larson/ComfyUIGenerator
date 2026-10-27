@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
+    QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QLabel,
     QGroupBox, QHBoxLayout, QLineEdit, QPushButton, QSpinBox, QVBoxLayout,
 )
 
@@ -97,6 +97,24 @@ class SettingsDialog(QDialog):
         ollama_form.addRow("默认模型", self.ollama_model)
         root.addWidget(ollama_box)
 
+        lora_box = QGroupBox("LoRA 数据源")
+        lora_form = QFormLayout(lora_box)
+        self.character_lora_dir = _path_row(
+            lora_form, "角色 LoRA 目录", cfg.lora.character_dir, directory=True)
+        self.style_lora_dir = _path_row(
+            lora_form, "风格 LoRA 目录", cfg.lora.style_dir, directory=True)
+        lora_hint = QLabel("留空 = 扫描 ComfyUI 的 LoRA 列表并按文件名自动分类。"
+                           "自定义目录需已加入 ComfyUI 的 LoRA 搜索路径（extra_model_paths）。")
+        lora_hint.setWordWrap(True)
+        lora_form.addRow("", lora_hint)
+        self.online_lookup = QCheckBox("无内置元数据时联网查询 Civitai 作者触发词")
+        self.online_lookup.setChecked(cfg.lora.online_lookup)
+        lora_form.addRow("", self.online_lookup)
+        self.civitai_base = QLineEdit(cfg.lora.civitai_base)
+        self.civitai_base.setPlaceholderText("https://civitai.red")
+        lora_form.addRow("Civitai 地址", self.civitai_base)
+        root.addWidget(lora_box)
+
         app_box = QGroupBox("应用")
         app_form = QFormLayout(app_box)
         self.template = _path_row(app_form, "默认模板 JSON", cfg.generation.template)
@@ -133,6 +151,10 @@ class SettingsDialog(QDialog):
         c.ollama.port = self.ollama_port.value()
         c.ollama.exe = self.ollama_exe.text().strip()
         c.ollama.default_model = self.ollama_model.currentValue() or ""
+        c.lora.character_dir = self.character_lora_dir.text().strip()
+        c.lora.style_dir = self.style_lora_dir.text().strip()
+        c.lora.online_lookup = self.online_lookup.isChecked()
+        c.lora.civitai_base = self.civitai_base.text().strip() or "https://civitai.red"
         c.generation.template = self.template.text().strip()
         c.ui.language = self.language.currentValue()
         save_config(c)

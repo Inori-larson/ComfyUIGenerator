@@ -20,12 +20,16 @@ def test_save_load_roundtrip(tmp_path):
     cfg.comfy.port = 8123
     cfg.generation.shots = 9
     cfg.ui.language = "en-US"
+    cfg.lora.character_dir = r"D:\loras\char"
+    cfg.lora.style_dir = r"D:\loras\style"
     save_config(cfg, path)
 
     loaded = load_config(path)
     assert loaded.comfy.port == 8123
     assert loaded.generation.shots == 9
     assert loaded.ui.language == "en-US"
+    assert loaded.lora.character_dir == r"D:\loras\char"
+    assert loaded.lora.style_dir == r"D:\loras\style"
     assert loaded.storage_root == str(tmp_path / "data")
 
 
@@ -41,4 +45,4 @@ def test_to_dict_is_plain_json():
     data = asdict(AppConfig())
     assert isinstance(data["comfy"], dict)
     assert data["comfy"]["preview_method"] == "latent2rgb"
-    assert data["generation"]["mood"] == "bright"
+    assert data["generation"]["variants"] == 1

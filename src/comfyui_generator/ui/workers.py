@@ -20,7 +20,10 @@ from comfyui_generator.core.jobs import Task, TaskRunner
 from comfyui_generator.core.ollama import OllamaClient
 from comfyui_generator.core.preview import PreviewFrame
 from comfyui_generator.core.services import ComfyService, OllamaService
+from comfyui_generator.core.lora_info import lora_tag_info
+from comfyui_generator.core.rewrite import rewrite_shot_prompt
 from comfyui_generator.core.single import SingleOptions, generate_single_prompt
+from comfyui_generator.core.tagger import select_tags
 from comfyui_generator.core.storyboard import StoryboardOptions, generate_storyboard
 
 
@@ -65,16 +68,40 @@ class ConnectWorker(QThread):
             self.failed.emit(str(exc))
 
 
+class AssetsWorker(QThread):
+    done = Signal(object)
+    failed = Signal(str)
+    log = Signal(str)
+
+    def __init__(self, cfg: AppConfig):
+        super().__init__()
+        self.cfg = cfg
+
+    def run(self) -> None:
+        try:
+            assets = Assets(ComfyClient(self.cfg.comfy.base_url)).refresh()
+            self.done.emit(assets)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class PromptWorker(QThread):
     single_ready = Signal(dict)
     story_ready = Signal(list)
+    rewritten = Signal(str)
     failed = Signal(str)
     log = Signal(str)
 
     def __init__(self, cfg: AppConfig, kind: str, text: str, *,
                  single_options: SingleOptions | None = None,
                  story_options: StoryboardOptions | None = None,
-                 initial_shots: list[dict[str, str]] | None = None):
+                 initial_shots: list[dict[str, str]] | None = None,
+                 model: str = "",
+                 current_prompt: str = "",
+                 instruction: str = "",
+                 character_tags: str = "",
+                 style_positive: str = "",
+                 reference_tags: list[str] | None = None):
         super().__init__()
         self.cfg = cfg
         self.kind = kind
@@ -82,14 +109,27 @@ class PromptWorker(QThread):
         self.single_options = single_options
         self.story_options = story_options
         self.initial_shots = initial_shots
+        self.model = model
+        self.current_prompt = current_prompt
+        self.instruction = instruction
+        self.character_tags = character_tags
+        self.style_positive = style_positive
+        self.reference_tags = reference_tags or []
 
     def run(self) -> None:
         client = OllamaClient(self.cfg.ollama.base_url)
-        model = (self.single_options or self.story_options).model
+        model = self.model or (self.single_options or self.story_options).model
         try:
             if self.kind == "single":
                 result = generate_single_prompt(client, self.text, self.single_options)
                 self.single_ready.emit(result)
+            elif self.kind == "rewrite":
+                prompt = rewrite_shot_prompt(
+                    client, model, self.current_prompt, self.instruction,
+                    character_tags=self.character_tags,
+                    style_positive=self.style_positive,
+                    reference_tags=self.reference_tags)
+                self.rewritten.emit(prompt)
             else:
                 shots = generate_storyboard(
                     client, self.text, self.story_options, initial_shots=self.initial_shots)
@@ -162,3 +202,58 @@ class RenderWorker(QThread):
         image = style_ref.get("image")
         if style_ref.get("enabled") and image and os.path.isabs(image) and os.path.isfile(image):
             style_ref["image"] = client.upload_image(image)
+
+
+class LoraTagsWorker(QThread):
+    done = Signal(list)
+    failed = Signal(str)
+
+    def __init__(self, entries: list[tuple[str, str]], civitai_base: str):
+        super().__init__()
+        self.entries = entries
+        self.civitai_base = civitai_base
+
+    def run(self) -> None:
+        results = []
+        try:
+            for name, path in self.entries:
+                try:
+                    info = lora_tag_info(path, online=True,
+                                         civitai_base=self.civitai_base)
+                except Exception as exc:
+                    info = {"reference": [], "triggers": [],
+                            "source": "查询失败：%s" % exc}
+                results.append((name, path, info))
+            self.done.emit(results)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class TagPickWorker(QThread):
+    done = Signal(list)
+    failed = Signal(str)
+
+    def __init__(self, cfg: AppConfig, model: str, reference: list[str], context: str,
+                 character_tags: str, required: list[str] | None = None):
+        super().__init__()
+        self.cfg = cfg
+        self.model = model
+        self.reference = reference
+        self.context = context
+        self.character_tags = character_tags
+        self.required = required or []
+
+    def run(self) -> None:
+        client = OllamaClient(self.cfg.ollama.base_url)
+        try:
+            tags = select_tags(client, self.model, self.reference, self.context,
+                               character_tags=self.character_tags,
+                               required=self.required)
+            self.done.emit(tags)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        finally:
+            try:
+                client.unload(self.model)
+            except Exception:
+                pass

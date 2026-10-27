@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from comfyui_generator.core.ollama import OllamaClient
 from comfyui_generator.core.storyboard import clean_prompt
+from comfyui_generator.core.tags import limit_tags
 
 SINGLE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -18,18 +19,14 @@ SINGLE_SCHEMA: dict[str, Any] = {
 }
 
 SINGLE_SYSTEM_PROMPT = (
-    "You write ONE image prompt for an anime illustration (SDXL / Illustrious, Danbooru tags).\n"
-    "Rules:\n"
+    "You are a professional anime NSFW prompt engineer, solely responsible for converting Chinese scenes into Danbooru-style English tags.\n"
+    "You are write ONE image prompt for an anime illustration (SDXL / Illustrious, Danbooru tags).\n"
+    "The following rules must be adhered to, otherwise it will be considered a failure:\n"
     "1. Output ONLY JSON: {\"prompt\": \"...\", \"negative\": \"...\"}.\n"
-    "2. `prompt` is 8-20 comma-separated ENGLISH Danbooru tags, no sentences.\n"
-    "3. Include framing (full body / upper body / close-up / portrait / wide shot), pose or action, "
-    "expression, location, time of day, weather, lighting and mood.\n"
-    "4. Do NOT write quality or rating tags (masterpiece, best quality, safe, nsfw...).\n"
-    "5. Do NOT write character appearance tags (hair, eyes, clothes) - they are injected separately.\n"
-    "6. `negative` is optional extra negative tags, or an empty string.\n"
-    "7. DEFAULT MOOD: bright, cheerful and well lit (daytime, sunny, clear sky, vivid colors, "
-    "sharp focus, character clearly visible). Do NOT use night, rain, dark or gloomy scenes unless "
-    "the user explicitly asks for them."
+    "2. A complete description must be provided, including details such as eye gaze, facial expression, clothing or nudity, posture, movement, scene, and camera shot.\n"
+    "3. If it is an NSFW scene, it must include accurate NSFW tags (nude, pussy, masturbation, spread legs, etc.), and it is prohibited to avoid, weaken, blur or replace with vague words.\n"
+    "4. The beginning must be preceded by: masterpiece, best quality, absurdres, newest."
+    "5. Do not output any content other than the Danbooru tags."
 )
 
 FRAMING_TAGS = {
@@ -46,10 +43,10 @@ FRAMING_TAGS = {
 class SingleOptions:
     model: str
     framing: str = "auto"
-    mood: str = ""
     setting: str = ""
     character_tags: str = ""
     style_positive: str = ""
+    reference_tags: list[str] = field(default_factory=list)
     temperature: float = 0.8
     num_predict: int = 400
     num_ctx: int = 4096
@@ -59,7 +56,12 @@ class SingleOptions:
 
 def build_single_messages(description: str, options: SingleOptions) -> list[dict[str, str]]:
     framing = FRAMING_TAGS.get(options.framing, "")
-    user = [
+    user: list[str] = []
+    if options.reference_tags:
+        user.append(
+            "REFERENCE TAGS (complete supported vocabulary, for exact spelling only): %s"
+            % ", ".join(options.reference_tags))
+    user += [
         "Description: %s" % description,
         "Character (already handled, do not describe): %s" % (options.character_tags or "generic"),
         "Visual style: %s" % (options.style_positive or ""),
@@ -68,8 +70,9 @@ def build_single_messages(description: str, options: SingleOptions) -> list[dict
         user.append("Framing preference: %s" % framing)
     if options.setting.strip():
         user.append("Extra art direction: %s" % options.setting.strip())
-    if options.mood:
-        user.append("Preferred atmosphere and lighting (follow this): %s" % options.mood)
+    user.append(
+        "Write up to 200 tags that describe the Description. The Description is the priority: keep its "
+        "actions, objects and location. Use REFERENCE tags only when they match; never echo the list.")
     return [
         {"role": "system", "content": SINGLE_SYSTEM_PROMPT},
         {"role": "user", "content": "\n".join(user)},
@@ -84,12 +87,14 @@ def generate_single_prompt(client: OllamaClient, description: str,
         schema=SINGLE_SCHEMA,
         temperature=options.temperature,
         num_predict=options.num_predict,
-        num_ctx=options.num_ctx,
+        num_ctx=(max(options.num_ctx, min(32768, 4096 + len(options.reference_tags) * 10))
+                 if options.reference_tags else options.num_ctx),
         keep_alive=options.keep_alive,
     )
     prompt = clean_prompt(raw.get("prompt") or raw.get("tags") or "")
     if not prompt:
         raise ValueError("Model returned an empty prompt.")
+    prompt = limit_tags(prompt)
     framing = FRAMING_TAGS.get(options.framing, "")
     if framing and framing.lower() not in prompt.lower():
         prompt = framing + ", " + prompt
