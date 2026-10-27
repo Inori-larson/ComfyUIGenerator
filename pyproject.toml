@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "comfyui-generator"
+version = "0.1.0"
+description = "Local Ollama storyboard -> ComfyUI continuous anime image generator"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Inori-larson" }]
+dependencies = [
+    "websocket-client>=1.7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+ui = ["PySide6>=6.6"]
+
+[project.scripts]
+cui = "comfyui_generator.cli:main"
+cui-ui = "comfyui_generator.ui.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+comfyui_generator = ["presets/*.json"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

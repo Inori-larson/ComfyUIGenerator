@@ -1,0 +1,87 @@
+import json
+
+from comfyui_generator.core.project import (
+    list_projects,
+    load_project,
+    load_profile,
+    move_to_trash,
+    new_project,
+    restore_from_trash,
+    save_profile,
+    save_project,
+)
+
+
+TEMPLATE = {
+    "model": "WAI\\waiIllustriousSDXL_v170.safetensors",
+    "loader": "checkpoint",
+    "character": {"tags": "yixuan, solo"},
+    "style": {"positive": "masterpiece", "negative": "bad"},
+    "settings": {"width": 832, "height": 1216, "steps": 30, "base_seed": 123},
+    "shots": [{"id": "01", "name": "old", "prompt": "old shot"}],
+}
+
+
+def test_new_project_clears_shots_and_adds_meta():
+    project = new_project("demo", "a cat", TEMPLATE, "preset.json")
+    assert project["shots"] == []
+    assert project["name"] == "demo"
+    assert project["premise"] == "a cat"
+    assert project["template"] == "preset.json"
+    assert project["version"] == 1
+    assert project["mode"] == "story"
+    assert "id" in project
+    single = new_project("one", "a cat", TEMPLATE, mode="single")
+    assert single["mode"] == "single"
+
+
+def test_save_load_list(tmp_path):
+    project = new_project("demo", "a cat", TEMPLATE)
+    project["shots"] = [{"id": "01", "name": "a", "prompt": "b"}]
+    path = save_project(project, tmp_path)
+    assert path.is_file()
+    loaded = load_project(path)
+    assert loaded["shots"] == project["shots"]
+    items = list_projects(tmp_path)
+    assert len(items) == 1
+    assert items[0]["name"] == "demo"
+    assert items[0]["shots"] == 1
+
+
+def test_profile_strips_story_and_seed(tmp_path):
+    path = save_profile("demo/name", {
+        "name": "demo", "premise": "x", "shots": [1], "prefix": "p",
+        "settings": {"width": 832, "base_seed": 999},
+    }, tmp_path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert "shots" not in data
+    assert "premise" not in data
+    assert data["settings"]["width"] == 832
+    assert "base_seed" not in data["settings"]
+    assert load_profile("demo/name", tmp_path)["name"] == "demo"
+
+
+def test_trash_move_and_restore(tmp_path):
+    output = tmp_path / "output"
+    output.mkdir()
+    image = output / "shot.png"
+    image.write_bytes(b"png")
+    trash = move_to_trash(image, "proj1", tmp_path)
+    assert not image.exists()
+    assert trash.is_file()
+    assert trash.parent.name == "trash"
+    restored = restore_from_trash(trash, output)
+    assert restored.is_file()
+    assert restored.read_bytes() == b"png"
+
+
+def test_trash_collision(tmp_path):
+    output = tmp_path / "output"
+    output.mkdir()
+    image = output / "shot.png"
+    image.write_bytes(b"1")
+    first = move_to_trash(image, "p", tmp_path)
+    image.write_bytes(b"2")
+    second = move_to_trash(image, "p", tmp_path)
+    assert first != second
+    assert second.name.startswith("shot_2")
