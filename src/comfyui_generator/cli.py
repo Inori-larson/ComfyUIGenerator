@@ -180,7 +180,7 @@ def _ensure_ollama(cfg: AppConfig, model: str | None = None) -> tuple[OllamaClie
     if names:
         _print("未指定模型，使用已安装的：%s" % names[0])
         return client, names[0]
-    raise SystemExit("Ollama 里没有任何模型。请先安装一个，例如：ollama pull qwen2.5:14b-instruct")
+    raise SystemExit("Ollama 里没有任何模型。请先安装一个模型，例如：ollama pull <模型名>")
 
 
 def _ensure_comfy(cfg: AppConfig, restart: bool, no_auto_start: bool) -> tuple[ComfyService, bool]:

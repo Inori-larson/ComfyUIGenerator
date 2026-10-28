@@ -109,8 +109,12 @@ class SearchComboBox(QComboBox):
             self.lineEdit().setText(self.itemText(index))
 
     def currentValue(self) -> Any:
+        text = self.currentText().strip()
+        index = self.currentIndex()
+        if self.allow_free_text and (index < 0 or text != self.itemText(index)):
+            return text
         data = self.currentData()
-        return data if data is not None else self.currentText().strip()
+        return data if data is not None else text
 
     def selectFirst(self) -> None:
         if self.count():

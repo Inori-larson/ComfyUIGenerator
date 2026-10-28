@@ -49,6 +49,23 @@ def test_compose_prompts_order(cfg):
     assert negative == "bad quality"
 
 
+def test_compose_prompts_includes_body_tags(cfg):
+    cfg = dict(cfg)
+    cfg["body"] = {"tags": "pussy, nude"}
+    positive, _ = compose_prompts(cfg, {"prompt": "park"})
+    assert "pussy" in positive
+    assert "nude" in positive
+
+
+def test_compose_prompts_includes_style_lora_tags(cfg):
+    cfg = dict(cfg)
+    cfg["style"] = dict(cfg["style"])
+    cfg["style"]["lora_tags"] = "style_a, style_b"
+    positive, _ = compose_prompts(cfg, {"prompt": "park"})
+    assert "style_a" in positive
+    assert "style_b" in positive
+
+
 def test_workflow_structure(cfg):
     shot = {"id": "01", "name": "test", "prompt": "wide shot, standing"}
     positive, negative = compose_prompts(cfg, shot)

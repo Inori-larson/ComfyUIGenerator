@@ -1,14 +1,19 @@
 """ADetailer-style repaint passes driven by scanned detector models.
 
-The list is never hardcoded: any ``.pt`` model under ``models/ultralytics``
-(bbox or segm) becomes a selectable repaint pass. Preset prompts are chosen by
-filename keywords, with a generic fallback for unknown models.
+The list is never hardcoded: every valid detector model under
+``models/ultralytics`` becomes a selectable repaint pass. LoRA/embedding
+files are ignored because Ultralytics cannot load them as detectors. Preset
+prompts are chosen by filename keywords, with a generic fallback.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
+
+DETECTOR_SUFFIXES = {".pt", ".pth", ".onnx", ".engine", ".torchscript", ".tflite", ".safetensors"}
+LORA_PREFIXES = ("lora_", "lora.", "diffusion_model.", "emb_params")
 
 # key, detector filename keywords, label, focus prompt, denoise, guide size
 DETECTOR_PRESETS = [
@@ -91,15 +96,52 @@ def resolve_detailers(spec: str, detectors: list[str]) -> list[dict[str, Any]]:
     return result
 
 
+def _safetensors_keys(path: Path) -> list[str]:
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(8)
+            if len(raw) != 8:
+                return []
+            size = int.from_bytes(raw, "little")
+            if size <= 0 or size > 64 * 1024 * 1024:
+                return []
+            header = json.loads(handle.read(size).decode("utf-8"))
+        return [key for key in header if key != "__metadata__"]
+    except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return []
+
+
+def _is_detector_file(path: Path) -> bool:
+    if path.suffix.lower() not in DETECTOR_SUFFIXES:
+        return False
+    if path.suffix.lower() != ".safetensors":
+        return True
+    keys = _safetensors_keys(path)
+    if not keys:
+        return False
+    lower = [key.lower() for key in keys]
+    return not any(key.startswith(LORA_PREFIXES) or key.endswith(".alpha") or ".lora_" in key
+                   for key in lower)
+
+
+def filter_detector_models(base_dir: str | Path | None, detectors: list[str]) -> list[str]:
+    if not base_dir:
+        return [name for name in detectors if Path(name).suffix.lower() != ".safetensors"]
+    root = Path(base_dir) / "models" / "ultralytics"
+    result: list[str] = []
+    for name in detectors:
+        path = root / Path(name)
+        if path.is_file() and _is_detector_file(path):
+            result.append(name)
+    return result
+
+
 def local_detectors(base_dir: str | Path | None) -> list[str]:
     """Fallback scan for CLI use when ComfyUI is not connected."""
     if not base_dir:
         return []
     root = Path(base_dir) / "models" / "ultralytics"
-    found: list[str] = []
-    for kind in ("bbox", "segm"):
-        folder = root / kind
-        if folder.is_dir():
-            for path in sorted(folder.glob("*.pt")):
-                found.append("%s/%s" % (kind, path.name))
-    return found
+    if not root.is_dir():
+        return []
+    return [path.relative_to(root).as_posix() for path in sorted(root.rglob("*"))
+            if path.is_file() and _is_detector_file(path)]

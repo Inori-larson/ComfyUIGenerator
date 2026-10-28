@@ -16,9 +16,9 @@ def test_build_messages_contains_required_and_reference():
     messages = build_messages(["hero", "red hair"], "park",
                               "current", ["hero"])
     user = messages[1]["content"]
-    assert "REQUIRED character tags" in user
+    assert "角色标签" in user
     assert "hero" in user
-    assert "REFERENCE" in user
+    assert "参考标签" in user
 
 
 def test_select_tags_keeps_required_and_does_not_filter_content():
@@ -48,8 +48,8 @@ def test_estimate_tokens_grows_with_tags():
     assert estimate_tokens(["a", "b", "c"]) > estimate_tokens("a, b")
 
 
-def test_limit_tags_dedupes_and_caps_at_200():
+def test_limit_tags_dedupes_and_caps_at_100():
     assert limit_tags("a, b, a, c, d") == "a, b, c, d"
     assert limit_tags("") == ""
-    tags = ", ".join("tag%d" % index for index in range(250))
-    assert len(limit_tags(tags).split(", ")) == 200
+    tags = ", ".join("tag%d" % index for index in range(150))
+    assert len(limit_tags(tags).split(", ")) == 100

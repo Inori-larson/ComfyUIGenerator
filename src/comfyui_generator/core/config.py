@@ -196,8 +196,15 @@ class UIConfig:
 class LoraConfig:
     character_dir: str = ""
     style_dir: str = ""
+    body_dir: str = ""
     online_lookup: bool = True
     civitai_base: str = "https://civitai.red"
+
+
+@dataclass
+class ModelListsConfig:
+    checkpoint_dir: str = ""
+    upscaler_dir: str = ""
 
 
 @dataclass
@@ -206,6 +213,7 @@ class AppConfig:
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
     generation: GenerationDefaults = field(default_factory=GenerationDefaults)
     lora: LoraConfig = field(default_factory=LoraConfig)
+    models: ModelListsConfig = field(default_factory=ModelListsConfig)
     ui: UIConfig = field(default_factory=UIConfig)
     storage_root: str = ""
 
@@ -268,6 +276,7 @@ def default_config() -> AppConfig:
         cfg.comfy.input_dir = str(base / "input")
         cfg.comfy.output_dir = str(base / "output")
         cfg.comfy.user_dir = str(base / "user")
+        cfg.lora.body_dir = str(base / "models" / "loras" / "身体部位")
     cfg.ollama.exe = str(ollama_exe) if ollama_exe else ""
     cfg.generation.template = str(DEFAULT_PRESET)
     cfg.generation.wildcards = {"enabled": False,

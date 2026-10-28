@@ -16,8 +16,8 @@
     "use_ipadapter": false
   },
   "style": {
-    "positive": "masterpiece, best quality, amazing quality, safe",
-    "negative": "bad quality, worst quality, worst detail, sketch, censor, nsfw"
+    "positive": "masterpiece, best quality, amazing quality",
+    "negative": "bad quality, worst quality, worst detail, sketch"
   },
   "settings": {
     "width": 1024,

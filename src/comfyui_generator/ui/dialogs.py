@@ -18,6 +18,7 @@ from comfyui_generator.core.project import (
     restore_from_trash, trash_original,
 )
 from comfyui_generator.core.tags import estimate_tokens
+from comfyui_generator.ui.workers import TagTranslateWorker
 
 
 class ProjectDialog(QDialog):
@@ -200,19 +201,25 @@ class CompareDialog(QDialog):
 
 
 class TagReferenceDialog(QDialog):
-    def __init__(self, tags: list[str], parent=None):
+    def __init__(self, tags: list[str], parent=None, cfg=None, model: str = "",
+                 cache_path: str = ""):
         super().__init__(parent)
         self.setWindowTitle("参考标签")
         self.resize(760, 640)
+        self.worker: TagTranslateWorker | None = None
         layout = QVBoxLayout(self)
         self.search = QLineEdit()
-        self.search.setPlaceholderText("搜索标签…")
+        self.search.setPlaceholderText("搜索标签（中文或英文）")
         self.search.textChanged.connect(self._filter)
         layout.addWidget(self.search)
+        self.translate_status = QLabel("")
+        self.translate_status.setWordWrap(True)
+        layout.addWidget(self.translate_status)
         self.list = QListWidget()
         self.list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         for tag in tags:
             item = QListWidgetItem(tag)
+            item.setData(Qt.ItemDataRole.UserRole, tag)
             item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(Qt.CheckState.Unchecked)
             self.list.addItem(item)
@@ -238,6 +245,39 @@ class TagReferenceDialog(QDialog):
         layout.addLayout(row)
         self._update_count()
 
+        if cfg is not None and model and tags:
+            self.translate_status.setText("正在用模型翻译参考标签，可先按英文搜索...")
+            worker = TagTranslateWorker(cfg, model, tags, cache_path)
+            worker.batch.connect(self._apply_translations)
+            worker.failed.connect(self._translation_failed)
+            worker.finished.connect(self._translation_finished)
+            worker.finished.connect(worker.deleteLater)
+            self.finished.connect(lambda _result: worker.requestInterruption())
+            self.worker = worker
+            worker.start()
+        else:
+            self.translate_status.setText("未连接 Ollama，参考标签暂不翻译。")
+
+    def _apply_translations(self, mapping: dict[str, str]) -> None:
+        for index in range(self.list.count()):
+            item = self.list.item(index)
+            tag = item.data(Qt.ItemDataRole.UserRole) or item.text()
+            translation = mapping.get(tag)
+            if translation and translation != tag:
+                item.setText("%s  |  %s" % (translation, tag))
+
+    def _translation_failed(self, message: str) -> None:
+        self.translate_status.setText("参考标签翻译失败：%s" % message)
+
+    def _translation_finished(self) -> None:
+        self.translate_status.setText("参考标签中文翻译已更新。")
+        self.worker = None
+
+    def closeEvent(self, event) -> None:
+        if self.worker and self.worker.isRunning():
+            self.worker.requestInterruption()
+        super().closeEvent(event)
+
     def _filter(self, text: str) -> None:
         needle = text.strip().lower()
         for index in range(self.list.count()):
@@ -260,7 +300,8 @@ class TagReferenceDialog(QDialog):
             len(selected), estimate_tokens(selected)))
 
     def selected_tags(self) -> list[str]:
-        return [self.list.item(index).text() for index in range(self.list.count())
+        return [self.list.item(index).data(Qt.ItemDataRole.UserRole) or self.list.item(index).text()
+                for index in range(self.list.count())
                 if self.list.item(index).checkState() == Qt.CheckState.Checked]
 
     def _accept_selected(self) -> None:

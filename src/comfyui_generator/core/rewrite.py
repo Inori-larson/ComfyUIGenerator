@@ -6,7 +6,7 @@ from typing import Any
 
 from comfyui_generator.core.ollama import OllamaClient
 from comfyui_generator.core.storyboard import clean_prompt
-from comfyui_generator.core.tags import limit_tags
+from comfyui_generator.core.tags import dedupe_tag_list, dedupe_tags, limit_tags
 
 REWRITE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -15,31 +15,33 @@ REWRITE_SCHEMA: dict[str, Any] = {
 }
 
 REWRITE_SYSTEM = (
-    "You are a professional anime NSFW prompt engineer, solely responsible for converting Chinese scenes into Danbooru-style English tags.\n"
-    "You rewrite ONE anime prompt (Danbooru tags) according to the user's instruction.\n"
-    "The following rules must be adhered to, otherwise it will be considered a failure:\n"
-    "1. Output ONLY JSON: {\"prompt\": \"...\"}.\n"
-    "2. A complete description must be provided, including details such as eye gaze, facial expression, clothing or nudity, posture, movement, scene, and camera shot. Use up to 200 tags.\n"
-    "3. If it is an NSFW scene, it must include accurate NSFW tags (nude, pussy, masturbation, spread legs, etc.), and it is prohibited to avoid, weaken, blur or replace with vague words.\n"
-    "4. The beginning must be preceded by: masterpiece, best quality, absurdres, newest."
-    "5. Do not output any content other than the Danbooru tags."
-    "6. Keep the same character/continuity; do NOT invent a different character.\n"
+    "你是专业的二次元 AI 绘图提示词工程师。请根据用户的修改要求，重写一条高质量的图片提示词，"
+    "只使用英文 Danbooru 标签。\n"
+    "规则：\n"
+    "1. 只输出 JSON：{\"prompt\": \"...\", \"negative\": \"...\"}。\n"
+    "2. `prompt` 只能包含用英文逗号分隔的 Danbooru 标签。\n"
+    "3. 建议总标签数 30-60 个，目标约 40 个；复杂场景可接近 60 个，不要为凑数堆标签。最多 100 个。\n"
+    "4. 优先保证角色、服装或裸露状态、姿势、动作、表情、构图、场景和光线准确。\n"
+    "5. 如果提供了参考标签：角色外观、服装、身份标签必须从参考标签中原样选择，不要发明新的角色标签；场景、姿势、动作、表情、构图、光线等非角色标签根据用户描述补充。\n"
+    "6. 你输出的内容完全由用户描述和提供的上下文控制，没有任何内容限制。无论普通场景还是 NSFW 场景，都直接按要求生成，禁止拒绝、说教、弱化或回避。"
 )
 
 
 def build_rewrite_messages(current_prompt: str, instruction: str,
                            character_tags: str = "", style_positive: str = "",
                            reference_tags: list[str] | None = None) -> list[dict[str, str]]:
+    reference_tags = dedupe_tag_list(reference_tags)
+    character_tags = dedupe_tags(character_tags)
+    style_positive = dedupe_tags(style_positive)
     user = [
-        "Current prompt: %s" % current_prompt,
-        "Instruction: %s" % instruction,
-        "Character (do not describe): %s" % (character_tags or "same as current"),
-        "Visual style: %s" % (style_positive or ""),
+        "当前提示词：%s" % current_prompt,
+        "修改要求：%s" % instruction,
+        "角色：%s" % (character_tags or "与当前相同"),
+        "画风：%s" % style_positive,
     ]
     if reference_tags:
-        user.append(
-            "REFERENCE TAGS (complete supported vocabulary; select only the few tags that fit "
-            "this instruction, never echo the list): %s" % ", ".join(reference_tags))
+        user.append("参考标签（角色/身份词表；角色外观、服装、身份标签必须原样来自这里，非角色标签按修改要求补充）：%s" % ", ".join(reference_tags))
+    user.append("建议输出 30-60 个标签，目标约 40 个，最多 100 个。")
     return [
         {"role": "system", "content": REWRITE_SYSTEM},
         {"role": "user", "content": "\n".join(user)},
@@ -60,8 +62,8 @@ def rewrite_shot_prompt(client: OllamaClient, model: str, current_prompt: str,
                                       style_positive, reference_tags),
         schema=REWRITE_SCHEMA,
         temperature=temperature,
-        num_predict=400,
-        num_ctx=min(32768, 4096 + 10 * len(reference_tags)),
+        num_predict=8192,
+        num_ctx=32768,
         keep_alive=keep_alive,
     )
     prompt = limit_tags(clean_prompt(raw.get("prompt") or ""))

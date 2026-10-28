@@ -1,8 +1,16 @@
+import json
+import struct
 from pathlib import Path
 
 from comfyui_generator.core.detailers import (
-    build_detailer_choices, local_detectors, resolve_detailers,
+    build_detailer_choices, filter_detector_models, local_detectors, resolve_detailers,
 )
+
+
+def write_safetensors(path: Path, keys: list[str]) -> None:
+    header = {key: {"dtype": "F16", "shape": [1], "data_offsets": [0, 2]} for key in keys}
+    data = json.dumps(header).encode("utf-8")
+    path.write_bytes(struct.pack("<Q", len(data)) + data + b"\0\0")
 
 
 def test_empty_detector_list_has_no_choices():
@@ -56,7 +64,13 @@ def test_local_detectors_scan(tmp_path):
     (tmp_path / "models" / "ultralytics" / "bbox").mkdir(parents=True)
     (tmp_path / "models" / "ultralytics" / "segm").mkdir(parents=True)
     (tmp_path / "models" / "ultralytics" / "bbox" / "face.pt").write_bytes(b"")
-    (tmp_path / "models" / "ultralytics" / "segm" / "person.pt").write_bytes(b"")
+    write_safetensors(tmp_path / "models" / "ultralytics" / "bbox" / "detector.safetensors",
+                      ["model.0.weight"])
+    write_safetensors(tmp_path / "models" / "ultralytics" / "bbox" / "lora.safetensors",
+                      ["lora_unet_x.lora_down.weight"])
+    (tmp_path / "models" / "ultralytics" / "segm" / "person.onnx").write_bytes(b"")
     found = local_detectors(tmp_path)
-    assert found == ["bbox/face.pt", "segm/person.pt"]
+    assert found == ["bbox/detector.safetensors", "bbox/face.pt", "segm/person.onnx"]
     assert local_detectors(None) == []
+    assert filter_detector_models(tmp_path, ["bbox/lora.safetensors", "bbox/face.pt"]) == [
+        "bbox/face.pt"]

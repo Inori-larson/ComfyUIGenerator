@@ -26,7 +26,7 @@ cui-ui = "comfyui_generator.ui.app:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-comfyui_generator = ["presets/*.json"]
+comfyui_generator = ["presets/*.json", "assets/*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

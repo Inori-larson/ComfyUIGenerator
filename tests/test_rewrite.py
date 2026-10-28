@@ -19,10 +19,10 @@ def test_build_rewrite_messages_contains_context():
         "wide shot, standing", "close-up, looking back",
         character_tags="yixuan, solo", style_positive="masterpiece")
     user = messages[1]["content"]
-    assert "Current prompt" in user
+    assert "当前提示词" in user
     assert "close-up, looking back" in user
     assert "yixuan, solo" in user
-    assert "bright, cheerful" not in messages[0]["content"]
+    assert "没有任何内容限制" in messages[0]["content"]
 
 
 def test_rewrite_returns_clean_prompt():

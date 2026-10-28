@@ -172,9 +172,12 @@ def add_detailers(wf: dict[str, Any], cfg: dict[str, Any], image: list[Any], mod
 def compose_prompts(cfg: dict[str, Any], shot: dict[str, Any]) -> tuple[str, str]:
     style = cfg.get("style") or {}
     character = cfg.get("character") or {}
+    body = cfg.get("body") or {}
     positive = join_tags(
         shot.get("style_positive", style.get("positive", "")),
+        shot.get("style_lora_tags", style.get("lora_tags", "")),
         shot.get("character_tags", character.get("tags", "")),
+        shot.get("body_tags", body.get("tags", "")),
         shot.get("prompt", ""),
         shot.get("style_suffix", style.get("suffix", "")),
     )
