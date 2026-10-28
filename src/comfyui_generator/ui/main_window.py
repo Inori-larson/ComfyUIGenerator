@@ -74,7 +74,8 @@ DEFAULT_NEGATIVE_EXTRA_TAGS = [
     "poorly drawn hands", "poorly drawn face", "deformed", "disfigured", "mutation",
     "ugly", "blurry", "jpeg artifacts", "watermark", "signature", "text", "username",
     "extra limbs", "extra arms", "extra legs", "malformed limbs", "fused fingers",
-    "long neck", "cloned face", "cgi", "western cartoon", "censor", "censored",
+    "long neck", "cloned face", "realistic", "photorealistic", "3d", "cgi",
+    "western cartoon", "censor", "censored",
     "bar censor", "mosaic censoring", "convenient censoring", "blurry pussy",
     "poorly drawn pussy", "unfinished", "sketch",
 ]
@@ -84,7 +85,7 @@ DEFAULT_NEGATIVE_EXTRA_ZH_TAGS = [
     "画得很差的手", "画得很差的脸", "变形", "毁容", "突变",
     "丑陋", "模糊", "jpeg 压缩伪影", "水印", "签名", "文字", "用户名",
     "多余肢体", "多余手臂", "多余的腿", "畸形肢体", "融合的手指",
-    "长脖子", "重复的脸", "cgi", "欧美卡通", "打码", "已打码",
+    "长脖子", "重复的脸", "写实", "照片级写实", "3d", "cgi", "欧美卡通", "打码", "已打码",
     "条形打码", "马赛克打码", "便利打码", "模糊的阴道",
     "画得很差的阴道", "未完成", "草图",
 ]
