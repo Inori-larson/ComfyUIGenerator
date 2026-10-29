@@ -84,10 +84,52 @@ def test_default_activation_prefers_title_tag():
     assert default_activation(meta, "hero.safetensors", reference) == ["hero"]
 
 
-def test_default_activation_does_not_filter_content():
+def test_default_activation_does_not_dump_frequency_tags():
     meta = {"ss_tag_frequency": '{"d":{"1girl":100,"red hair":80,"nude":90,"blue sky":20}}'}
     reference = extract_tags(meta, "x.safetensors")
-    assert default_activation(meta, "x.safetensors", reference) == reference
+    assert default_activation(meta, "x.safetensors", reference) == []
+
+
+def test_default_activation_matches_body_name_without_nudity_tags():
+    meta = {
+        "modelspec.title": "Anime Pussy V1",
+        "ss_tag_frequency": '{"d":{"pussy":120,"nude":85,"breasts":80,"anus":70}}',
+    }
+    reference = extract_tags(meta, "AnimePussyV1.safetensors")
+    assert default_activation(meta, "AnimePussyV1.safetensors", reference) == ["pussy"]
+
+
+def test_default_activation_prefers_longest_name_match():
+    meta = {
+        "modelspec.title": "pussy juice_illustrious_V1.0",
+        "ss_tag_frequency": '{"d":{"pussy":100,"pussy juice":100,"nude":90}}',
+    }
+    reference = extract_tags(meta, "pussy juice_illustrious_V1.0.safetensors")
+    assert default_activation(meta, "pussy juice_illustrious_V1.0.safetensors",
+                              reference) == ["pussy juice"]
+
+
+def test_default_activation_ignores_one_letter_frequency_tag():
+    meta = {"modelspec.title": "Char-ZZZ-Yixuan-V2-IL",
+            "ss_tag_frequency": '{"d":{"v":100,"yixuan":90,"black hair":70}}'}
+    reference = extract_tags(meta, "Char-ZZZ-Yixuan-V2-IL.safetensors")
+    assert default_activation(meta, "Char-ZZZ-Yixuan-V2-IL.safetensors",
+                              reference) == ["yixuan"]
+
+
+def test_default_activation_uses_parenthesized_base_name():
+    tag = "yixuan \\(zenless zone zero\\)"
+    meta = {"modelspec.title": "Char-ZZZ-Yixuan-V2-IL",
+            "ss_tag_frequency": json.dumps({"d": {tag: 100, "v": 90}})}
+    reference = extract_tags(meta, "Char-ZZZ-Yixuan-V2-IL.safetensors")
+    assert default_activation(meta, "Char-ZZZ-Yixuan-V2-IL.safetensors",
+                              reference) == [tag]
+
+
+def test_default_activation_without_name_match_returns_empty():
+    meta = {"ss_tag_frequency": '{"d":{"nude":100,"pussy":80}}'}
+    reference = extract_tags(meta, "mystery.safetensors")
+    assert default_activation(meta, "mystery.safetensors", reference) == []
 
 
 def test_lora_tag_info_shape(tmp_path):

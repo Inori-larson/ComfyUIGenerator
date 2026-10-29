@@ -11,11 +11,88 @@ import random
 import re
 from typing import Any
 
+from comfyui_generator.core.tags import sanitize_prompt_tags
+
+
+_CLOTHING_WORDS = (
+    "clothes", "clothing", "blazer", "leotard", "pantyhose", "stockings",
+    "thighhigh", "thighhighs", "heels", "shoes", "boots", "socks", "dress", "shirt",
+    "skirt", "pants", "shorts", "uniform", "jacket", "coat", "sweater",
+    "bra", "panties", "underwear", "swimsuit", "bikini", "kimono", "armor",
+    "robe", "cloak", "scarf", "glove", "gloves", "hat", "leggings", "jeans", "vest",
+    "suit", "necktie", "collar",
+)
+_EXPOSURE_WORDS = (
+    "nude", "naked", "topless", "bottomless", "pussy", "anus", "nipples",
+    "areola", "areolae", "clitoris", "cameltoe", "breasts out", "breast out",
+    "exposed",
+)
+_BODY_CONFLICT_WORDS = (
+    "nude", "naked", "topless", "bottomless", "pussy", "anus", "nipples",
+    "areola", "areolae", "clitoris", "cameltoe", "breasts out", "breast out",
+    "pussy juice", "spread pussy", "underwear", "panties", "bra", "no bra",
+    "no panties", "cum", "sex", "masturbation", "fingering",
+)
+_FRAMING_WORDS = (
+    "full body", "upper body", "lower body", "medium shot", "wide shot",
+    "medium closeup", "closeup", "close up", "cowboy shot", "portrait",
+)
+_BODY_TRIGGER_GROUPS = (
+    (("juice", "cum", "ejaculat", "squirt", "liquid", "orgasm", "drip"), (
+        "pussy juice", "love liquid", "cum", "came", "orgasm", "ejaculation",
+        "squirt", "wet", "dripping", "after sex", "after came",
+        "female ejaculation", "fluid")),
+    (("pussy", "vagina", "vulva", "labia", "clit", "anus", "anal"), (
+        "pussy", "vagina", "vulva", "labia", "clit", "anus", "anal", "nude",
+        "naked", "bottomless", "spread legs", "masturbation", "fingering",
+        "sex", "revealing pussy", "pussy juice", "private parts",
+        "hand on pussy", "finger in pussy", "quick hand movements",
+        "hand movements", "orgasm")),
+    (("nipple", "breast", "areola", "boob"), (
+        "nipples", "breasts", "breast", "areola", "topless", "breasts out",
+        "breast out", "nude", "naked")),
+    (("penis", "cock", "testicle", "phallus"), (
+        "penis", "cock", "testicles", "phallus", "nude", "naked", "sex")),
+    (("ass", "butt"), ("ass", "anus", "anal", "nude", "naked", "bottomless")),
+)
+
 
 def _tag_key(tag: str) -> str:
     text = tag.lower().replace("\\", "")
     text = re.sub(r"\([^)]*\)", "", text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _contains_word(text: str, word: str) -> bool:
+    blob = " " + _tag_key(text).replace("_", " ").replace("-", " ") + " "
+    needle = _tag_key(word).replace("_", " ").replace("-", " ")
+    return bool(needle) and re.search(
+        r"(?<![a-z0-9])" + re.escape(needle) + r"(?![a-z0-9])", blob) is not None
+
+
+def _contains_any(text: str, words: tuple[str, ...]) -> bool:
+    return any(_contains_word(text, word) for word in words)
+
+
+def _filtered_body_tags(value: Any, prompt: str, negative: str) -> str:
+    negative_keys = {_tag_key(tag) for tag in negative.split(",") if tag.strip()}
+    locked = (_contains_any(prompt, _CLOTHING_WORDS)
+              and not _contains_any(prompt, _EXPOSURE_WORDS))
+    framing_locked = _contains_any(prompt, _FRAMING_WORDS)
+    result: list[str] = []
+    for token in str(value or "").split(","):
+        tag = token.strip()
+        if not tag:
+            continue
+        key = _tag_key(tag)
+        if key in negative_keys:
+            continue
+        if framing_locked and _contains_any(tag, _FRAMING_WORDS):
+            continue
+        if locked and _contains_any(tag, _BODY_CONFLICT_WORDS):
+            continue
+        result.append(tag)
+    return ", ".join(result)
 
 
 def join_tags(*parts: Any) -> str:
@@ -169,29 +246,80 @@ def add_detailers(wf: dict[str, Any], cfg: dict[str, Any], image: list[Any], mod
     return image
 
 
+def _is_body_lora(lora: dict[str, Any]) -> bool:
+    if lora.get("scope") == "body" or lora.get("body") is True:
+        return True
+    name = str(lora.get("name") or "").replace("/", "\\").lower()
+    return "\\身体部位\\" in "\\" + name or "\\body\\" in "\\" + name
+
+
+def _body_lora_relevant(lora: dict[str, Any], prompt: str) -> bool:
+    triggers = [str(tag).strip() for tag in (lora.get("triggers") or [])
+                if str(tag).strip()]
+    if not triggers:
+        return False
+    if any(_contains_word(prompt, trigger) for trigger in triggers):
+        return True
+    for trigger in triggers:
+        key = _tag_key(trigger)
+        for hints, terms in _BODY_TRIGGER_GROUPS:
+            if any(hint in key for hint in hints):
+                if _contains_any(prompt, terms):
+                    return True
+                break
+    return False
+
+
+def _body_trigger_tags(cfg: dict[str, Any], shot: dict[str, Any]) -> str:
+    tags: list[str] = []
+    seen: set[str] = set()
+    for lora in lora_chain(cfg, shot):
+        if not _is_body_lora(lora):
+            continue
+        for tag in lora.get("triggers") or []:
+            text = str(tag).strip()
+            key = _tag_key(text)
+            if text and key not in seen:
+                seen.add(key)
+                tags.append(text)
+    return ", ".join(tags)
+
+
 def compose_prompts(cfg: dict[str, Any], shot: dict[str, Any]) -> tuple[str, str]:
     style = cfg.get("style") or {}
     character = cfg.get("character") or {}
     body = cfg.get("body") or {}
+    prompt = shot.get("prompt", "")
+    negative = join_tags(shot.get("style_negative", style.get("negative", "")),
+                         shot.get("negative", ""))
+    has_body_loras = any(_is_body_lora(lora) for lora in lora_chain(cfg))
+    if has_body_loras:
+        body_source = _body_trigger_tags(cfg, shot)
+    else:
+        body_source = shot.get("body_tags", body.get("tags", ""))
+    body_tags = _filtered_body_tags(body_source, prompt, negative)
     positive = join_tags(
         shot.get("style_positive", style.get("positive", "")),
         shot.get("style_lora_tags", style.get("lora_tags", "")),
         shot.get("character_tags", character.get("tags", "")),
-        shot.get("body_tags", body.get("tags", "")),
-        shot.get("prompt", ""),
+        body_tags,
+        prompt,
         shot.get("style_suffix", style.get("suffix", "")),
     )
-    negative = join_tags(shot.get("style_negative", style.get("negative", "")),
-                         shot.get("negative", ""))
-    return positive, negative
+    return sanitize_prompt_tags(positive), sanitize_prompt_tags(negative)
 
 
-def lora_chain(cfg: dict[str, Any]) -> list[dict[str, Any]]:
+def lora_chain(cfg: dict[str, Any], shot: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     loras = cfg.get("loras")
     if loras is None:
         legacy = cfg.get("lora")
         loras = [legacy] if legacy else []
-    return [lora for lora in loras if lora.get("name")]
+    result = [lora for lora in loras if lora.get("name")]
+    if shot is None:
+        return result
+    prompt = shot.get("prompt", "")
+    return [lora for lora in result
+            if not _is_body_lora(lora) or _body_lora_relevant(lora, prompt)]
 
 
 def build_workflow(cfg: dict[str, Any], shot: dict[str, Any], positive: str, negative: str,
@@ -233,7 +361,7 @@ def build_workflow(cfg: dict[str, Any], shot: dict[str, Any], positive: str, neg
             "embeds_scaling": style_ref.get("embeds_scaling", "V only")}}
         model = ["32", 0]
 
-    for i, lora in enumerate(lora_chain(cfg)[:8]):
+    for i, lora in enumerate(lora_chain(cfg, shot)[:8]):
         nid = str(20 + i)
         strength = lora.get("strength", 0.8)
         if lora.get("clip_strength") is not None:
@@ -254,11 +382,27 @@ def build_workflow(cfg: dict[str, Any], shot: dict[str, Any], positive: str, neg
     negative = expand_wildcards(negative, seed, wildcards)
     wf["6"] = {"class_type": "CLIPTextEncode", "inputs": {"clip": clip, "text": positive}}
     wf["7"] = {"class_type": "CLIPTextEncode", "inputs": {"clip": clip, "text": negative}}
-    wf["8"] = {"class_type": "EmptyLatentImage", "inputs": {
-        "width": settings.get("width", 1024),
-        "height": settings.get("height", 1344),
-        "batch_size": 1}}
-    add_sampler(wf, cfg, "9", model, ["6", 0], ["7", 0], ["8", 0], seed)
+    init_image = str(shot.get("init_image") or "").strip()
+    if init_image:
+        wf["70"] = {"class_type": "LoadImage", "inputs": {"image": init_image}}
+        wf["72"] = {"class_type": "ImageScale", "inputs": {
+            "image": ["70", 0],
+            "upscale_method": "lanczos",
+            "width": int(settings.get("width", 1024)),
+            "height": int(settings.get("height", 1344)),
+            "crop": "disabled"}}
+        wf["71"] = {"class_type": "VAEEncode", "inputs": {
+            "pixels": ["72", 0], "vae": vae}}
+        latent = ["71", 0]
+    else:
+        wf["8"] = {"class_type": "EmptyLatentImage", "inputs": {
+            "width": settings.get("width", 1024),
+            "height": settings.get("height", 1344),
+            "batch_size": 1}}
+        latent = ["8", 0]
+    add_sampler(wf, cfg, "9", model, ["6", 0], ["7", 0], latent, seed)
+    if init_image:
+        wf["9"]["inputs"]["denoise"] = float(shot.get("init_denoise", 0.45))
     wf["10"] = {"class_type": "VAEDecode", "inputs": {"samples": ["9", 0], "vae": vae}}
 
     final = ["10", 0]

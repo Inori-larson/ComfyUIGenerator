@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -9,8 +10,9 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QDialog, QDialogButtonBox, QGridLayout, QHBoxLayout, QLabel,
-    QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QScrollArea,
-    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit,
+    QPushButton, QScrollArea, QSplitter, QTableWidget, QTableWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from comfyui_generator.core.project import (
@@ -309,3 +311,140 @@ class TagReferenceDialog(QDialog):
             QMessageBox.information(self, "提示", "先勾选要加入的标签。")
             return
         self.accept()
+
+
+class ShotDetailsDialog(QDialog):
+    """Show every storyboard shot with Chinese text, plot outline and raw JSON."""
+
+    def __init__(self, shots: list[dict[str, Any]], outlines: list[str], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("分镜详情")
+        self.resize(1120, 760)
+        self._shots = [dict(shot) for shot in shots]
+        self._outlines = list(outlines)
+        self._raw: list[str] = []
+        self._loading = False
+        self._current_row = -1
+        for shot in self._shots:
+            self._raw.append(json.dumps({
+                "id": str(shot.get("id", "")),
+                "name": str(shot.get("name", "")),
+                "prompt": str(shot.get("prompt", "")),
+            }, ensure_ascii=False, indent=2))
+
+        layout = QVBoxLayout(self)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.list = QListWidget()
+        self.list.setMinimumWidth(220)
+        self.list.setMaximumWidth(320)
+        for index, shot in enumerate(self._shots):
+            self.list.addItem("%s  %s" % (shot.get("id", ""), shot.get("name", "")))
+        splitter.addWidget(self.list)
+
+        right = QWidget()
+        form = QVBoxLayout(right)
+        self.heading = QLabel("")
+        form.addWidget(self.heading)
+
+        form.addWidget(QLabel("中文提示词（只读）"))
+        self.zh_edit = QPlainTextEdit()
+        self.zh_edit.setReadOnly(True)
+        self.zh_edit.setMinimumHeight(90)
+        form.addWidget(self.zh_edit)
+
+        form.addWidget(QLabel("对应分镜的中文大纲（只读）"))
+        self.outline_edit = QPlainTextEdit()
+        self.outline_edit.setReadOnly(True)
+        self.outline_edit.setMinimumHeight(80)
+        form.addWidget(self.outline_edit)
+
+        form.addWidget(QLabel("实际生效的英文原始 JSON（可编辑；保存后用于出图）"))
+        self.json_edit = QPlainTextEdit()
+        self.json_edit.setMinimumHeight(220)
+        self.json_edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        form.addWidget(self.json_edit, 1)
+        splitter.addWidget(right)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        layout.addWidget(splitter, 1)
+
+        row = QHBoxLayout()
+        hint = QLabel("修改英文 prompt 后保存，会更新分镜并自动重新译中文。")
+        hint.setWordWrap(True)
+        row.addWidget(hint, 1)
+        btn_cancel = QPushButton("取消")
+        btn_save = QPushButton("保存修改")
+        btn_save.setObjectName("Primary")
+        btn_cancel.clicked.connect(self.reject)
+        btn_save.clicked.connect(self._save)
+        row.addWidget(btn_cancel)
+        row.addWidget(btn_save)
+        layout.addLayout(row)
+
+        self.list.currentRowChanged.connect(self._switch_shot)
+        self._loading = True
+        if self._shots:
+            self.list.setCurrentRow(0)
+        self._loading = False
+        self._load_shot(0 if self._shots else -1)
+
+    def _store_current(self) -> None:
+        row = self._current_row
+        if 0 <= row < len(self._raw):
+            self._raw[row] = self.json_edit.toPlainText()
+
+    def _switch_shot(self, row: int) -> None:
+        if self._loading:
+            return
+        self._store_current()
+        self._load_shot(row)
+
+    def _load_shot(self, row: int) -> None:
+        self._current_row = row
+        if not (0 <= row < len(self._shots)):
+            self.heading.setText("没有分镜")
+            self.zh_edit.clear()
+            self.outline_edit.clear()
+            self.json_edit.clear()
+            return
+        shot = self._shots[row]
+        self.heading.setText("分镜 %s · %s" % (shot.get("id", ""), shot.get("name", "")))
+        self.zh_edit.setPlainText(str(shot.get("prompt_zh") or shot.get("prompt") or ""))
+        outline = self._outlines[row] if row < len(self._outlines) else ""
+        self.outline_edit.setPlainText(outline or "（剧情没有按编号提供对应大纲）")
+        self.json_edit.setPlainText(self._raw[row])
+
+    def _save(self) -> None:
+        self._store_current()
+        updated: list[dict[str, Any]] = []
+        for index, raw in enumerate(self._raw):
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                self.list.setCurrentRow(index)
+                QMessageBox.warning(
+                    self, "JSON 格式错误",
+                    "第 %s 镜 JSON 无法解析：\n第 %d 行：%s" % (
+                        self._shots[index].get("id", index + 1), exc.lineno, exc.msg))
+                return
+            if not isinstance(data, dict):
+                self.list.setCurrentRow(index)
+                QMessageBox.warning(self, "JSON 格式错误", "每一镜的 JSON 必须是对象。")
+                return
+            prompt = str(data.get("prompt") or "").strip()
+            if not prompt:
+                self.list.setCurrentRow(index)
+                QMessageBox.warning(self, "提示词为空", "prompt 不能为空。")
+                return
+            shot = dict(self._shots[index])
+            old_prompt = str(shot.get("prompt", ""))
+            shot["id"] = str(data.get("id", shot.get("id", ""))).strip()
+            shot["name"] = str(data.get("name", shot.get("name", ""))).strip()
+            shot["prompt"] = prompt
+            shot["_prompt_changed"] = prompt != old_prompt
+            updated.append(shot)
+        self._shots = updated
+        self.accept()
+
+    def updated_shots(self) -> list[dict[str, Any]]:
+        return [dict(shot) for shot in self._shots]

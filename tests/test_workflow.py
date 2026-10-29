@@ -4,6 +4,7 @@ from comfyui_generator.core.workflow import (
     build_workflow,
     compose_prompts,
     expand_wildcards,
+    lora_chain,
     stage_for_node,
 )
 
@@ -57,13 +58,98 @@ def test_compose_prompts_includes_body_tags(cfg):
     assert "nude" in positive
 
 
+def test_compose_prompts_blocks_body_tags_that_remove_clothing(cfg):
+    cfg = dict(cfg)
+    cfg["style"] = dict(cfg["style"])
+    cfg["style"]["negative"] = "bad quality, censored"
+    cfg["body"] = {"tags": "pussy, nude, close-up, censored, breasts"}
+    shot = {"prompt": "black blazer, frilled black leotard, black pantyhose, full_body"}
+    positive, _ = compose_prompts(cfg, shot)
+    tags = [tag.strip() for tag in positive.split(",")]
+    assert "pussy" not in tags
+    assert "nude" not in tags
+    assert "close-up" not in tags
+    assert "censored" not in tags
+    assert "breasts" in tags
+    assert "black blazer" in tags
+
+
+def test_compose_prompts_keeps_body_tags_when_shot_is_nude(cfg):
+    cfg = dict(cfg)
+    cfg["body"] = {"tags": "pussy, nude, close-up"}
+    positive, _ = compose_prompts(cfg, {"prompt": "nude, full_body"})
+    tags = [tag.strip() for tag in positive.split(",")]
+    assert "pussy" in tags
+    assert "nude" in tags
+    assert "close-up" not in tags
+
+
+def test_compose_prompts_removes_body_tags_listed_in_negative(cfg):
+    cfg = dict(cfg)
+    cfg["style"] = dict(cfg["style"])
+    cfg["style"]["negative"] = "bad quality, censored"
+    cfg["body"] = {"tags": "censored, pussy"}
+    positive, _ = compose_prompts(cfg, {"prompt": "nude"})
+    tags = [tag.strip() for tag in positive.split(",")]
+    assert "censored" not in tags
+    assert "pussy" in tags
+
+
+def test_compose_prompts_removes_camera_equipment(cfg):
+    cfg = dict(cfg)
+    cfg["body"] = {"tags": ""}
+    positive, _ = compose_prompts(
+        cfg, {"prompt": "looking_at_camera, holding_camera, black_pantyhose, from_below"})
+    tags = [tag.strip() for tag in positive.split(",")]
+    assert "looking at viewer" in tags
+    assert "holding camera" not in tags
+    assert "black pantyhose" in tags
+    assert "from below" in tags
+
+
+def test_body_loras_are_selected_per_shot(cfg):
+    cfg = dict(cfg)
+    cfg["loras"] = cfg["loras"] + [
+        {"name": "身体部位\\AnimePussyV1.safetensors", "strength": 0.9,
+         "scope": "body", "triggers": ["pussy"]},
+        {"name": "身体部位\\pussy juice_illustrious_V1.0.safetensors", "strength": 0.9,
+         "scope": "body", "triggers": ["pussy juice"]},
+    ]
+    clothed = {"prompt": "black blazer, frilled black leotard, full_body"}
+    nude = {"prompt": "nude, full_body"}
+    juice = {"prompt": "nude, pussy juice"}
+
+    clothed_names = [item["name"] for item in lora_chain(cfg, clothed)]
+    assert not any("身体部位" in name for name in clothed_names)
+    nude_names = [item["name"] for item in lora_chain(cfg, nude)]
+    assert "身体部位\\AnimePussyV1.safetensors" in nude_names
+    assert "身体部位\\pussy juice_illustrious_V1.0.safetensors" not in nude_names
+    juice_names = [item["name"] for item in lora_chain(cfg, juice)]
+    assert "身体部位\\pussy juice_illustrious_V1.0.safetensors" in juice_names
+
+    clothed_tags = [tag.strip() for tag in compose_prompts(cfg, clothed)[0].split(",")]
+    nude_tags = [tag.strip() for tag in compose_prompts(cfg, nude)[0].split(",")]
+    juice_tags = [tag.strip() for tag in compose_prompts(cfg, juice)[0].split(",")]
+    assert "pussy" not in clothed_tags
+    assert "pussy juice" not in clothed_tags
+    assert "pussy" in nude_tags
+    assert "pussy juice" not in nude_tags
+    assert "pussy" in juice_tags
+    assert "pussy juice" in juice_tags
+
+    euphemism = {"prompt": "finger in vagina, quick hand movements"}
+    euphemism_names = [item["name"] for item in lora_chain(cfg, euphemism)]
+    assert "身体部位\\AnimePussyV1.safetensors" in euphemism_names
+    assert "pussy" in [tag.strip() for tag in compose_prompts(cfg, euphemism)[0].split(",")]
+
+
 def test_compose_prompts_includes_style_lora_tags(cfg):
     cfg = dict(cfg)
     cfg["style"] = dict(cfg["style"])
     cfg["style"]["lora_tags"] = "style_a, style_b"
     positive, _ = compose_prompts(cfg, {"prompt": "park"})
-    assert "style_a" in positive
-    assert "style_b" in positive
+    assert "style a" in positive
+    assert "style b" in positive
 
 
 def test_workflow_structure(cfg):
@@ -87,6 +173,23 @@ def test_workflow_structure(cfg):
     assert wf["200"]["inputs"]["text"] == "detailed face"
     assert wf["63"]["inputs"]["image"] == ["61", 0]
     assert wf["64"]["inputs"]["filename_prefix"] == "anime_story/01_test"
+
+
+def test_workflow_uses_previous_image_for_img2img(cfg):
+    shot = {"prompt": "standing", "init_image": "anime_story_chain/prev.png",
+            "init_denoise": 0.55}
+    wf = build_workflow(cfg, shot, "p", "n", 1, False, "pref")
+    assert "8" not in wf
+    assert wf["70"]["class_type"] == "LoadImage"
+    assert wf["70"]["inputs"]["image"] == "anime_story_chain/prev.png"
+    assert wf["72"]["class_type"] == "ImageScale"
+    assert wf["72"]["inputs"]["image"] == ["70", 0]
+    assert wf["72"]["inputs"]["width"] == 832
+    assert wf["72"]["inputs"]["height"] == 1216
+    assert wf["71"]["class_type"] == "VAEEncode"
+    assert wf["71"]["inputs"]["pixels"] == ["72", 0]
+    assert wf["9"]["inputs"]["latent_image"] == ["71", 0]
+    assert wf["9"]["inputs"]["denoise"] == 0.55
 
 
 def test_workflow_without_hires(cfg):

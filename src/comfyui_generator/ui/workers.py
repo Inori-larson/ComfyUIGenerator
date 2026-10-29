@@ -17,6 +17,7 @@ from PySide6.QtCore import QThread, Signal
 from comfyui_generator.core.assets import Assets
 from comfyui_generator.core.comfy import ComfyClient
 from comfyui_generator.core.config import AppConfig
+from comfyui_generator.core.external_llm import ExternalLLMClient
 from comfyui_generator.core.jobs import Task, TaskRunner
 from comfyui_generator.core.ollama import OllamaClient
 from comfyui_generator.core.preview import PreviewFrame
@@ -24,7 +25,6 @@ from comfyui_generator.core.services import ComfyService, OllamaService
 from comfyui_generator.core.lora_info import lora_tag_info
 from comfyui_generator.core.rewrite import rewrite_shot_prompt
 from comfyui_generator.core.single import SingleOptions, generate_single_prompt
-from comfyui_generator.core.tagger import select_tags
 from comfyui_generator.core.tag_cache import load_tag_cache, update_tag_cache
 from comfyui_generator.core.translate import translate_prompts, translate_tag_list, translate_to_tags
 from comfyui_generator.core.storyboard import StoryboardOptions, generate_storyboard
@@ -104,37 +104,62 @@ class PromptWorker(QThread):
                  instruction: str = "",
                  character_tags: str = "",
                  style_positive: str = "",
-                 reference_tags: list[str] | None = None):
+                 strip_appearance: bool = False,
+                 use_external: bool = False):
         super().__init__()
         self.cfg = cfg
         self.kind = kind
         self.text = text
         self.single_options = single_options
         self.story_options = story_options
+        if self.single_options is not None:
+            self.single_options.log = self.log.emit
+        if self.story_options is not None:
+            self.story_options.log = self.log.emit
         self.initial_shots = initial_shots
         self.model = model
         self.current_prompt = current_prompt
         self.instruction = instruction
         self.character_tags = character_tags
         self.style_positive = style_positive
-        self.reference_tags = reference_tags or []
+        self.strip_appearance = strip_appearance
+        self.use_external = use_external
 
     def run(self) -> None:
-        client = OllamaClient(self.cfg.ollama.base_url)
-        model = self.model or (self.single_options or self.story_options).model
+        if self.use_external:
+            client = ExternalLLMClient(self.cfg.external_llm)
+            model = self.model or self.cfg.external_llm.model
+        else:
+            client = OllamaClient(self.cfg.ollama.base_url)
+            model = self.model or (self.single_options or self.story_options).model
+        local_client = client if not self.use_external else OllamaClient(self.cfg.ollama.base_url)
+        local_model = model if not self.use_external else self.cfg.ollama.default_model
+        if self.use_external:
+            if self.single_options is not None:
+                self.single_options.model = model
+            if self.story_options is not None:
+                self.story_options.model = model
         try:
             if self.kind == "single":
                 result = generate_single_prompt(client, self.text, self.single_options)
                 tags = self._split_tags(result["prompt"])
-                result["prompt_zh"] = self._translate_tags(client, model, tags)
+                if local_model:
+                    result["prompt_zh"] = self._translate_tags(
+                        local_client, local_model, tags)
+                else:
+                    result["prompt_zh"] = "，".join(tags)
                 self.single_ready.emit(result)
             elif self.kind == "rewrite":
                 prompt = rewrite_shot_prompt(
                     client, model, self.current_prompt, self.instruction,
                     character_tags=self.character_tags,
                     style_positive=self.style_positive,
-                    reference_tags=self.reference_tags)
-                prompt_zh = self._translate_tags(client, model, self._split_tags(prompt))
+                    strip_appearance=self.strip_appearance)
+                if local_model:
+                    prompt_zh = self._translate_tags(
+                        local_client, local_model, self._split_tags(prompt))
+                else:
+                    prompt_zh = prompt
                 self.rewritten.emit({"prompt": prompt, "prompt_zh": prompt_zh})
             else:
                 shots = generate_storyboard(
@@ -142,7 +167,8 @@ class PromptWorker(QThread):
                 all_tags: list[str] = []
                 for shot in shots:
                     all_tags += self._split_tags(shot.get("prompt", ""))
-                mapping = self._translate_map(client, model, all_tags)
+                mapping = (self._translate_map(local_client, local_model, all_tags)
+                           if local_model else {})
                 for shot in shots:
                     zh_tags = [mapping.get(tag, tag) for tag in self._split_tags(shot.get("prompt", ""))]
                     shot["prompt_zh"] = "，".join(zh_tags)
@@ -154,6 +180,11 @@ class PromptWorker(QThread):
                 client.unload(model)
             except Exception:
                 pass
+            if self.use_external and local_model:
+                try:
+                    local_client.unload(local_model)
+                except Exception:
+                    pass
 
     @staticmethod
     def _split_tags(text: str) -> list[str]:
@@ -364,32 +395,3 @@ class AutoTranslateWorker(QThread):
         except Exception:
             pass
 
-
-class TagPickWorker(QThread):
-    done = Signal(list)
-    failed = Signal(str)
-
-    def __init__(self, cfg: AppConfig, model: str, reference: list[str], context: str,
-                 character_tags: str, required: list[str] | None = None):
-        super().__init__()
-        self.cfg = cfg
-        self.model = model
-        self.reference = reference
-        self.context = context
-        self.character_tags = character_tags
-        self.required = required or []
-
-    def run(self) -> None:
-        client = OllamaClient(self.cfg.ollama.base_url)
-        try:
-            tags = select_tags(client, self.model, self.reference, self.context,
-                               character_tags=self.character_tags,
-                               required=self.required)
-            self.done.emit(tags)
-        except Exception as exc:
-            self.failed.emit(str(exc))
-        finally:
-            try:
-                client.unload(self.model)
-            except Exception:
-                pass

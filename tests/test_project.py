@@ -2,14 +2,16 @@ import json
 from pathlib import Path
 
 from comfyui_generator.core.project import (
-    clear_trash, delete_from_trash, list_trash, list_projects,
+    clear_trash, delete_from_trash,     list_trash, list_projects,
     load_project,
     load_profile,
+    load_session,
     move_to_trash,
     new_project,
     restore_from_trash,
     save_profile,
     save_project,
+    save_session,
 )
 
 
@@ -47,6 +49,36 @@ def test_save_load_list(tmp_path):
     assert len(items) == 1
     assert items[0]["name"] == "demo"
     assert items[0]["shots"] == 1
+
+
+def test_session_roundtrip_and_missing_file(tmp_path):
+    assert load_session(tmp_path) == {}
+    data = {
+        "mode": "story",
+        "activation": {"en": "yixuan", "zh": "仪玄"},
+        "loras": {"character": {"hero.safetensors": {
+            "checked": True, "strength": 0.75}}},
+    }
+    save_session(data, tmp_path)
+    assert load_session(tmp_path) == data
+
+
+def test_corrupt_session_is_ignored(tmp_path):
+    (tmp_path / "ui_session.json").write_text("{bad", encoding="utf-8")
+    assert load_session(tmp_path) == {}
+
+
+def test_list_projects_newest_first(tmp_path):
+    folder = tmp_path / "projects"
+    folder.mkdir()
+    for name, updated in (("old", "2026-01-01T10:00:00"),
+                          ("new", "2026-10-28T19:00:00"),
+                          ("middle", "2026-05-01T10:00:00")):
+        (folder / ("%s.json" % name)).write_text(json.dumps({
+            "id": name, "name": name, "updated": updated, "shots": [],
+        }), encoding="utf-8")
+    assert [item["name"] for item in list_projects(tmp_path)] == [
+        "new", "middle", "old"]
 
 
 def test_profile_strips_story_and_seed(tmp_path):

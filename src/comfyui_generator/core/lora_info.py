@@ -1,7 +1,9 @@
 """Read LoRA tags directly from bundled safetensors metadata.
 
-No filtering, no thresholds: every tag found in ``ss_tag_frequency`` (plus
-trigger/title fields) is listed so the user can decide what to keep.
+The reference list is unfiltered: every tag found in ``ss_tag_frequency``
+(plus trigger/title fields) is available for manual selection.  The automatic
+activation list is conservative and derived from explicit trigger fields or
+the model title/filename, never from the full frequency dump.
 """
 
 from __future__ import annotations
@@ -215,28 +217,35 @@ def identity_tags(meta: dict[str, Any], filename: str,
 
 def default_activation(meta: dict[str, Any], filename: str,
                        reference: list[str]) -> list[str]:
-    """Small default prompt subset; the full list stays available as reference.
+    """Return a small activation phrase derived from the model itself.
 
-    No content filtering: trigger fields first, then title/stem if they are
-    actual tags, otherwise the first 12 reference tags.
+    Explicit trigger fields win.  Otherwise use tags that actually occur in the
+    title or filename.  Dataset frequency tags are deliberately not dumped here:
+    body LoRAs often have ``nude``/``pussy`` as their most frequent captions,
+    and injecting those into every clothed storyboard shot overrides clothing.
+    The full tag list remains available as ``reference`` for manual editing.
     """
-    lower_ref = {tag.lower(): tag for tag in reference}
     triggers = _explicit_triggers(meta)
     if triggers:
         return triggers[:12]
 
-    title = _clean_tag(str(meta.get("modelspec.title") or ""))
-    if title and title.lower() in lower_ref:
-        return [lower_ref[title.lower()]]
+    title = _clean_tag(str(meta.get("modelspec.title") or "")).lower().replace("_", " ")
+    stem = Path(filename).stem.lower().replace("_", " ")
+    matches: list[str] = []
+    for tag in reference:
+        key = _clean_tag(tag).lower().replace("_", " ")
+        base = key.split("(", 1)[0].strip().rstrip("\\").strip()
+        candidates = {key, base} if base else {key}
+        if any(len(candidate) >= 3 and candidate in title or
+               len(candidate) >= 3 and candidate in stem for candidate in candidates):
+            matches.append(tag)
 
-    stem = Path(filename).stem.lower()
-    for candidate in (stem, stem.replace("-", "_"), stem.replace("_", "-")):
-        if candidate in lower_ref:
-            return [lower_ref[candidate]]
-
-    counts = _tag_counts(meta)
-    ordered = sorted(reference, key=lambda tag: counts.get(tag, 0), reverse=True)
-    return ordered[:12]
+    selected: list[str] = []
+    for tag in sorted(matches, key=lambda value: len(_clean_tag(value)), reverse=True):
+        key = _clean_tag(tag).lower()
+        if not any(key in _clean_tag(value).lower() for value in selected):
+            selected.append(tag)
+    return selected[:4]
 
 
 def lora_tag_info(path: str | Path, online: bool = False, civitai_base: str = "",

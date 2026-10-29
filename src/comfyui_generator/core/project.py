@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 PROJECT_VERSION = 1
+SESSION_FILE = "ui_session.json"
 
 
 def new_project(name: str, premise: str, template: dict[str, Any],
@@ -53,6 +54,30 @@ def load_project(path: str | Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def session_file(root: Path) -> Path:
+    return root / SESSION_FILE
+
+
+def save_session(data: dict[str, Any], root: Path) -> Path:
+    path = session_file(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+    return path
+
+
+def load_session(root: Path) -> dict[str, Any]:
+    path = session_file(root)
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def list_projects(root: Path) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for path in sorted(projects_dir(root).glob("*.json")):
@@ -67,6 +92,7 @@ def list_projects(root: Path) -> list[dict[str, Any]]:
             "shots": len(data.get("shots") or []),
             "path": str(path),
         })
+    items.sort(key=lambda item: item.get("updated", ""), reverse=True)
     return items
 
 

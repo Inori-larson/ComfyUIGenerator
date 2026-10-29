@@ -100,6 +100,23 @@ class SettingsDialog(QDialog):
         ollama_form.addRow("默认模型", self.ollama_model)
         root.addWidget(ollama_box)
 
+        external_box = QGroupBox("外部 OpenAI 兼容 API（提示词生成）")
+        external_form = QFormLayout(external_box)
+        self.external_base = QLineEdit(cfg.external_llm.base_url)
+        self.external_base.setPlaceholderText("https://api.openai.com/v1")
+        external_form.addRow("Base URL", self.external_base)
+        self.external_key = QLineEdit(cfg.external_llm.api_key)
+        self.external_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.external_key.setPlaceholderText("sk-...（也可用 OPENAI_API_KEY）")
+        external_form.addRow("API Key", self.external_key)
+        self.external_model = QLineEdit(cfg.external_llm.model)
+        self.external_model.setPlaceholderText("模型名，例如 gpt-4o")
+        external_form.addRow("模型", self.external_model)
+        external_hint = QLabel("只用于外部提示词生成，不调用 Ollama；Key 仅保存在本机 config.json。")
+        external_hint.setWordWrap(True)
+        external_form.addRow("", external_hint)
+        root.addWidget(external_box)
+
         lora_box = QGroupBox("LoRA 数据源")
         lora_form = QFormLayout(lora_box)
         self.character_lora_dir = _path_row(
@@ -169,6 +186,9 @@ class SettingsDialog(QDialog):
         c.ollama.port = self.ollama_port.value()
         c.ollama.exe = self.ollama_exe.text().strip()
         c.ollama.default_model = self.ollama_model.currentValue() or ""
+        c.external_llm.base_url = self.external_base.text().strip()
+        c.external_llm.api_key = self.external_key.text().strip()
+        c.external_llm.model = self.external_model.text().strip()
         c.lora.character_dir = self.character_lora_dir.text().strip()
         c.lora.style_dir = self.style_lora_dir.text().strip()
         c.lora.body_dir = self.body_lora_dir.text().strip()

@@ -166,6 +166,14 @@ class OllamaConfig:
 
 
 @dataclass
+class ExternalLLMConfig:
+    base_url: str = ""
+    api_key: str = ""
+    model: str = ""
+    timeout: float = 240.0
+
+
+@dataclass
 class GenerationDefaults:
     template: str = ""
     shots: int = 6
@@ -211,6 +219,7 @@ class ModelListsConfig:
 class AppConfig:
     comfy: ComfyConfig = field(default_factory=ComfyConfig)
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
+    external_llm: ExternalLLMConfig = field(default_factory=ExternalLLMConfig)
     generation: GenerationDefaults = field(default_factory=GenerationDefaults)
     lora: LoraConfig = field(default_factory=LoraConfig)
     models: ModelListsConfig = field(default_factory=ModelListsConfig)
@@ -276,6 +285,8 @@ def default_config() -> AppConfig:
         cfg.comfy.input_dir = str(base / "input")
         cfg.comfy.output_dir = str(base / "output")
         cfg.comfy.user_dir = str(base / "user")
+        cfg.lora.character_dir = str(base / "models" / "loras" / "角色")
+        cfg.lora.style_dir = str(base / "models" / "loras" / "风格")
         cfg.lora.body_dir = str(base / "models" / "loras" / "身体部位")
     cfg.ollama.exe = str(ollama_exe) if ollama_exe else ""
     cfg.generation.template = str(DEFAULT_PRESET)
