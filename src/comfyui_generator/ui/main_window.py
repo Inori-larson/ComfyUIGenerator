@@ -31,7 +31,7 @@ from comfyui_generator.core.config import (
 from comfyui_generator.core.detailers import build_detailer_choices, filter_detector_models, local_detectors
 from comfyui_generator.core.jobs import Task, build_tasks
 from comfyui_generator.core.lora_info import is_style_lora, lora_tag_info
-from comfyui_generator.core.lora_sources import lora_entries
+from comfyui_generator.core.lora_sources import lora_display_label, lora_entries
 from comfyui_generator.core.ollama import OllamaClient
 from comfyui_generator.core.project import (
     clear_story_partial, list_projects, load_project, load_session,
@@ -161,6 +161,9 @@ class MainWindow(QMainWindow):
         self._lora_paths: dict[str, str] = {}
         self._online_tried: set[str] = set()
         self.lora_tags_worker: LoraTagsWorker | None = None
+        self._lora_label_worker: TagTranslateWorker | None = None
+        self._lora_label_pending = False
+        self._lora_label_translations: dict[str, str] = {}
         self._character_lora_names: set[str] = set()
         self._style_lora_names: set[str] = set()
         self._body_lora_names: set[str] = set()
@@ -1213,6 +1216,76 @@ class MainWindow(QMainWindow):
                     item.checkState() == Qt.CheckState.Checked, spin.value())
         return data
 
+    def _lora_label_source(self, name: str) -> str:
+        return lora_display_label(name)
+
+    def _lora_label_text(self, name: str) -> str:
+        source = self._lora_label_source(name)
+        return self._lora_label_translations.get(source, source)
+
+    def _lora_tables(self) -> tuple[QTableWidget, ...]:
+        return (self.lora_table, self.style_lora_table, self.body_lora_table,
+                self.action_lora_table, self.clothing_lora_table)
+
+    def _apply_lora_label_translations(self, mapping: dict[str, str]) -> None:
+        for table in self._lora_tables():
+            for row in range(table.rowCount()):
+                item = table.item(row, 0)
+                if not item:
+                    continue
+                name = str(item.data(Qt.ItemDataRole.UserRole) or "")
+                source = self._lora_label_source(name)
+                value = mapping.get(source, "")
+                if not value or value == source:
+                    continue
+                self._lora_label_translations[source] = value
+                item.setText(value)
+
+    def _translate_lora_labels(self) -> None:
+        labels: list[str] = []
+        seen: set[str] = set()
+        for table in self._lora_tables():
+            for row in range(table.rowCount()):
+                item = table.item(row, 0)
+                if not item:
+                    continue
+                source = self._lora_label_source(
+                    str(item.data(Qt.ItemDataRole.UserRole) or ""))
+                if (source and source not in seen
+                        and re.search(r"[A-Za-z]", source)
+                        and not re.search(r"[\u4e00-\u9fff]", source)):
+                    seen.add(source)
+                    labels.append(source)
+        if not labels:
+            return
+        cache = load_tag_cache(self._tag_cache_path)
+        cached = {label: cache[label] for label in labels if label in cache}
+        if cached:
+            self._apply_lora_label_translations(cached)
+        missing = [label for label in labels if label not in cache]
+        if not missing:
+            return
+        model = self._llm()
+        if not model:
+            return
+        if self._lora_label_worker and self._lora_label_worker.isRunning():
+            self._lora_label_pending = True
+            return
+        worker = TagTranslateWorker(self.cfg, model, missing,
+                                    self._tag_cache_path, batch_size=20)
+        worker.batch.connect(self._apply_lora_label_translations)
+        worker.done.connect(self._apply_lora_label_translations)
+        worker.failed.connect(lambda msg: self.append_log("LoRA 名称翻译失败：%s" % msg))
+        worker.finished.connect(self._on_lora_label_translate_finished)
+        self._lora_label_worker = worker
+        worker.start()
+
+    def _on_lora_label_translate_finished(self) -> None:
+        self._lora_label_worker = None
+        if self._lora_label_pending:
+            self._lora_label_pending = False
+            QTimer.singleShot(0, self._translate_lora_labels)
+
     def _fill_lora_table(self, table: QTableWidget, names: list[str],
                          configured: dict[str, float],
                          current: dict[str, tuple[bool, float]]) -> None:
@@ -1224,7 +1297,7 @@ class MainWindow(QMainWindow):
             for name in names:
                 row = table.rowCount()
                 table.insertRow(row)
-                item = QTableWidgetItem(Path(name).name)
+                item = QTableWidgetItem(self._lora_label_text(name))
                 item.setData(Qt.ItemDataRole.UserRole, name)
                 item.setToolTip(name)
                 item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
@@ -1488,6 +1561,7 @@ class MainWindow(QMainWindow):
         self._fill_lora_table(self.clothing_lora_table, clothing_names, configured,
                               self._read_lora_table(self.clothing_lora_table))
         self._refresh_reference_tags()
+        QTimer.singleShot(0, self._translate_lora_labels)
 
     def refresh_loras(self) -> None:
         self._lora_info_cache.clear()
@@ -3188,7 +3262,7 @@ class MainWindow(QMainWindow):
                          checked: bool) -> None:
         row = table.rowCount()
         table.insertRow(row)
-        item = QTableWidgetItem(Path(name).name)
+        item = QTableWidgetItem(self._lora_label_text(name))
         item.setData(Qt.ItemDataRole.UserRole, name)
         item.setToolTip(name)
         item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)

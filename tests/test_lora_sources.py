@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from comfyui_generator.core.lora_sources import (
-    lora_entries, match_comfy_name, scan_lora_dir,
+    lora_display_label, lora_entries, match_comfy_name, scan_lora_dir,
 )
 
 
@@ -21,6 +21,17 @@ def test_match_comfy_name_by_basename():
     assert match_comfy_name("/x/hero.safetensors", names) == names[0]
     assert match_comfy_name("/x/PAINTERLY.safetensors", names) == names[1]
     assert match_comfy_name("/x/unknown.safetensors", names) is None
+
+
+def test_lora_display_label_strips_file_and_noise_tokens():
+    assert lora_display_label(
+        r"动作\after-sex-fellatio-v2-illustriousxl-lora-nochekaiser.safetensors"
+    ) == "after sex fellatio"
+    assert lora_display_label(
+        r"角色\Char-ZZZ-Yixuan-V2-IL.safetensors") == "ZZZ Yixuan"
+    assert lora_display_label(
+        "服装\\AF_DarkDesire_ILL.safetensors") == "AF Dark Desire"
+    assert lora_display_label("AnimeScreencap.safetensors") == "Anime Screencap"
 
 
 def test_lora_entries_display_and_resolution(tmp_path):

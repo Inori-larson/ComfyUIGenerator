@@ -2,10 +2,45 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
 LORA_EXTENSIONS = (".safetensors", ".pt", ".ckpt", ".bin")
+
+_LORA_NOISE = {
+    "lora", "lycoris", "lokr", "safetensors", "illustrious", "illustriousxl",
+    "sdxl", "sd15", "pony", "noob", "nochekaiser", "il", "ill", "xl", "xxl",
+    "final", "fp16", "bf16", "epoch", "char", "character", "model",
+    "checkpoint", "concept", "style", "styles", "v1", "v2", "v3",
+    "v10", "v20", "v30", "1a", "1b",
+}
+_VERSION_RE = re.compile(r"^v\d+(?:[._-]?\d+)*$", re.I)
+_NUMBER_RE = re.compile(r"^\d{1,6}$")
+_HASH_RE = re.compile(r"^[a-f0-9]{8,}$", re.I)
+_ILLUS_RE = re.compile(r"^illus\d*$", re.I)
+
+
+def lora_display_label(name: str | Path) -> str:
+    """Return the readable part of a LoRA filename for display/translation."""
+    base = Path(str(name).replace("\\", "/")).name
+    stem = Path(base).stem.strip()
+    if not stem:
+        return base
+    if re.search(r"[\u4e00-\u9fff]", stem):
+        return re.sub(r"[_\-\.]+", " ", stem).strip()
+    stem = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", stem)
+    tokens = [token for token in re.split(r"[^A-Za-z0-9]+", stem) if token]
+    kept = [
+        token for token in tokens
+        if token.lower() not in _LORA_NOISE
+        and not _VERSION_RE.match(token)
+        and not _NUMBER_RE.match(token)
+        and not _HASH_RE.match(token)
+        and not _ILLUS_RE.match(token)
+    ]
+    label = " ".join(kept).strip()
+    return label or re.sub(r"[_\-\.]+", " ", stem).strip() or base
 
 
 def scan_lora_dir(folder: str | Path | None) -> list[Path]:
