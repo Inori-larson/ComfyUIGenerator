@@ -206,6 +206,8 @@ class LoraConfig:
     character_dir: str = ""
     style_dir: str = ""
     body_dir: str = ""
+    action_dir: str = ""
+    clothing_dir: str = ""
     online_lookup: bool = True
     civitai_base: str = "https://civitai.red"
 
@@ -289,6 +291,8 @@ def default_config() -> AppConfig:
         cfg.lora.character_dir = str(base / "models" / "loras" / "角色")
         cfg.lora.style_dir = str(base / "models" / "loras" / "风格")
         cfg.lora.body_dir = str(base / "models" / "loras" / "身体部位")
+        cfg.lora.action_dir = str(base / "models" / "loras" / "动作")
+        cfg.lora.clothing_dir = str(base / "models" / "loras" / "服装")
     cfg.ollama.exe = str(ollama_exe) if ollama_exe else ""
     cfg.generation.template = str(DEFAULT_PRESET)
     cfg.generation.wildcards = {"enabled": False,

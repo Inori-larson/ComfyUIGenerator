@@ -22,6 +22,8 @@ def test_save_load_roundtrip(tmp_path):
     cfg.ui.language = "en-US"
     cfg.lora.character_dir = r"D:\loras\char"
     cfg.lora.style_dir = r"D:\loras\style"
+    cfg.lora.action_dir = r"D:\loras\action"
+    cfg.lora.clothing_dir = r"D:\loras\clothing"
     save_config(cfg, path)
 
     loaded = load_config(path)
@@ -30,6 +32,8 @@ def test_save_load_roundtrip(tmp_path):
     assert loaded.ui.language == "en-US"
     assert loaded.lora.character_dir == r"D:\loras\char"
     assert loaded.lora.style_dir == r"D:\loras\style"
+    assert loaded.lora.action_dir == r"D:\loras\action"
+    assert loaded.lora.clothing_dir == r"D:\loras\clothing"
     assert loaded.storage_root == str(tmp_path / "data")
 
 

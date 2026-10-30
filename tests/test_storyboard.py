@@ -2,95 +2,29 @@ import pytest
 
 from comfyui_generator.core.storyboard import (
     OUTLINE_SYSTEM,
+    STORY_SYSTEM,
     _clothing_key,
     SCRIPT_SYSTEM,
     TAG_SYSTEM,
-    apply_cast_state,
-    apply_phase_terms,
+    apply_character_state,
     apply_story_state,
     build_outline_messages,
     build_script_messages,
-    build_story_spine,
     build_tag_messages,
-    clean_prompt,
+    character_states_for_beats,
     clothing_states_for_beats,
-    detect_cast,
-    enforce_beat_terms,
     extract_premise_beats,
-    normalize,
-    normalize_prompt_tags,
+    normalize_character_profiles,
+    parse_character_profiles,
+    present_character_profiles,
     normalize_scripts,
-    normalize_shot_terms,
     normalize_tagged,
     premise_from_json,
     scene_states_for_beats,
     shots_from_json,
     slugify,
-    strip_generation_quality,
-    strip_stage1_identity,
-    summarize_clothing,
-    summarize_shot_state,
     StoryboardOptions,
 )
-
-
-def test_normalize_renumbers_and_dedupes_names():
-    raw = {"shots": [
-        {"name": "shot", "prompt": "wide shot, standing"},
-        {"name": "shot", "prompt": "close-up, smiling"},
-        {"name": "", "prompt": "  "},
-        {"name": "third", "prompt": "medium shot, running"},
-    ]}
-    shots = normalize(raw, 10, "fallback")
-    assert [shot["id"] for shot in shots] == ["01", "02", "03"]
-    assert shots[0]["name"] == "shot"
-    assert shots[1]["name"] == "shot_2"
-    assert shots[2]["name"] == "third"
-
-
-def test_normalize_combines_structured_prompt_fields():
-    raw = {"shots": [{
-        "name": "a", "brief": "第一镜大纲",
-        "clothing": "black blazer", "body": "hands", "pose": "standing",
-        "expression": "calm", "scene": "room", "camera": "full body",
-        "lighting": "soft lighting", "prompt": "looking at viewer",
-    }]}
-    shot = normalize(raw, 1, "fallback")[0]
-    assert shot["outline"] == "第一镜大纲"
-    assert shot["prompt"] == (
-        "black blazer, hands, standing, calm, room, full body, "
-        "soft lighting, looking at viewer")
-
-
-def test_stage1_strips_guessed_identity_but_keeps_reference_accessories():
-    prompt = ("black hair, yellow eyes, long hair, hairclip, yixuan, glasses, "
-              "cyberpunk_girl, instrument yuan")
-    assert strip_stage1_identity(prompt, "仪玄") == "hairclip, yixuan"
-    assert "white hair" in strip_stage1_identity("white hair, yixuan", "white hair 仪玄")
-
-
-def test_normalize_keeps_script_field():
-    raw = {"shots": [{"prompt": "standing", "script": "身份外貌：仪玄；服装：..."}]}
-    assert normalize(raw, 1, "fallback")[0]["script"].startswith("身份外貌")
-
-
-def test_cast_detection_and_solo_cleanup():
-    assert detect_cast("仪玄独自坐在沙发上") == ["1girl", "solo"]
-    assert detect_cast("仪玄和我一起坐在沙发上") == ["1girl", "1boy"]
-    result = apply_cast_state(
-        "people, 1boy, black blazer, 1girl, solo",
-        "仪玄独自坐在沙发上，黑发垂落")
-    tags = [tag.strip() for tag in result.split(",")]
-    assert "people" not in tags
-    assert "1boy" not in tags
-    assert "1girl" in tags
-    assert "solo" in tags
-
-
-def test_strip_generation_quality_keeps_scene_and_clothing():
-    assert strip_generation_quality(
-        "masterpiece, best quality, anime style, black blazer, smile"
-    ) == "black blazer, smile"
 
 
 def test_tagged_shots_use_the_generated_script_as_outline():
@@ -103,19 +37,14 @@ def test_tagged_shots_use_the_generated_script_as_outline():
     assert tagged[0]["outline"] == script
 
 
-def test_normalize_start_index_and_existing_names():
-    raw = {"shots": [{"name": "a", "prompt": "x"}, {"name": "b", "prompt": "y"}]}
-    shots = normalize(raw, 2, "fallback", start=5, used_names=["a"])
-    assert [shot["id"] for shot in shots] == ["05", "06"]
-    assert shots[0]["name"] == "a_2"
-
-
 def test_prompts_do_not_depend_on_reference_tags():
     for prompt in (OUTLINE_SYSTEM, SCRIPT_SYSTEM, TAG_SYSTEM):
         assert "参考标签" not in prompt
     assert "最多 100" in TAG_SYSTEM
     assert "禁止 camera" in TAG_SYSTEM
     assert "不生成质量" in TAG_SYSTEM
+    for prompt in (STORY_SYSTEM, OUTLINE_SYSTEM, SCRIPT_SYSTEM, TAG_SYSTEM):
+        assert "撕破连裤袜" in prompt
 
 
 def test_strip_appearance_instructions_only_when_character_lora_is_active():
@@ -131,57 +60,72 @@ def test_strip_appearance_instructions_only_when_character_lora_is_active():
     assert "不要生成或补充角色外貌和身体特征" not in plain[1]["content"]
 
 
-def test_strip_stage1_identity_removes_body_identity_features():
-    assert strip_stage1_identity(
-        "black hair, large breasts, wide hips, black blazer", ""
-    ) == "black blazer"
 
 
-def test_summarize_clothing_tracks_worn_and_exposed_parts():
-    state = summarize_clothing({
-        "prompt": "black pantyhose half on, black platform heels, topless, pussy"})
-    assert "wearing: black pantyhose" in state
-    assert "black platform heels" in state
-    assert "exposed: topless" in state
-    assert "pussy" in state
 
 
-def test_summarize_shot_state_includes_pose_and_camera():
-    state = summarize_shot_state({
-        "clothing": "black pantyhose, topless",
-        "pose": "standing, hands on hips",
-        "camera": "full body, from side",
-        "outline": "站在床边",
-    })
-    assert "wearing: black pantyhose" in state
-    assert "exposed: topless" in state
-    assert "pose: standing" in state
-    assert "camera: full body" in state
-    assert "last scene: 站在床边" in state
+def test_erotic_clothing_categories_are_recognized():
+    assert _clothing_key("black fishnet tights") == "fishnet"
+    assert _clothing_key("lace babydoll") == "lingerie"
+    assert _clothing_key("black stiletto heels") == "heels"
+    assert _clothing_key("garter belt") == "garter"
+    assert _clothing_key("puritan collar") == "collar"
+    assert _clothing_key("black catsuit") == "bodysuit"
+    assert _clothing_key("black lace panties") == "panties"
+    assert _clothing_key("sheer lace underwear") == "underwear"
+    assert _clothing_key("white sneakers") == "shoes"
+    assert _clothing_key("black boxer briefs") == "underwear"
+    assert _clothing_key("grey sweatpants") == "pants"
+    assert _clothing_key("black waistcoat") == "vest"
+    assert _clothing_key("silver bracelet") == ""
+    assert _clothing_key("black bracers") == ""
+    assert _clothing_key("black dress shoes") == "shoes"
+    assert _clothing_key("black suit pants") == "pants"
+    assert _clothing_key("black lace gloves") == "gloves"
+    assert _clothing_key("黑裙") == "dress"
+    assert _clothing_key("长靴") == "boots"
+    assert _clothing_key("collarbone") == ""
+    assert _clothing_key("gym") == ""
+    assert _clothing_key("school") == ""
+    assert _clothing_key("sports") == ""
+    assert _clothing_key("wedding") == ""
+    assert _clothing_key("shirtless") == ""
 
 
-def test_normalize_shot_terms_replaces_euphemisms():
-    prompt = ("hand on private parts, finger in vagina, quick hand movements, "
-              "love liquid, private parts")
-    tags = [tag.strip() for tag in normalize_shot_terms(prompt).split(",")]
-    assert "hand on pussy" in tags
-    assert "finger in pussy" in tags
-    assert "masturbation" in tags
-    assert "pussy juice" in tags
-    assert "pussy" in tags
+def test_extended_scene_patterns():
+    states = scene_states_for_beats(["在更衣室", "走到阳台", "在书房"])
+    assert states[0][0] == "dressing room"
+    assert states[1][0] == "balcony"
+    assert states[2][0] == "study"
 
 
-def test_story_spine_allocates_discovery_seduction_and_sex():
-    premise = ("角色：仪玄\n初始服装：black blazer\n大场景：家里\n剧情：\n"
-               "仪玄回到家寂寞难耐，自慰，不小心被我发现了，然后开始勾引我，最后我两一起做爱\n"
-               "其它：夜晚")
-    spine = build_story_spine(premise, 30)
-    phases = [item["phase"] for item in spine]
-    assert phases == ["story", "solo", "discovery", "seduction", "sex"]
-    assert spine[2]["cast"] == "1girl 1boy"
-    assert spine[-1]["cast"] == "1girl 1boy"
-    assert spine[-1]["end"] == 30
-    assert spine[-1]["end"] - spine[-1]["start"] + 1 >= 9
+def test_removed_garment_damage_tag_does_not_survive_nudity():
+    result = apply_story_state(
+        "torn pantyhose, panties aside, black panties",
+        {"black panties"})
+    tags = [tag.strip() for tag in result.split(",")]
+    assert "torn pantyhose" not in tags
+    assert "panties aside" in tags
+    assert "black panties" in tags
+
+
+def test_torn_clothing_state_is_not_erased_by_clothing_machine():
+    result = apply_story_state(
+        "torn pantyhose, ripped panties, panties aside, black blazer",
+        {"black pantyhose", "black panties"},
+    )
+    assert "torn pantyhose" in result
+    assert "ripped panties" in result
+    assert "panties aside" in result
+    assert "black pantyhose" in result
+    assert "black panties" in result
+
+
+def test_empty_carried_clothing_does_not_reset_to_initial_outfit():
+    premise = "初始服装：black blazer, black pantyhose, black platform heels"
+    states = clothing_states_for_beats(
+        premise, ["全裸", "继续全裸"], initial_worn=[])
+    assert states == [set(), set()]
 
 
 def test_upper_body_nudity_is_not_treated_as_full_nude():
@@ -211,121 +155,14 @@ def test_new_clothing_aliases_are_removed_on_full_nude():
     assert _clothing_key("black lace lingerie") == "lingerie"
     result = apply_story_state(
         "back-seamed legwear, black tight top, black lace lingerie, completely nude",
-        "completely nude", {"hairclip"}, ["bedroom", "bed"])
+        {"hairclip"})
     tags = [tag.strip() for tag in result.split(",")]
     for item in ("back-seamed legwear", "black tight top", "black lace lingerie"):
         assert item not in tags
     assert "completely nude" in tags
 
 
-def test_phase_terms_inject_explicit_sex_and_keep_erotic_clothing():
-    result = apply_phase_terms(
-        "1girl, 1boy, black blazer, black lace lingerie, black pantyhose, "
-        "black platform heels, undressing, hugging",
-        "sex", "1girl 1boy")
-    tags = [tag.strip() for tag in result.split(",")]
-    assert "sex" in tags
-    assert "vaginal" in tags
-    assert "penis" in tags
-    assert "penetration" in tags
-    assert "black blazer" not in tags
-    assert "black lace lingerie" in tags
-    assert "black pantyhose" in tags
-    assert "black platform heels" in tags
-    assert "completely nude" not in tags
-    assert "undressing" not in tags
-    assert "hugging" not in tags
 
-
-def test_non_sex_phase_removes_explicit_sex_pose_tags():
-    result = apply_phase_terms(
-        "1girl, solo, doggy style, sex, vaginal, handjob, sitting on bed",
-        "solo", "1girl solo")
-    tags = [tag.strip() for tag in result.split(",")]
-    assert "doggy style" not in tags
-    assert "sex" not in tags
-    assert "vaginal" not in tags
-    assert "handjob" not in tags
-
-
-def test_normalize_prompt_tags_dedupes_synonyms_and_camera_size():
-    result = normalize_prompt_tags(
-        "closeup, close-up, side view, from side, high angle, from above, "
-        "full body, medium shot, shadow, shadow")
-    tags = [tag.strip() for tag in result.split(",")]
-    assert tags == ["close-up", "from side", "from above", "full body", "shadow"]
-
-
-def test_normalize_prompt_tags_resolves_invented_clothing_and_state_conflicts():
-    result = normalize_prompt_tags(
-        "brooch, flower brooch, hairpin, hairclip, black romper, "
-        "frilled black leotard, peter pan collar, puritan collar, "
-        "fully clothed, topless, pussy, completely nude, black pantyhose")
-    tags = [tag.strip() for tag in result.split(",")]
-    assert "brooch" not in tags
-    assert "hairpin" not in tags
-    assert "black romper" not in tags
-    assert "peter pan collar" not in tags
-    assert "fully clothed" not in tags
-    assert "completely nude" not in tags
-    assert "flower brooch" in tags
-    assert "hairclip" in tags
-    assert "frilled black leotard" in tags
-    assert "puritan collar" in tags
-    assert "black pantyhose" in tags
-
-
-def test_enforce_beat_terms_adds_nude_and_removes_clothing():
-    prompt = ("black pantyhose, black platform heels, standing, calm, "
-              "full body")
-    result = enforce_beat_terms(prompt, "black pantyhose 与高跟鞋全部脱去，全裸")
-    tags = [tag.strip() for tag in result.split(",")]
-    assert "completely nude" in tags
-    assert "pussy" in tags
-    assert "black pantyhose" not in tags
-    assert "black platform heels" not in tags
-
-
-def test_enforce_beat_does_not_pull_pantyhose_for_leotard_only():
-    result = enforce_beat_terms(
-        "black pantyhose, black platform heels, standing",
-        "手指拉下 leotard 胸口，上半拉到腰下，黑丝与高跟鞋还在")
-    tags = [tag.strip() for tag in result.split(",")]
-    assert "clothes pull" in tags
-    assert "pantyhose pull" not in tags
-
-
-def test_enforce_beat_marks_pantyhose_transition():
-    result = enforce_beat_terms(
-        "black pantyhose, black platform heels, standing",
-        "双手勾住 black pantyhose 腰边，往下褪到大腿中部，私处露出")
-    tags = [tag.strip() for tag in result.split(",")]
-    assert "pantyhose pull" in tags
-    assert "undressing" in tags
-    assert "thighs" in tags
-    assert "pussy" in tags
-
-
-def test_enforce_beat_does_not_pull_remaining_pantyhose():
-    result = enforce_beat_terms(
-        "hands on hips, black pantyhose, black platform heels",
-        "把 leotard 从腿部完全脱下，只剩 black pantyhose 与 black platform heels")
-    tags = [tag.strip() for tag in result.split(",")]
-    assert "clothes pull" in tags
-    assert "pantyhose pull" not in tags
-    assert "hands on hips" not in tags
-
-
-def test_enforce_beat_fixes_afterglow_pose():
-    result = enforce_beat_terms(
-        "lying down, legs spread, masturbation, intense expression",
-        "高潮余波后，用被子盖住下半身，上身仍裸露，靠在床头，轻松笑容")
-    tags = [tag.strip() for tag in result.split(",")]
-    assert "sitting" in tags
-    assert "lying down" not in tags
-    assert "legs spread" not in tags
-    assert "masturbation" not in tags
-    assert "topless" in tags
 
 
 def test_clothing_states_remove_and_restore_exact_items():
@@ -373,45 +210,39 @@ def test_scene_states_keep_scene_until_plot_moves():
         "living room", "sofa"]
 
 
-def test_apply_story_state_clears_stale_clothing_and_scene():
+def test_apply_story_state_only_replaces_clothing_and_keeps_model_tags():
     result = apply_story_state(
         "black blazer, frilled black leotard, black pantyhose, black platform heels, "
         "white background, simple background, 3d, upper body covered, undressing, "
         "clothes pull, pussy, nipples, room, sofa",
-        "全裸站在床边",
-        {"hairclip", "puritan collar", "flower brooch"},
-        ["bedroom", "bed", "indoors", "double bed"],
+        {"black pantyhose", "hairclip"},
     )
     tags = [tag.strip() for tag in result.split(",")]
     assert "black blazer" not in tags
     assert "frilled black leotard" not in tags
-    assert "black pantyhose" not in tags
-    assert "white background" not in tags
-    assert "simple background" not in tags
-    assert "3d" not in tags
-    assert "upper body covered" not in tags
-    assert "undressing" not in tags
-    assert "clothes pull" not in tags
-    assert "completely nude" in tags
+    assert "black platform heels" not in tags
+    assert "black pantyhose" in tags
+    assert "white background" in tags
+    assert "3d" in tags
+    assert "undressing" in tags
+    assert "clothes pull" in tags
     assert "pussy" in tags
-    assert "bedroom" in tags
-    assert "sofa" not in tags
+    assert "room" in tags
+    assert "sofa" in tags
 
 
-def test_apply_story_state_covered_lower_is_topless_not_full_nude():
+def test_apply_story_state_does_not_add_body_or_scene_tags():
     result = apply_story_state(
         "lying on side, legs spread, pussy, pussy juice",
-        "用被子盖住下半身，上身仍裸露，靠在床头",
         {"hairclip", "puritan collar"},
-        ["bedroom", "bed", "indoors"],
     )
     tags = [tag.strip() for tag in result.split(",")]
+    assert "topless" not in tags
     assert "completely nude" not in tags
-    assert "topless" in tags
-    assert "pussy" not in tags
-    assert "sitting" in tags
-    assert "lying" not in tags
-    assert "lying on side" not in tags
+    assert "sitting" not in tags
+    assert "bedroom" not in tags
+    assert "pussy" in tags
+    assert "lying on side" in tags
 
 
 def test_generic_office_outfit_state():
@@ -440,28 +271,6 @@ def test_generic_scene_office_bathroom_beach():
     assert states[2][0] == "beach"
 
 
-def test_generic_nsfw_rule_expansion():
-    result = enforce_beat_terms(
-        "nude, sitting",
-        "被绳子捆绑双手，蒙眼，使用跳蛋，随后口交并潮吹")
-    tags = [tag.strip() for tag in result.split(",")]
-    for expected in ("bondage", "bound", "blindfold", "sex toy", "vibrator",
-                     "oral", "pussy juice"):
-        assert expected in tags
-
-
-def test_generic_pose_expression_camera_lighting_body_rules():
-    result = enforce_beat_terms(
-        "1girl, solo",
-        "站在窗边，黄昏逆光，半闭眼，微微张嘴，脸红，"
-        "镜头从下往上拍，全身照，揉捏乳头，小穴流出爱液")
-    tags = [tag.strip() for tag in result.split(",")]
-    for expected in ("standing", "sunset", "backlighting", "half-closed eyes",
-                     "parted lips", "blush", "from below", "full body",
-                     "nipples", "pussy", "pussy juice"):
-        assert expected in tags
-
-
 def test_generic_maid_outfit_and_hospital_scene():
     premise = "初始服装：maid outfit, white apron, black stockings, black heels"
     states = clothing_states_for_beats(premise, [
@@ -471,14 +280,6 @@ def test_generic_maid_outfit_and_hospital_scene():
     assert "maid outfit" in states[0]
     assert "maid outfit" not in states[1]
     assert scene_states_for_beats(["医院病房"])[0][0] == "hospital"
-
-
-def test_clean_and_slug():
-    assert clean_prompt("  prompt: wide shot,\n standing.  ") == "wide shot, standing"
-    assert clean_prompt("looking_at_camera, holding_camera, black_pantyhose, close-up") == (
-        "looking at viewer, black pantyhose, close-up")
-    assert slugify("雨夜, girl!") == "girl"
-    assert slugify("!!!", "fallback") == "fallback"
 
 
 def test_extract_premise_beats_keeps_exact_numbered_lines():
@@ -548,6 +349,376 @@ class FakeClient:
             {"name": "next", "prompt": "medium shot, walking"},
             {"name": "last", "prompt": "close-up, smiling"},
         ]}
+
+
+def test_generic_character_profiles_parse_female_and_male():
+    premise = (
+        "角色：女主：silver hair, red eyes；男主：black hair, golden eyes\n"
+        "初始服装：女主：black dress, black panties；男主：white shirt, black trousers")
+    profiles = parse_character_profiles(premise)
+    assert [profile.name for profile in profiles] == ["女主", "男主"]
+    assert [profile.gender for profile in profiles] == ["girl", "boy"]
+    assert "silver hair" in profiles[0].appearance
+    assert "black hair" in profiles[1].appearance
+    assert profiles[0].initial_clothing == ["black dress", "black panties"]
+    assert profiles[1].initial_clothing == ["white shirt", "black trousers"]
+
+    combined = parse_character_profiles(
+        "角色：女主：silver hair；男主：black hair\n"
+        "初始服装：black dress, white shirt, black trousers")
+    assert combined[0].initial_clothing == [
+        "black dress", "white shirt", "black trousers"]
+    assert combined[1].initial_clothing == []
+
+    multiline = parse_character_profiles(
+        "角色：\n女主：silver hair\n男主：black hair\n"
+        "初始服装：\n女主：black dress\n男主：white shirt, black trousers\n"
+        "大场景：卧室")
+    assert [profile.name for profile in multiline] == ["女主", "男主"]
+    assert multiline[0].initial_clothing == ["black dress"]
+    assert multiline[1].initial_clothing == ["white shirt", "black trousers"]
+
+    named = parse_character_profiles(
+        "角色：\n角色A：silver hair\n角色B：black hair\n"
+        "初始服装：\n角色A：black dress\n角色B：white shirt\n")
+    assert [profile.name for profile in named] == ["角色A", "角色B"]
+
+    chinese = parse_character_profiles(
+        "角色：男主：黑发、金瞳\n初始服装：男主：白衬衫、黑西裤")
+    assert chinese[0].appearance == ["黑发", "金瞳"]
+    assert chinese[0].initial_clothing == ["白衬衫", "黑西裤"]
+    chinese_states = character_states_for_beats(
+        chinese, ["男主脱下白衬衫"])
+    assert "白衬衫" not in chinese_states[0][chinese[0].key]
+    assert "黑西裤" in chinese_states[0][chinese[0].key]
+
+    dress = parse_character_profiles("初始服装：black dress")[0]
+    dress_states = character_states_for_beats([dress], ["脱下黑裙"])
+    assert "black dress" not in dress_states[0][dress.key]
+
+    comma_split = parse_character_profiles(
+        "角色：女主：silver hair, red eyes，男主：black hair\n"
+        "初始服装：女主：black dress, black panties，男主：white shirt")
+    assert [profile.name for profile in comma_split] == ["女主", "男主"]
+    assert comma_split[0].initial_clothing == ["black dress", "black panties"]
+    assert comma_split[1].initial_clothing == ["white shirt"]
+
+    dot_split = parse_character_profiles(
+        "角色：女主：silver hair、男主：black hair\n"
+        "初始服装：女主：black dress、男主：white shirt")
+    assert [profile.name for profile in dot_split] == ["女主", "男主"]
+    assert dot_split[0].initial_clothing == ["black dress"]
+    assert dot_split[1].initial_clothing == ["white shirt"]
+
+    mixed = parse_character_profiles(
+        "角色：silver hair\n初始服装：女主：black dress")
+    assert len(mixed) == 1
+    assert mixed[0].name == "女主"
+    assert mixed[0].appearance == ["silver hair"]
+    assert mixed[0].initial_clothing == ["black dress"]
+
+
+def test_strip_appearance_keeps_new_male_but_not_lora_character_appearance():
+    profiles = normalize_character_profiles([
+        {"name": "yixuan", "gender": "girl",
+         "appearance": "silver hair, red eyes", "initial_clothing": "black dress"},
+        {"name": "男主", "gender": "boy",
+         "appearance": "black hair, golden eyes",
+         "initial_clothing": "white shirt, black trousers"},
+    ], "角色：yixuan\n初始服装：black dress", strip_appearance=True)
+    assert profiles[0].appearance == ["yixuan"]
+    assert "silver hair" not in profiles[0].appearance
+    assert "red eyes" not in profiles[0].appearance
+    assert profiles[0].initial_clothing == ["black dress"]
+    assert profiles[1].appearance == ["black hair", "golden eyes"]
+
+    reordered = normalize_character_profiles([
+        {"name": "男主", "gender": "boy",
+         "appearance": "black hair", "initial_clothing": "white shirt"},
+        {"name": "女主", "gender": "girl",
+         "appearance": "silver hair", "initial_clothing": "black dress"},
+    ], "角色：yixuan\n初始服装：black dress", strip_appearance=True)
+    assert reordered[0].gender == "girl"
+    assert reordered[0].initial_clothing == ["black dress"]
+    assert reordered[1].gender == "boy"
+    assert reordered[1].initial_clothing == ["white shirt"]
+
+    merged = normalize_character_profiles([
+        {"name": "女主", "gender": "girl",
+         "appearance": "silver hair, red eyes",
+         "initial_clothing": "black dress"},
+    ], "角色：yixuan\n初始服装：black dress")
+    assert "yixuan" in merged[0].appearance
+    assert "silver hair" in merged[0].appearance
+    assert "red eyes" in merged[0].appearance
+
+
+def test_generic_character_states_keep_male_and_female_independent():
+    premise = (
+        "角色：女主：silver hair；男主：black hair\n"
+        "初始服装：女主：black dress, black panties；男主：white shirt, black trousers")
+    profiles = parse_character_profiles(premise)
+    girl, boy = profiles
+    states = character_states_for_beats(profiles, [
+        "男主脱下白衬衫",
+        "女主全裸",
+        "男主也全裸",
+        "男主重新穿上白衬衫",
+    ])
+    assert "white shirt" not in states[0][boy.key]
+    assert "black trousers" in states[0][boy.key]
+    assert "black dress" in states[0][girl.key]
+    assert states[1][girl.key] == set()
+    assert "black trousers" in states[1][boy.key]
+    assert states[2][boy.key] == set()
+    assert states[3][boy.key] == set()
+
+    limited = character_states_for_beats(profiles, [
+        "女主脱到只剩 black panties，男主还穿着 white shirt 和 black trousers"])
+    assert limited[0][girl.key] == {"black panties"}
+    assert limited[0][boy.key] == {"white shirt", "black trousers"}
+
+    solo = character_states_for_beats(profiles, ["全裸"], presence=[[girl]])
+    assert solo[0][girl.key] == set()
+    assert solo[0][boy.key] == {"white shirt", "black trousers"}
+
+    absent = character_states_for_beats(
+        profiles, ["男主脱下 white shirt"], presence=[[girl]])
+    assert absent[0][girl.key] == {"black dress", "black panties"}
+    assert absent[0][boy.key] == {"white shirt", "black trousers"}
+
+    absent_nude = character_states_for_beats(
+        profiles, ["男主全裸"], presence=[[girl]])
+    assert absent_nude[0][girl.key] == {"black dress", "black panties"}
+    assert absent_nude[0][boy.key] == {"white shirt", "black trousers"}
+
+    carried_nude = {girl.key: set(), boy.key: {"white shirt", "black trousers"}}
+    no_redress = character_states_for_beats(
+        profiles, ["女主只穿 black dress"], initial_states=carried_nude)
+    assert no_redress[0][girl.key] == set()
+
+    shared = parse_character_profiles(
+        "角色：女主：silver hair；男主：black hair\n"
+        "初始服装：女主：white shirt；男主：white shirt")
+    shared_states = character_states_for_beats(
+        shared, ["男主脱下 white shirt"], presence=[[shared[0]]])
+    assert "white shirt" in shared_states[0][shared[0].key]
+
+    english = parse_character_profiles(
+        "角色：男主：black hair\n初始服装：男主：white shirt, black trousers")
+    english_states = character_states_for_beats(
+        english, ["takes off white shirt"])
+    assert "white shirt" not in english_states[0][english[0].key]
+    assert "black trousers" in english_states[0][english[0].key]
+    english_only = character_states_for_beats(
+        english, ["only wearing white shirt"])
+    assert english_only[0][english[0].key] == {"white shirt"}
+
+
+def test_generic_character_prompt_locks_appearance_and_present_clothing():
+    premise = (
+        "角色：女主：silver hair, red eyes；男主：black hair, golden eyes\n"
+        "初始服装：女主：black dress；男主：white shirt, black trousers")
+    profiles = parse_character_profiles(premise)
+    girl, boy = profiles
+    states = character_states_for_beats(profiles, ["两人站着", "男主全裸"])
+    both = present_character_profiles(
+        profiles, {"cast": "1girl 1boy", "outline": "两人站着"}, "两人站着")
+    prompt = apply_character_state(
+        "1girl, 1boy, standing, white shirt, black trousers, black dress",
+        profiles, states[0], both)
+    assert "silver hair" in prompt
+    assert "black hair" in prompt
+    assert "white shirt" in prompt
+    assert "black dress" in prompt
+
+    solo = present_character_profiles(
+        profiles, {"cast": "1girl solo", "outline": "她坐下"}, "她坐下")
+    prompt = apply_character_state(
+        "1girl, solo, sitting, black dress", profiles, states[0], solo)
+    assert "silver hair" in prompt
+    assert "black hair" not in prompt
+    assert "white shirt" not in prompt
+
+    remembered = present_character_profiles(
+        profiles, {"cast": "1girl solo", "outline": "她想起男主"}, "她想起男主")
+    assert [profile.name for profile in remembered] == ["女主"]
+
+    nudes = present_character_profiles(
+        profiles, {"cast": "1girl 1boy", "outline": "男主全裸"}, "男主全裸")
+    prompt = apply_character_state(
+        "1girl, 1boy, nude, white shirt, black trousers", profiles,
+        states[1], nudes)
+    assert "black hair" in prompt
+    assert "white shirt" not in prompt
+    assert "black trousers" not in prompt
+
+    prompt = apply_character_state(
+        "1girl, 1boy, blonde hair, blue eyes, black hair, golden eyes",
+        profiles, states[0], [boy])
+    assert "blonde hair" not in prompt
+    assert "blue eyes" not in prompt
+    assert "black hair" in prompt
+    assert "golden eyes" in prompt
+
+
+def test_unknown_clothing_is_removed_on_nude_but_accessories_survive():
+    profile = parse_character_profiles(
+        "角色：男主：black hair\n初始服装：男主：nurse, flower brooch")[0]
+    states = character_states_for_beats([profile], ["男主全裸"])
+    assert "nurse" not in states[0][profile.key]
+    assert "flower brooch" in states[0][profile.key]
+    prompt = apply_character_state(
+        "1boy, nurse, flower brooch, completely nude", [profile],
+        states[0], [profile])
+    assert "nurse" not in prompt
+    assert "flower brooch" in prompt
+    assert "completely nude" in prompt
+
+    only = character_states_for_beats([profile], ["only wearing nurse"])
+    assert "nurse" in only[0][profile.key]
+    assert "flower brooch" in only[0][profile.key]
+
+    removed_unknown = character_states_for_beats([profile], ["takes off nurse"])
+    assert "nurse" not in removed_unknown[0][profile.key]
+    assert "flower brooch" in removed_unknown[0][profile.key]
+
+    bra = parse_character_profiles("初始服装：black bra")[0]
+    bra_states = character_states_for_beats([bra], ["takes off bracers"])
+    assert "black bra" in bra_states[0][bra.key]
+
+    accessory = parse_character_profiles(
+        "初始服装：earring, hairclip, black dress")[0]
+    accessory_states = character_states_for_beats(
+        [accessory], ["takes off earring", "全裸"])
+    assert "earring" not in accessory_states[1][accessory.key]
+    assert "hairclip" in accessory_states[1][accessory.key]
+
+
+def test_appearance_lock_removes_conflicting_hair_style():
+    profile = parse_character_profiles(
+        "角色：男主：short black hair, golden eyes")[0]
+    prompt = apply_character_state(
+        "1boy, long hair, short hair, blue eyes", [profile],
+        {profile.key: set()}, [profile])
+    assert "long hair" not in prompt
+    assert "short hair" in prompt
+    assert "blue eyes" not in prompt
+    assert "golden eyes" in prompt
+
+
+def test_full_story_pipeline_uses_locked_male_character_state():
+    from comfyui_generator.core import storyboard
+
+    class MalePipelineFake:
+        def chat_json(self, model, messages, **kwargs):
+            schema = kwargs.get("schema") or {}
+            required = schema.get("required") or []
+            if "story" in required:
+                return {
+                    "story": "她回家，和男主做爱，两人最后全裸。",
+                    "characters": [
+                        {"name": "女主", "gender": "girl",
+                         "appearance": "silver hair, red eyes",
+                         "initial_clothing": "black dress"},
+                        {"name": "男主", "gender": "boy",
+                         "appearance": "black hair, golden eyes",
+                         "initial_clothing": "white shirt, black trousers"},
+                    ],
+                }
+            if required == ["acts"]:
+                return {"acts": [{
+                    "id": "01", "title": "第一幕", "summary": "她与男主",
+                    "cast": "1girl 1boy", "clothing": "black dress; white shirt",
+                    "scene": "bedroom", "nsfw": "undress",
+                }]}
+            if schema is storyboard.OUTLINE_SCHEMA:
+                return {"shots": [
+                    {"id": "01", "name": "a", "cast": "1girl 1boy",
+                     "outline": "两人站在卧室，女主穿着黑裙，男主穿着白衬衫和黑西裤"},
+                    {"id": "02", "name": "b", "cast": "1girl 1boy",
+                     "outline": "女主脱下黑裙，全裸，男主还穿着白衬衫和黑西裤"},
+                    {"id": "03", "name": "c", "cast": "1girl 1boy",
+                     "outline": "男主全裸，女主也全裸"},
+                ]}
+            if schema is storyboard.TAG_SCHEMA:
+                return {"shots": [
+                    {"id": "01", "prompt": "1girl, 1boy, standing"},
+                    {"id": "02", "prompt": "1girl, 1boy, completely nude"},
+                    {"id": "03", "prompt": "1girl, 1boy, completely nude"},
+                ]}
+            raise AssertionError(schema)
+
+    shots = storyboard.generate_storyboard(
+        MalePipelineFake(),
+        "角色：女主：silver hair, red eyes；男主：black hair, golden eyes\n"
+        "初始服装：女主：black dress；男主：white shirt, black trousers\n"
+        "剧情：她回家，和男主做爱",
+        storyboard.StoryboardOptions(model="test", shots=3, chunk=3,
+                                     full_story=True))
+    assert len(shots) == 3
+    for shot in shots:
+        assert "silver hair" in shot["prompt"]
+        assert "black hair" in shot["prompt"]
+    assert "white shirt" in shots[0]["prompt"]
+    assert "white shirt" in shots[1]["prompt"]
+    assert "white shirt" not in shots[2]["prompt"]
+    assert "black dress" not in shots[1]["prompt"]
+    assert "completely nude" not in shots[1]["prompt"]
+    assert "completely nude" in shots[2]["prompt"]
+
+
+def test_full_story_pipeline_writes_story_acts_outlines_and_tags():
+    from comfyui_generator.core import storyboard
+
+    class PipelineFake:
+        def __init__(self):
+            self.kinds = []
+
+        def chat_json(self, model, messages, **kwargs):
+            schema = kwargs.get("schema") or {}
+            required = schema.get("required") or []
+            if "story" in required:
+                self.kinds.append("story")
+                return {"story": "她回家，慢慢脱衣，最后做爱。",
+                        "characters": [{"name": "女主", "gender": "girl",
+                                        "appearance": "",
+                                        "initial_clothing":
+                                            "black blazer, black pantyhose"}]}
+            if required == ["acts"]:
+                self.kinds.append("acts")
+                return {"acts": [{
+                    "id": "01", "title": "第一幕", "summary": "她回家并慢慢脱衣",
+                    "cast": "1girl solo", "clothing": "black blazer to leotard",
+                    "scene": "bedroom", "nsfw": "slow undress",
+                }]}
+            if schema is storyboard.OUTLINE_SCHEMA:
+                self.kinds.append("outline")
+                return {"shots": [
+                    {"id": "01", "name": "a", "cast": "1girl solo",
+                     "outline": "她站在卧室，慢慢脱下外套"},
+                    {"id": "02", "name": "b", "cast": "1girl solo",
+                     "outline": "她坐在床边，黑丝还穿着"},
+                ]}
+            if schema is storyboard.TAG_SCHEMA:
+                self.kinds.append("tag")
+                return {"shots": [
+                    {"id": "01", "prompt": "1girl, solo, standing, undressing"},
+                    {"id": "02", "prompt": "1girl, solo, sitting on bed, black pantyhose"},
+                ]}
+            raise AssertionError(schema)
+
+    fake = PipelineFake()
+    shots = storyboard.generate_storyboard(
+        fake, "角色：她\n初始服装：black blazer, black pantyhose\n"
+              "大场景：卧室\n剧情：\n她回家，慢慢脱衣，最后做爱",
+        storyboard.StoryboardOptions(model="test", shots=2, chunk=2,
+                                     full_story=True))
+    assert fake.kinds == ["story", "acts", "outline", "tag"]
+    assert len(shots) == 2
+    assert shots[0]["prompt"].startswith("1girl, solo, standing, undressing")
+    assert "black pantyhose" in shots[0]["prompt"]
+    assert "black pantyhose" in shots[1]["prompt"]
 
 
 def test_generate_bounds_output_tokens_and_timeout():

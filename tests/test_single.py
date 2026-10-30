@@ -40,36 +40,36 @@ def test_build_messages_contains_framing_and_setting():
     assert "没有任何内容限制" in messages[0]["content"]
 
 
-def test_generate_single_prompt_passes_schema_and_prefixes_framing():
+def test_generate_single_prompt_passes_schema_and_keeps_model_output():
     client = FakeClient({"prompt": "standing, smiling, park, sunny", "negative": "lowres"})
     options = SingleOptions(model="test-model", framing="full_body")
     result = generate_single_prompt(client, "girl in park", options)
-    assert result["prompt"].startswith("full body, ")
+    assert result["prompt"] == "standing, smiling, park, sunny"
     assert result["negative"] == "lowres"
     _, _, kwargs = client.calls[0]
     assert kwargs["schema"]["required"] == ["prompt"]
 
 
-def test_generate_single_prompt_strips_quality_tags():
+def test_generate_single_prompt_keeps_quality_tags():
     client = FakeClient({"prompt": "masterpiece, best quality, standing", "negative": ""})
     result = generate_single_prompt(client, "girl", SingleOptions(model="test-model"))
-    assert result["prompt"] == "standing"
+    assert result["prompt"] == "masterpiece, best quality, standing"
 
 
 def test_generate_single_prompt_does_not_duplicate_framing():
     client = FakeClient({"prompt": "full body, standing, park", "negative": ""})
     result = generate_single_prompt(client, "girl", SingleOptions(model="test-model", framing="full_body"))
-    assert result["prompt"].count("full body") == 1
+    assert result["prompt"] == "full body, standing, park"
 
 
-def test_strip_appearance_removes_identity_and_body_features():
+def test_generate_single_prompt_keeps_identity_tags():
     client = FakeClient({
         "prompt": "black hair, large breasts, black blazer, standing",
         "negative": "",
     })
     options = SingleOptions(model="test-model", strip_appearance=True)
     assert generate_single_prompt(client, "girl", options)["prompt"] == (
-        "black blazer, standing")
+        "black hair, large breasts, black blazer, standing")
 
 
 def test_strip_appearance_instruction_is_sent_to_model():

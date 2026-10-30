@@ -6,9 +6,9 @@ from typing import Any
 
 from comfyui_generator.core.ollama import OllamaClient
 from comfyui_generator.core.storyboard import (
-    BOORU_WORKFLOW, PROMPT_COVERAGE, clean_prompt, strip_stage1_identity,
+    BOORU_WORKFLOW, PROMPT_COVERAGE, raw_prompt,
 )
-from comfyui_generator.core.tags import dedupe_tags, limit_tags
+from comfyui_generator.core.tags import dedupe_tags
 
 REWRITE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -77,9 +77,7 @@ def rewrite_shot_prompt(client: OllamaClient, model: str, current_prompt: str,
         num_ctx=32768,
         keep_alive=keep_alive,
     )
-    prompt = limit_tags(clean_prompt(raw.get("prompt") or ""))
-    if strip_appearance:
-        prompt = strip_stage1_identity(prompt, character_tags)
+    prompt = raw_prompt(raw.get("prompt") or "")
     if not prompt:
         raise ValueError("Model returned an empty prompt.")
     return prompt

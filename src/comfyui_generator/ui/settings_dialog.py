@@ -129,6 +129,10 @@ class SettingsDialog(QDialog):
             lora_form, "风格 LoRA 目录", cfg.lora.style_dir, directory=True)
         self.body_lora_dir = _path_row(
             lora_form, "身体 LoRA 目录", cfg.lora.body_dir, directory=True)
+        self.action_lora_dir = _path_row(
+            lora_form, "动作 LoRA 目录", cfg.lora.action_dir, directory=True)
+        self.clothing_lora_dir = _path_row(
+            lora_form, "服装 LoRA 目录", cfg.lora.clothing_dir, directory=True)
         lora_hint = QLabel("留空 = 扫描 ComfyUI 的 LoRA 列表并按文件名自动分类。"
                            "自定义目录需已加入 ComfyUI 的 LoRA 搜索路径（extra_model_paths）。")
         lora_hint.setWordWrap(True)
@@ -197,6 +201,8 @@ class SettingsDialog(QDialog):
         c.lora.character_dir = self.character_lora_dir.text().strip()
         c.lora.style_dir = self.style_lora_dir.text().strip()
         c.lora.body_dir = self.body_lora_dir.text().strip()
+        c.lora.action_dir = self.action_lora_dir.text().strip()
+        c.lora.clothing_dir = self.clothing_lora_dir.text().strip()
         c.lora.online_lookup = self.online_lookup.isChecked()
         c.lora.civitai_base = self.civitai_base.text().strip() or "https://civitai.red"
         c.models.checkpoint_dir = self.checkpoint_dir.text().strip()

@@ -219,7 +219,8 @@ def cmd_story(args: argparse.Namespace) -> int:
     options = StoryboardOptions(
         model=llm, shots=args.shots, chunk=args.chunk, temperature=args.temperature,
         setting=args.setting, character_tags=character_tags,
-        style_positive=style_positive, log=lambda msg: _print("      " + msg))
+        style_positive=style_positive, full_story=True,
+        log=lambda msg: _print("      " + msg))
     started = time.time()
     shots = generate_storyboard(client, premise, options)
     _print("      done in %.1fs" % (time.time() - started))

@@ -119,6 +119,10 @@ OUTLINE_ROLE = PROMPT_ZH_ROLE + 1
 CAST_ROLE = OUTLINE_ROLE + 1
 SCRIPT_ROLE = CAST_ROLE + 1
 PHASE_ROLE = SCRIPT_ROLE + 1
+CLOTHING_ROLE = PHASE_ROLE + 1
+CHARACTERS_ROLE = CLOTHING_ROLE + 1
+CHARACTER_STATES_ROLE = CHARACTERS_ROLE + 1
+SCENE_ROLE = CHARACTER_STATES_ROLE + 1
 
 
 def _label(text: str, name: str = "Section") -> QLabel:
@@ -160,6 +164,8 @@ class MainWindow(QMainWindow):
         self._character_lora_names: set[str] = set()
         self._style_lora_names: set[str] = set()
         self._body_lora_names: set[str] = set()
+        self._action_lora_names: set[str] = set()
+        self._clothing_lora_names: set[str] = set()
         self._syncing_tags = False
         self._tag_cache_path = str(self.cfg.root / "cache" / "tag_translation.json")
         update_tag_cache(self._tag_cache_path, DEFAULT_EXTRA_PAIRS)
@@ -184,6 +190,18 @@ class MainWindow(QMainWindow):
         self.style_refresh_timer = QTimer(self)
         self.style_refresh_timer.setSingleShot(True)
         self.style_refresh_timer.timeout.connect(self._refresh_style_loras)
+        self._action_watch_dir = ""
+        self.action_watcher = QFileSystemWatcher(self)
+        self.action_watcher.directoryChanged.connect(self._on_action_dir_changed)
+        self.action_refresh_timer = QTimer(self)
+        self.action_refresh_timer.setSingleShot(True)
+        self.action_refresh_timer.timeout.connect(self._refresh_action_loras)
+        self._clothing_watch_dir = ""
+        self.clothing_watcher = QFileSystemWatcher(self)
+        self.clothing_watcher.directoryChanged.connect(self._on_clothing_dir_changed)
+        self.clothing_refresh_timer = QTimer(self)
+        self.clothing_refresh_timer.setSingleShot(True)
+        self.clothing_refresh_timer.timeout.connect(self._refresh_clothing_loras)
         self.current_pixmap: QPixmap | None = None
         self.current_task_id: str | None = None
         self.project: dict[str, Any] | None = None
@@ -564,6 +582,8 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._build_character_tab(), "角色")
         self.tabs.addTab(self._build_style_lora_tab(), "风格")
         self.tabs.addTab(self._build_body_lora_tab(), "身体")
+        self.tabs.addTab(self._build_action_lora_tab(), "动作")
+        self.tabs.addTab(self._build_clothing_lora_tab(), "服装")
         self.tabs.addTab(self._build_picture_tab(), "画面")
         self.tabs.addTab(self._build_hires_tab(), "高清")
         self.tabs.addTab(self._build_detailer_tab(), "重绘")
@@ -708,6 +728,44 @@ class MainWindow(QMainWindow):
         self.btn_scan_loras_body = QPushButton("重新扫描 LoRA")
         self.btn_scan_loras_body.clicked.connect(self.refresh_loras)
         layout.addWidget(self.btn_scan_loras_body)
+        layout.addStretch(1)
+        return page
+
+    def _build_action_lora_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setSpacing(8)
+        layout.addWidget(_label("动作 / 姿势 LoRA（可多选）"))
+        self.action_lora_table = self._make_lora_table()
+        self.action_lora_table.cellClicked.connect(
+            lambda row, col: self._toggle_lora_row(self.action_lora_table, row, col))
+        layout.addWidget(self.action_lora_table, 1)
+        hint = _label(
+            "从 models/loras/动作 扫描；只有当前镜头涉及该 LoRA 的触发词时才加载并注入，不污染角色标签", "Hint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.btn_scan_loras_action = QPushButton("重新扫描 LoRA")
+        self.btn_scan_loras_action.clicked.connect(self.refresh_loras)
+        layout.addWidget(self.btn_scan_loras_action)
+        layout.addStretch(1)
+        return page
+
+    def _build_clothing_lora_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setSpacing(8)
+        layout.addWidget(_label("服装 LoRA（可多选）"))
+        self.clothing_lora_table = self._make_lora_table()
+        self.clothing_lora_table.cellClicked.connect(
+            lambda row, col: self._toggle_lora_row(self.clothing_lora_table, row, col))
+        layout.addWidget(self.clothing_lora_table, 1)
+        hint = _label(
+            "从 models/loras/服装 扫描；只有当前镜头涉及该 LoRA 的触发词时才加载并注入，服装状态仍由角色锁定表维护", "Hint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.btn_scan_loras_clothing = QPushButton("重新扫描 LoRA")
+        self.btn_scan_loras_clothing.clicked.connect(self.refresh_loras)
+        layout.addWidget(self.btn_scan_loras_clothing)
         layout.addStretch(1)
         return page
 
@@ -985,6 +1043,8 @@ class MainWindow(QMainWindow):
         self._populate_detailers()
         self._sync_body_watcher()
         self._sync_style_watcher()
+        self._sync_action_watcher()
+        self._sync_clothing_watcher()
         self._apply_custom_models()
 
     @staticmethod
@@ -1239,12 +1299,87 @@ class MainWindow(QMainWindow):
         self.append_log("检测到风格 LoRA 目录变化，自动重新扫描...")
         self.refresh_loras()
 
-    def _collect_lora_names(self, configured: dict[str, float]) -> tuple[list[str], list[str], list[str]]:
+    def _action_lora_dir(self) -> str:
+        folder = self.cfg.lora.action_dir.strip()
+        if folder and Path(folder).is_dir():
+            return folder
+        base = self.cfg.comfy.base_dir.strip()
+        if base:
+            for name in ("动作", "action", "actions", "pose", "poses"):
+                candidate = Path(base) / "models" / "loras" / name
+                if candidate.is_dir():
+                    return str(candidate)
+        return folder
+
+    def _sync_action_watcher(self, force: bool = False) -> None:
+        folder = self._action_lora_dir()
+        watching = list(self.action_watcher.directories())
+        if not force and folder == self._action_watch_dir and (not folder or folder in watching):
+            return
+        for path in watching:
+            self.action_watcher.removePath(path)
+        self._action_watch_dir = ""
+        if folder and Path(folder).is_dir():
+            self.action_watcher.addPath(folder)
+            self._action_watch_dir = folder
+
+    def _on_action_dir_changed(self, _path: str = "") -> None:
+        self._sync_action_watcher(force=True)
+        self.action_refresh_timer.start(800)
+
+    def _refresh_action_loras(self) -> None:
+        self._sync_action_watcher(force=True)
+        if self.assets_worker and self.assets_worker.isRunning():
+            self.action_refresh_timer.start(1500)
+            return
+        self.append_log("检测到动作 LoRA 目录变化，自动重新扫描...")
+        self.refresh_loras()
+
+    def _clothing_lora_dir(self) -> str:
+        folder = self.cfg.lora.clothing_dir.strip()
+        if folder and Path(folder).is_dir():
+            return folder
+        base = self.cfg.comfy.base_dir.strip()
+        if base:
+            for name in ("服装", "clothing", "clothes", "outfit", "outfits"):
+                candidate = Path(base) / "models" / "loras" / name
+                if candidate.is_dir():
+                    return str(candidate)
+        return folder
+
+    def _sync_clothing_watcher(self, force: bool = False) -> None:
+        folder = self._clothing_lora_dir()
+        watching = list(self.clothing_watcher.directories())
+        if not force and folder == self._clothing_watch_dir and (not folder or folder in watching):
+            return
+        for path in watching:
+            self.clothing_watcher.removePath(path)
+        self._clothing_watch_dir = ""
+        if folder and Path(folder).is_dir():
+            self.clothing_watcher.addPath(folder)
+            self._clothing_watch_dir = folder
+
+    def _on_clothing_dir_changed(self, _path: str = "") -> None:
+        self._sync_clothing_watcher(force=True)
+        self.clothing_refresh_timer.start(800)
+
+    def _refresh_clothing_loras(self) -> None:
+        self._sync_clothing_watcher(force=True)
+        if self.assets_worker and self.assets_worker.isRunning():
+            self.clothing_refresh_timer.start(1500)
+            return
+        self.append_log("检测到服装 LoRA 目录变化，自动重新扫描...")
+        self.refresh_loras()
+
+    def _collect_lora_names(self, configured: dict[str, float]) -> tuple[
+            list[str], list[str], list[str], list[str], list[str]]:
         comfy = list(self.assets.loras)
         fallback = comfy or list(configured)
         char_dir = self.cfg.lora.character_dir
         style_dir = self.cfg.lora.style_dir
         body_dir = self._body_lora_dir()
+        action_dir = self._action_lora_dir()
+        clothing_dir = self._clothing_lora_dir()
         if char_dir:
             character = [entry["name"] for entry in lora_entries(char_dir, comfy)]
         else:
@@ -1253,25 +1388,36 @@ class MainWindow(QMainWindow):
             styles = [entry["name"] for entry in lora_entries(style_dir, comfy)]
         else:
             styles = [name for name in fallback if is_style_lora(name)]
-        if body_dir:
-            base = self.cfg.comfy.base_dir.strip()
-            lora_root = Path(base) / "models" / "loras" if base else None
-            body = []
-            for entry in lora_entries(body_dir, comfy):
+
+        base = self.cfg.comfy.base_dir.strip()
+        lora_root = Path(base) / "models" / "loras" if base else None
+
+        def scan_scope(folder: str) -> list[str]:
+            if not folder:
+                return []
+            names: list[str] = []
+            for entry in lora_entries(folder, comfy):
                 name = entry["name"]
                 if not entry["resolved"] and lora_root is not None:
                     try:
                         name = Path(entry["path"]).relative_to(lora_root).as_posix()
                     except ValueError:
                         pass
-                body.append(name)
-        else:
-            body = []
+                names.append(name)
+            return names
 
-        body_set = {name.lower() for name in body}
-        if body_set:
-            character = [name for name in character if name.lower() not in body_set]
-            styles = [name for name in styles if name.lower() not in body_set]
+        body = scan_scope(body_dir)
+        action = scan_scope(action_dir)
+        clothing = scan_scope(clothing_dir)
+
+        scoped_sets = [
+            {name.lower() for name in values}
+            for values in (body, action, clothing)
+        ]
+        scoped = set().union(*scoped_sets) if scoped_sets else set()
+        if scoped:
+            character = [name for name in character if name.lower() not in scoped]
+            styles = [name for name in styles if name.lower() not in scoped]
 
         if char_dir:
             character_set = {name.lower() for name in character}
@@ -1281,7 +1427,7 @@ class MainWindow(QMainWindow):
             character = [name for name in character if name.lower() not in style_set]
 
         for name in configured:
-            if name.lower() in body_set:
+            if name.lower() in scoped:
                 continue
             target_style = name in styles or (name not in character and is_style_lora(name))
             if target_style and name not in styles:
@@ -1299,7 +1445,8 @@ class MainWindow(QMainWindow):
                     result.append(value)
             return result
 
-        return unique(character), unique(styles), unique(body)
+        return (unique(character), unique(styles), unique(body),
+                unique(action), unique(clothing))
 
     def _populate_loras(self) -> None:
         configured: dict[str, float] = {}
@@ -1307,8 +1454,11 @@ class MainWindow(QMainWindow):
                      ([self.template["lora"]] if self.template.get("lora") else [])):
             if lora.get("name"):
                 configured[self._lora_key(lora["name"])] = float(lora.get("strength", 0.9))
-        character_names, style_names, body_names = self._collect_lora_names(configured)
-        folders = (self.cfg.lora.character_dir, self.cfg.lora.style_dir, self._body_lora_dir())
+        (character_names, style_names, body_names,
+         action_names, clothing_names) = self._collect_lora_names(configured)
+        folders = (self.cfg.lora.character_dir, self.cfg.lora.style_dir,
+                   self._body_lora_dir(), self._action_lora_dir(),
+                   self._clothing_lora_dir())
         if self.assets.loras and any(folders):
             for folder in folders:
                 if not folder:
@@ -1320,9 +1470,12 @@ class MainWindow(QMainWindow):
         self._character_lora_names = {self._lora_key(name) for name in character_names}
         self._style_lora_names = {self._lora_key(name) for name in style_names}
         self._body_lora_names = {self._lora_key(name) for name in body_names}
+        self._action_lora_names = {self._lora_key(name) for name in action_names}
+        self._clothing_lora_names = {self._lora_key(name) for name in clothing_names}
         self._lora_paths = {
             self._lora_key(name): self._resolve_lora_path(name)
-            for name in set(character_names + style_names + body_names)
+            for name in set(character_names + style_names + body_names
+                            + action_names + clothing_names)
         }
         self._fill_lora_table(self.lora_table, character_names, configured,
                               self._read_lora_table(self.lora_table))
@@ -1330,6 +1483,10 @@ class MainWindow(QMainWindow):
                               self._read_lora_table(self.style_lora_table))
         self._fill_lora_table(self.body_lora_table, body_names, configured,
                               self._read_lora_table(self.body_lora_table))
+        self._fill_lora_table(self.action_lora_table, action_names, configured,
+                              self._read_lora_table(self.action_lora_table))
+        self._fill_lora_table(self.clothing_lora_table, clothing_names, configured,
+                              self._read_lora_table(self.clothing_lora_table))
         self._refresh_reference_tags()
 
     def refresh_loras(self) -> None:
@@ -1339,15 +1496,18 @@ class MainWindow(QMainWindow):
             self.refresh_assets()
         else:
             self._populate_loras()
-            self.append_log("已重新扫描 LoRA：角色 %d / 风格 %d / 身体 %d" % (
+            self.append_log("已重新扫描 LoRA：角色 %d / 风格 %d / 身体 %d / 动作 %d / 服装 %d" % (
                 self.lora_table.rowCount(), self.style_lora_table.rowCount(),
-                self.body_lora_table.rowCount()))
+                self.body_lora_table.rowCount(), self.action_lora_table.rowCount(),
+                self.clothing_lora_table.rowCount()))
 
     def _resolve_lora_path(self, name: str) -> str:
         direct = Path(name)
         if direct.is_file():
             return str(direct)
-        for folder in (self.cfg.lora.character_dir, self.cfg.lora.style_dir, self._body_lora_dir()):
+        for folder in (self.cfg.lora.character_dir, self.cfg.lora.style_dir,
+                       self._body_lora_dir(), self._action_lora_dir(),
+                       self._clothing_lora_dir()):
             if not folder:
                 continue
             for entry in lora_entries(folder, self.assets.loras):
@@ -1743,9 +1903,12 @@ class MainWindow(QMainWindow):
         fields = {"role": "", "clothing": "", "scene": "", "plot": "", "extra": ""}
         aliases = (
             ("初始服装标签", "clothing"), ("初始服装", "clothing"),
-            ("大场景", "scene"), ("角色标签", "role"), ("角色", "role"),
+            ("初始装扮", "clothing"), ("服装", "clothing"),
+            ("大场景", "scene"), ("场景", "scene"),
+            ("角色设定", "role"), ("角色标签", "role"), ("角色", "role"),
+            ("人物设定", "role"), ("人物", "role"),
             ("剧情", "plot"), ("画面", "plot"),
-            ("其它", "extra"), ("其他", "extra"),
+            ("其它", "extra"), ("其他", "extra"), ("额外", "extra"),
         )
         current = "plot"
         found = False
@@ -1753,10 +1916,14 @@ class MainWindow(QMainWindow):
             stripped = line.strip()
             matched = None
             for prefix, key in aliases:
-                if stripped.startswith(prefix):
-                    rest = stripped[len(prefix):].lstrip("：:").strip()
-                    matched = (key, rest)
-                    break
+                if not stripped.startswith(prefix):
+                    continue
+                remainder = stripped[len(prefix):]
+                if remainder and remainder[0] not in "：: ":
+                    continue
+                rest = remainder.lstrip("：:").strip()
+                matched = (key, rest)
+                break
             if matched:
                 current = matched[0]
                 found = True
@@ -1804,6 +1971,20 @@ class MainWindow(QMainWindow):
     def _body_activation_tags(self) -> list[str]:
         groups: list[list[str]] = []
         for lora in self._selected_loras(self.body_lora_table):
+            path = self._lora_paths.get(self._lora_key(lora["name"])) or self._resolve_lora_path(lora["name"])
+            groups.append(self._lora_info(path).get("triggers", []))
+        return self._combine_tags(groups)
+
+    def _action_activation_tags(self) -> list[str]:
+        groups: list[list[str]] = []
+        for lora in self._selected_loras(self.action_lora_table):
+            path = self._lora_paths.get(self._lora_key(lora["name"])) or self._resolve_lora_path(lora["name"])
+            groups.append(self._lora_info(path).get("triggers", []))
+        return self._combine_tags(groups)
+
+    def _clothing_activation_tags(self) -> list[str]:
+        groups: list[list[str]] = []
+        for lora in self._selected_loras(self.clothing_lora_table):
             path = self._lora_paths.get(self._lora_key(lora["name"])) or self._resolve_lora_path(lora["name"])
             groups.append(self._lora_info(path).get("triggers", []))
         return self._combine_tags(groups)
@@ -1910,14 +2091,22 @@ class MainWindow(QMainWindow):
         return result
 
     def _build_loras(self) -> list[dict[str, Any]]:
-        body = self._selected_loras(self.body_lora_table)
-        for item in body:
-            path = self._lora_paths.get(self._lora_key(item["name"])) or self._resolve_lora_path(item["name"])
-            item["scope"] = "body"
-            item["triggers"] = list(self._lora_info(path).get("triggers", []))
-        return (self._selected_loras(self.lora_table)
-                + self._selected_loras(self.style_lora_table)
-                + body)
+        result = (self._selected_loras(self.lora_table)
+                  + self._selected_loras(self.style_lora_table))
+        for table, scope in ((self.body_lora_table, "body"),
+                             (self.action_lora_table, "action"),
+                             (self.clothing_lora_table, "clothing")):
+            items = self._selected_loras(table)
+            for item in items:
+                path = (self._lora_paths.get(self._lora_key(item["name"]))
+                        or self._resolve_lora_path(item["name"]))
+                info = self._lora_info(path)
+                item["scope"] = scope
+                item["triggers"] = list(info.get("triggers", []))
+                if scope in ("action", "clothing"):
+                    item["reference"] = list(info.get("reference", []))[:160]
+            result.extend(items)
+        return result
 
     def _build_detailers(self) -> list[dict[str, Any]]:
         cfg_value = float(self.cfg_spin.value())
@@ -1991,6 +2180,8 @@ class MainWindow(QMainWindow):
         data["style"] = self._build_style()
         data["style"]["lora_tags"] = ", ".join(self._style_activation_tags())
         data["body"] = {"tags": ", ".join(self._body_activation_tags())}
+        data["action"] = {"tags": ", ".join(self._action_activation_tags())}
+        data["clothing"] = {"tags": ", ".join(self._clothing_activation_tags())}
         data["story_fields"] = self._story_fields()
         data["single_fields"] = self._single_fields()
         data["settings"] = self._build_settings()
@@ -2174,6 +2365,7 @@ class MainWindow(QMainWindow):
             character_tags=self._character_tags(),
             style_positive=self._style_positive(),
             strip_appearance=self._has_character_lora(),
+            full_story=True,
             on_partial=lambda shots: self._write_story_partial(
                 text, shots, total, external),
         )
@@ -2232,6 +2424,17 @@ class MainWindow(QMainWindow):
             prompt_item.setData(CAST_ROLE, str(shot.get("cast", "")))
             prompt_item.setData(SCRIPT_ROLE, str(shot.get("script", "")))
             prompt_item.setData(PHASE_ROLE, str(shot.get("phase", "")))
+            prompt_item.setData(CLOTHING_ROLE, str(shot.get("clothing", "")))
+            prompt_item.setData(CHARACTERS_ROLE, str(shot.get("characters", "")))
+            states = shot.get("character_states") or {}
+            if isinstance(states, str):
+                try:
+                    states = json.loads(states)
+                except (TypeError, ValueError):
+                    states = {}
+            prompt_item.setData(CHARACTER_STATES_ROLE, json.dumps(
+                states, ensure_ascii=False))
+            prompt_item.setData(SCENE_ROLE, str(shot.get("scene", "")))
             self.shot_table.setItem(row, 3, prompt_item)
         finally:
             self._syncing_shots = False
@@ -2249,6 +2452,15 @@ class MainWindow(QMainWindow):
     def _row_data(self, row: int) -> dict[str, Any]:
         lock_item = self.shot_table.item(row, 0)
         prompt_item = self.shot_table.item(row, 3)
+        states: dict[str, Any] = {}
+        if prompt_item:
+            raw_states = prompt_item.data(CHARACTER_STATES_ROLE)
+            if isinstance(raw_states, str) and raw_states.strip():
+                try:
+                    parsed = json.loads(raw_states)
+                    states = parsed if isinstance(parsed, dict) else {}
+                except (TypeError, ValueError):
+                    states = {}
         return {
             "locked": bool(lock_item and lock_item.checkState() == Qt.CheckState.Checked),
             "id": self.shot_table.item(row, 1).text() if self.shot_table.item(row, 1) else "",
@@ -2260,6 +2472,10 @@ class MainWindow(QMainWindow):
             "cast": (prompt_item.data(CAST_ROLE) or "") if prompt_item else "",
             "script": (prompt_item.data(SCRIPT_ROLE) or "") if prompt_item else "",
             "phase": (prompt_item.data(PHASE_ROLE) or "") if prompt_item else "",
+            "clothing": (prompt_item.data(CLOTHING_ROLE) or "") if prompt_item else "",
+            "characters": (prompt_item.data(CHARACTERS_ROLE) or "") if prompt_item else "",
+            "character_states": states,
+            "scene": (prompt_item.data(SCENE_ROLE) or "") if prompt_item else "",
         }
 
     def _on_shot_item_changed(self, item: QTableWidgetItem) -> None:
@@ -2583,6 +2799,10 @@ class MainWindow(QMainWindow):
                               "cast": data.get("cast", ""),
                               "script": data.get("script", ""),
                               "phase": data.get("phase", ""),
+                              "clothing": data.get("clothing", ""),
+                              "characters": data.get("characters", ""),
+                              "character_states": data.get("character_states") or {},
+                              "scene": data.get("scene", ""),
                               "locked": data["locked"]})
                 continue
             prompt_en = data.get("prompt_en", "").strip()
@@ -2598,6 +2818,10 @@ class MainWindow(QMainWindow):
                           "cast": data.get("cast", ""),
                           "script": data.get("script", ""),
                           "phase": data.get("phase", ""),
+                          "clothing": data.get("clothing", ""),
+                          "characters": data.get("characters", ""),
+                          "character_states": data.get("character_states") or {},
+                          "scene": data.get("scene", ""),
                           "locked": data["locked"]})
         if pending:
             translations = self._resolve_chinese_texts([item[2] for item in pending])
@@ -3002,10 +3226,16 @@ class MainWindow(QMainWindow):
         character: dict[str, float] = {}
         styles: dict[str, float] = {}
         body: dict[str, float] = {}
+        action: dict[str, float] = {}
+        clothing: dict[str, float] = {}
         for name, strength in desired.items():
             key = self._lora_key(name)
             if key in self._body_lora_names:
                 body[name] = strength
+            elif key in self._action_lora_names:
+                action[name] = strength
+            elif key in self._clothing_lora_names:
+                clothing[name] = strength
             elif key in self._style_lora_names:
                 styles[name] = strength
             elif key in self._character_lora_names:
@@ -3017,6 +3247,8 @@ class MainWindow(QMainWindow):
         self._apply_table_loras(self.lora_table, character)
         self._apply_table_loras(self.style_lora_table, styles)
         self._apply_table_loras(self.body_lora_table, body)
+        self._apply_table_loras(self.action_lora_table, action)
+        self._apply_table_loras(self.clothing_lora_table, clothing)
 
     def _apply_project(self, project: dict[str, Any]) -> None:
         self.project = project
@@ -3532,6 +3764,8 @@ class MainWindow(QMainWindow):
                 "character": self._lora_table_state(self.lora_table),
                 "style": self._lora_table_state(self.style_lora_table),
                 "body": self._lora_table_state(self.body_lora_table),
+                "action": self._lora_table_state(self.action_lora_table),
+                "clothing": self._lora_table_state(self.clothing_lora_table),
             },
             "detailers": detailers,
             "options": {
@@ -3611,6 +3845,8 @@ class MainWindow(QMainWindow):
         self._restore_lora_table(self.lora_table, loras.get("character") or {})
         self._restore_lora_table(self.style_lora_table, loras.get("style") or {})
         self._restore_lora_table(self.body_lora_table, loras.get("body") or {})
+        self._restore_lora_table(self.action_lora_table, loras.get("action") or {})
+        self._restore_lora_table(self.clothing_lora_table, loras.get("clothing") or {})
 
         detailers = state.get("detailers") or {}
         self._detailer_state = {

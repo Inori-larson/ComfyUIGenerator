@@ -58,7 +58,7 @@ def test_compose_prompts_includes_body_tags(cfg):
     assert "nude" in positive
 
 
-def test_compose_prompts_blocks_body_tags_that_remove_clothing(cfg):
+def test_compose_prompts_keeps_native_body_tags_without_filtering(cfg):
     cfg = dict(cfg)
     cfg["style"] = dict(cfg["style"])
     cfg["style"]["negative"] = "bad quality, censored"
@@ -66,45 +66,42 @@ def test_compose_prompts_blocks_body_tags_that_remove_clothing(cfg):
     shot = {"prompt": "black blazer, frilled black leotard, black pantyhose, full_body"}
     positive, _ = compose_prompts(cfg, shot)
     tags = [tag.strip() for tag in positive.split(",")]
-    assert "pussy" not in tags
-    assert "nude" not in tags
-    assert "close-up" not in tags
-    assert "censored" not in tags
-    assert "breasts" in tags
-    assert "black blazer" in tags
+    for expected in ("pussy", "nude", "close-up", "censored", "breasts",
+                     "black blazer", "frilled black leotard", "black pantyhose"):
+        assert expected in tags
 
 
-def test_compose_prompts_keeps_body_tags_when_shot_is_nude(cfg):
+def test_compose_prompts_keeps_native_body_tags_when_nude(cfg):
     cfg = dict(cfg)
     cfg["body"] = {"tags": "pussy, nude, close-up"}
     positive, _ = compose_prompts(cfg, {"prompt": "nude, full_body"})
     tags = [tag.strip() for tag in positive.split(",")]
     assert "pussy" in tags
     assert "nude" in tags
-    assert "close-up" not in tags
+    assert "close-up" in tags
 
 
-def test_compose_prompts_removes_body_tags_listed_in_negative(cfg):
+def test_compose_prompts_does_not_filter_negative_words(cfg):
     cfg = dict(cfg)
     cfg["style"] = dict(cfg["style"])
     cfg["style"]["negative"] = "bad quality, censored"
     cfg["body"] = {"tags": "censored, pussy"}
     positive, _ = compose_prompts(cfg, {"prompt": "nude"})
     tags = [tag.strip() for tag in positive.split(",")]
-    assert "censored" not in tags
+    assert "censored" in tags
     assert "pussy" in tags
 
 
-def test_compose_prompts_removes_camera_equipment(cfg):
+def test_compose_prompts_keeps_model_camera_tags(cfg):
     cfg = dict(cfg)
     cfg["body"] = {"tags": ""}
     positive, _ = compose_prompts(
         cfg, {"prompt": "looking_at_camera, holding_camera, black_pantyhose, from_below"})
     tags = [tag.strip() for tag in positive.split(",")]
-    assert "looking at viewer" in tags
-    assert "holding camera" not in tags
-    assert "black pantyhose" in tags
-    assert "from below" in tags
+    assert "looking_at_camera" in tags
+    assert "holding_camera" in tags
+    assert "black_pantyhose" in tags
+    assert "from_below" in tags
 
 
 def test_body_loras_are_selected_per_shot(cfg):
@@ -143,13 +140,107 @@ def test_body_loras_are_selected_per_shot(cfg):
     assert "pussy" in [tag.strip() for tag in compose_prompts(cfg, euphemism)[0].split(",")]
 
 
+def test_action_loras_are_selected_per_shot(cfg):
+    cfg = dict(cfg)
+    cfg["loras"] = cfg["loras"] + [
+        {"name": "actions\\MissionaryV1.safetensors", "strength": 0.8,
+         "scope": "action", "triggers": ["missionary"]},
+    ]
+    idle = {"prompt": "standing, smile"}
+    action = {"prompt": "lying on back, legs up, sex"}
+
+    assert not any("actions\\" in item["name"] for item in lora_chain(cfg, idle))
+    assert any("actions\\" in item["name"] for item in lora_chain(cfg, action))
+    tags = [tag.strip() for tag in compose_prompts(cfg, action)[0].split(",")]
+    assert "missionary" in tags
+
+
+def test_clothing_loras_are_selected_per_shot(cfg):
+    cfg = dict(cfg)
+    cfg["loras"] = cfg["loras"] + [
+        {"name": "outfits\\SchoolUniformV1.safetensors", "strength": 0.8,
+         "scope": "clothing", "triggers": ["school uniform"]},
+    ]
+    idle = {"prompt": "standing, smile"}
+    clothed = {"prompt": "serafuku, pleated skirt"}
+
+    assert not any("outfits\\" in item["name"] for item in lora_chain(cfg, idle))
+    assert any("outfits\\" in item["name"] for item in lora_chain(cfg, clothed))
+    tags = [tag.strip() for tag in compose_prompts(cfg, clothed)[0].split(",")]
+    assert "school uniform" in tags
+
+
+def test_clothing_lora_uses_reference_tags_when_trigger_is_opaque(cfg):
+    cfg = dict(cfg)
+    cfg["loras"] = cfg["loras"] + [
+        {"name": "clothing\\AF_DarkDesire_ILL.safetensors", "strength": 0.8,
+         "scope": "clothing", "triggers": ["af_darkdesire"],
+         "reference": ["af_darkdesire", "lingerie", "panties", "high heels",
+                       "standing", "1girl"]},
+    ]
+    clothed = {"prompt": "lingerie, panties, high heels"}
+    idle = {"prompt": "standing, smile"}
+    assert any("AF_DarkDesire" in item["name"] for item in lora_chain(cfg, clothed))
+    assert not any("AF_DarkDesire" in item["name"] for item in lora_chain(cfg, idle))
+    tags = [tag.strip() for tag in compose_prompts(cfg, clothed)[0].split(",")]
+    assert "af_darkdesire" in tags
+
+
+def test_action_lora_uses_filename_or_reference_when_triggers_are_empty(cfg):
+    cfg = dict(cfg)
+    cfg["loras"] = cfg["loras"] + [
+        {"name": "actions\\16_pussygrip_illus01_1a.safetensors", "strength": 0.8,
+         "scope": "action", "triggers": [], "reference": []},
+        {"name": "actions\\after-sex-fellatio-v2.safetensors", "strength": 0.8,
+         "scope": "action", "triggers": [],
+         "reference": ["after sex fellatio", "nude", "penis", "pussy"]},
+    ]
+    grip = {"prompt": "pussy, spread legs"}
+    oral = {"prompt": "fellatio, cum"}
+    idle = {"prompt": "standing, smile"}
+    grip_names = [item["name"] for item in lora_chain(cfg, grip)]
+    oral_names = [item["name"] for item in lora_chain(cfg, oral)]
+    idle_names = [item["name"] for item in lora_chain(cfg, idle)]
+    assert any("pussygrip" in name for name in grip_names)
+    assert any("fellatio" in name for name in oral_names)
+    assert not any("pussygrip" in name or "fellatio" in name for name in idle_names)
+
+
+def test_scope_is_detected_from_lora_folder(cfg):
+    cfg = dict(cfg)
+    cfg["loras"] = cfg["loras"] + [
+        {"name": "动作\\MissionaryV1.safetensors", "strength": 0.8,
+         "triggers": ["missionary"]},
+        {"name": "服装\\SchoolUniformV1.safetensors", "strength": 0.8,
+         "triggers": ["school uniform"]},
+    ]
+    action = {"prompt": "lying on back, legs up"}
+    clothing = {"prompt": "serafuku, pleated skirt"}
+    action_names = [item["name"] for item in lora_chain(cfg, action)]
+    clothing_names = [item["name"] for item in lora_chain(cfg, clothing)]
+    assert "动作\\MissionaryV1.safetensors" in action_names
+    assert "服装\\SchoolUniformV1.safetensors" not in action_names
+    assert "服装\\SchoolUniformV1.safetensors" in clothing_names
+    assert "动作\\MissionaryV1.safetensors" not in clothing_names
+
+
+def test_action_and_clothing_tags_are_added_without_loras(cfg):
+    cfg = dict(cfg)
+    cfg["action"] = {"tags": "action_tag"}
+    cfg["clothing"] = {"tags": "clothing_tag"}
+    positive, _ = compose_prompts(cfg, {"prompt": "park"})
+    tags = [tag.strip() for tag in positive.split(",")]
+    assert "action_tag" in tags
+    assert "clothing_tag" in tags
+
+
 def test_compose_prompts_includes_style_lora_tags(cfg):
     cfg = dict(cfg)
     cfg["style"] = dict(cfg["style"])
     cfg["style"]["lora_tags"] = "style_a, style_b"
     positive, _ = compose_prompts(cfg, {"prompt": "park"})
-    assert "style a" in positive
-    assert "style b" in positive
+    assert "style_a" in positive
+    assert "style_b" in positive
 
 
 def test_workflow_structure(cfg):

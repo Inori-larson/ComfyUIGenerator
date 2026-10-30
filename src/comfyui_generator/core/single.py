@@ -7,10 +7,9 @@ from typing import Any, Callable
 
 from comfyui_generator.core.ollama import OllamaClient
 from comfyui_generator.core.storyboard import (
-    BOORU_WORKFLOW, PROMPT_COVERAGE, clean_prompt, strip_generation_quality,
-    strip_stage1_identity,
+    BOORU_WORKFLOW, PROMPT_COVERAGE, raw_prompt,
 )
-from comfyui_generator.core.tags import dedupe_tags, limit_tags
+from comfyui_generator.core.tags import dedupe_tags
 
 SINGLE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -103,15 +102,9 @@ def generate_single_prompt(client: OllamaClient, description: str,
         num_ctx=options.num_ctx,
         keep_alive=options.keep_alive,
     )
-    prompt = clean_prompt(raw.get("prompt") or raw.get("tags") or "")
+    prompt = raw_prompt(raw.get("prompt") or raw.get("tags") or "")
     if not prompt:
         raise ValueError("Model returned an empty prompt.")
-    prompt = strip_generation_quality(limit_tags(prompt))
-    if options.strip_appearance:
-        prompt = strip_stage1_identity(prompt, options.character_tags)
-    framing = FRAMING_TAGS.get(options.framing, "")
-    if framing and framing.lower() not in prompt.lower():
-        prompt = framing + ", " + prompt
-    negative = clean_prompt(raw.get("negative") or "")
+    negative = raw_prompt(raw.get("negative") or "")
     options.log("Single prompt ready (%d tags)" % len([t for t in prompt.split(",") if t.strip()]))
     return {"prompt": prompt, "negative": negative}
