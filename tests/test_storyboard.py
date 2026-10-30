@@ -14,6 +14,7 @@ from comfyui_generator.core.storyboard import (
     character_states_for_beats,
     clothing_states_for_beats,
     extract_premise_beats,
+    filter_locked_appearance,
     normalize_character_profiles,
     parse_character_profiles,
     present_character_profiles,
@@ -451,6 +452,42 @@ def test_strip_appearance_keeps_new_male_but_not_lora_character_appearance():
     assert "yixuan" in merged[0].appearance
     assert "silver hair" in merged[0].appearance
     assert "red eyes" in merged[0].appearance
+
+
+def test_explicit_appearance_and_body_are_locked_against_model_changes():
+    premise = (
+        "角色：女主：old hair\n"
+        "外貌身材：silver hair, red eyes, long hair, tall, large breasts\n"
+        "初始服装：女主：black dress")
+    profiles = parse_character_profiles(premise)
+    assert profiles[0].appearance_locked is True
+    assert profiles[0].appearance == [
+        "silver hair", "red eyes", "long hair", "tall", "large breasts"]
+    normalized = normalize_character_profiles([{
+        "name": "女主", "gender": "girl",
+        "appearance": "black hair, blue eyes, short hair",
+        "initial_clothing": "black dress",
+    }], premise)
+    assert normalized[0].appearance == profiles[0].appearance
+    assert filter_locked_appearance(
+        ["white hair", "blue eyes", "smile"], ["silver hair", "red eyes"]
+    ) == ["smile"]
+    assert filter_locked_appearance(
+        ["small breasts", "short", "dark skin", "smile"],
+        ["large breasts", "tall", "pale skin"],
+    ) == ["smile"]
+
+
+def test_per_character_appearance_section():
+    premise = (
+        "角色：女主：yixuan；男主：male\n"
+        "外貌身材：女主：silver hair, red eyes；男主：black hair, golden eyes, tall\n"
+        "初始服装：女主：black dress；男主：white shirt")
+    profiles = parse_character_profiles(premise)
+    assert profiles[0].appearance == ["silver hair", "red eyes"]
+    assert profiles[0].appearance_locked is True
+    assert profiles[1].appearance == ["black hair", "golden eyes", "tall"]
+    assert profiles[1].appearance_locked is True
 
 
 def test_generic_character_states_keep_male_and_female_independent():

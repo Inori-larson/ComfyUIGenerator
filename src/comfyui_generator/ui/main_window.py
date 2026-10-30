@@ -41,8 +41,8 @@ from comfyui_generator.core.project import (
 from comfyui_generator.core.services import ComfyService
 from comfyui_generator.core.single import FRAMING_TAGS, SingleOptions
 from comfyui_generator.core.storyboard import (
-    StoryboardOptions, extract_premise_beats, premise_from_json,
-    shots_from_json, slugify,
+    StoryboardOptions, extract_premise_beats, filter_locked_appearance,
+    premise_from_json, shots_from_json, slugify,
 )
 from comfyui_generator.core.tag_cache import load_tag_cache, update_tag_cache
 from comfyui_generator.core.tags import append_tags, estimate_tokens
@@ -359,6 +359,13 @@ class MainWindow(QMainWindow):
         self.single_role.setFixedHeight(52)
         layout.addWidget(self.single_role)
 
+        layout.addWidget(_label("外貌 / 身材（全片锁定）"))
+        self.single_appearance = QPlainTextEdit()
+        self.single_appearance.setPlaceholderText(
+            "例：silver hair, red eyes, long hair, tall, large breasts")
+        self.single_appearance.setFixedHeight(44)
+        layout.addWidget(self.single_appearance)
+
         layout.addWidget(_label("初始服装"))
         self.single_clothing = QPlainTextEdit()
         self.single_clothing.setPlaceholderText("例：black blazer, black pantyhose")
@@ -436,6 +443,13 @@ class MainWindow(QMainWindow):
         self.story_role.setPlaceholderText("例：yixuan \\(zenless zone zero\\), solo, hairclip")
         self.story_role.setFixedHeight(44)
         form_layout.addWidget(self.story_role)
+
+        form_layout.addWidget(_label("外貌 / 身材（全片锁定）"))
+        self.story_appearance = QPlainTextEdit()
+        self.story_appearance.setPlaceholderText(
+            "例：silver hair, red eyes, long hair, tall, large breasts；多人可写：女主：…；男主：…")
+        self.story_appearance.setFixedHeight(44)
+        form_layout.addWidget(self.story_appearance)
 
         form_layout.addWidget(_label("初始服装"))
         self.story_clothing = QPlainTextEdit()
@@ -701,6 +715,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(8)
         layout.addWidget(_label("风格 LoRA（可多选）"))
         self.style_lora_table = self._make_lora_table()
+        self.style_lora_table.itemChanged.connect(self._on_lora_item_changed)
         self.style_lora_table.cellClicked.connect(
             lambda row, col: self._toggle_lora_row(self.style_lora_table, row, col))
         layout.addWidget(self.style_lora_table, 1)
@@ -721,6 +736,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(8)
         layout.addWidget(_label("身体部位 LoRA（可多选）"))
         self.body_lora_table = self._make_lora_table()
+        self.body_lora_table.itemChanged.connect(self._on_lora_item_changed)
         self.body_lora_table.cellClicked.connect(
             lambda row, col: self._toggle_lora_row(self.body_lora_table, row, col))
         layout.addWidget(self.body_lora_table, 1)
@@ -740,6 +756,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(8)
         layout.addWidget(_label("动作 / 姿势 LoRA（可多选）"))
         self.action_lora_table = self._make_lora_table()
+        self.action_lora_table.itemChanged.connect(self._on_lora_item_changed)
         self.action_lora_table.cellClicked.connect(
             lambda row, col: self._toggle_lora_row(self.action_lora_table, row, col))
         layout.addWidget(self.action_lora_table, 1)
@@ -759,6 +776,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(8)
         layout.addWidget(_label("服装 LoRA（可多选）"))
         self.clothing_lora_table = self._make_lora_table()
+        self.clothing_lora_table.itemChanged.connect(self._on_lora_item_changed)
         self.clothing_lora_table.cellClicked.connect(
             lambda row, col: self._toggle_lora_row(self.clothing_lora_table, row, col))
         layout.addWidget(self.clothing_lora_table, 1)
@@ -1229,17 +1247,21 @@ class MainWindow(QMainWindow):
 
     def _apply_lora_label_translations(self, mapping: dict[str, str]) -> None:
         for table in self._lora_tables():
-            for row in range(table.rowCount()):
-                item = table.item(row, 0)
-                if not item:
-                    continue
-                name = str(item.data(Qt.ItemDataRole.UserRole) or "")
-                source = self._lora_label_source(name)
-                value = mapping.get(source, "")
-                if not value or value == source:
-                    continue
-                self._lora_label_translations[source] = value
-                item.setText(value)
+            table.blockSignals(True)
+            try:
+                for row in range(table.rowCount()):
+                    item = table.item(row, 0)
+                    if not item:
+                        continue
+                    name = str(item.data(Qt.ItemDataRole.UserRole) or "")
+                    source = self._lora_label_source(name)
+                    value = mapping.get(source, "")
+                    if not value or value == source:
+                        continue
+                    self._lora_label_translations[source] = value
+                    item.setText(value)
+            finally:
+                table.blockSignals(False)
 
     def _translate_lora_labels(self) -> None:
         labels: list[str] = []
@@ -1453,14 +1475,6 @@ class MainWindow(QMainWindow):
         body_dir = self._body_lora_dir()
         action_dir = self._action_lora_dir()
         clothing_dir = self._clothing_lora_dir()
-        if char_dir:
-            character = [entry["name"] for entry in lora_entries(char_dir, comfy)]
-        else:
-            character = [name for name in fallback if not is_style_lora(name)]
-        if style_dir:
-            styles = [entry["name"] for entry in lora_entries(style_dir, comfy)]
-        else:
-            styles = [name for name in fallback if is_style_lora(name)]
 
         base = self.cfg.comfy.base_dir.strip()
         lora_root = Path(base) / "models" / "loras" if base else None
@@ -1476,43 +1490,56 @@ class MainWindow(QMainWindow):
                         name = Path(entry["path"]).relative_to(lora_root).as_posix()
                     except ValueError:
                         pass
-                names.append(name)
+                names.append(self._lora_key(name))
             return names
 
+        character = (scan_scope(char_dir) if char_dir
+                     else [self._lora_key(name) for name in fallback
+                           if not is_style_lora(name)])
+        styles = (scan_scope(style_dir) if style_dir
+                  else [self._lora_key(name) for name in fallback
+                        if is_style_lora(name)])
         body = scan_scope(body_dir)
         action = scan_scope(action_dir)
         clothing = scan_scope(clothing_dir)
 
+        def name_key(name: str) -> str:
+            return self._lora_key(name).lower()
+
         scoped_sets = [
-            {name.lower() for name in values}
+            {name_key(name) for name in values}
             for values in (body, action, clothing)
         ]
         scoped = set().union(*scoped_sets) if scoped_sets else set()
         if scoped:
-            character = [name for name in character if name.lower() not in scoped]
-            styles = [name for name in styles if name.lower() not in scoped]
+            character = [name for name in character if name_key(name) not in scoped]
+            styles = [name for name in styles if name_key(name) not in scoped]
 
         if char_dir:
-            character_set = {name.lower() for name in character}
-            styles = [name for name in styles if name.lower() not in character_set]
+            character_set = {name_key(name) for name in character}
+            styles = [name for name in styles if name_key(name) not in character_set]
         if style_dir:
-            style_set = {name.lower() for name in styles}
-            character = [name for name in character if name.lower() not in style_set]
+            style_set = {name_key(name) for name in styles}
+            character = [name for name in character if name_key(name) not in style_set]
 
         for name in configured:
-            if name.lower() in scoped:
+            key = name_key(name)
+            if key in scoped:
                 continue
-            target_style = name in styles or (name not in character and is_style_lora(name))
-            if target_style and name not in styles:
-                styles.append(name)
-            elif not target_style and name not in character:
-                character.append(name)
+            in_styles = any(name_key(value) == key for value in styles)
+            in_character = any(name_key(value) == key for value in character)
+            target_style = in_styles or (not in_character and is_style_lora(name))
+            canonical = self._lora_key(name)
+            if target_style and not in_styles:
+                styles.append(canonical)
+            elif not target_style and not in_character:
+                character.append(canonical)
 
         def unique(values: list[str]) -> list[str]:
             seen: set[str] = set()
             result: list[str] = []
             for value in values:
-                key = value.lower()
+                key = name_key(value)
                 if key not in seen:
                     seen.add(key)
                     result.append(value)
@@ -1603,7 +1630,9 @@ class MainWindow(QMainWindow):
     def _on_lora_item_changed(self, item: QTableWidgetItem) -> None:
         if self._syncing_tags or item.column() != 0:
             return
-        self._sync_character_tags()
+        if item.tableWidget() is self.lora_table:
+            self._sync_character_tags()
+        self._save_ui_state()
 
     def _toggle_lora_row(self, table: QTableWidget, row: int, column: int) -> None:
         if row < 0 or column == 0:
@@ -1920,6 +1949,7 @@ class MainWindow(QMainWindow):
     def _single_fields(self) -> dict[str, str]:
         return {
             "role": self.single_role.toPlainText().strip(),
+            "appearance": self.single_appearance.toPlainText().strip(),
             "clothing": self.single_clothing.toPlainText().strip(),
             "scene": self.single_scene.text().strip(),
             "plot": self.single_desc.toPlainText().strip(),
@@ -1931,6 +1961,8 @@ class MainWindow(QMainWindow):
         parts: list[str] = []
         if fields["role"]:
             parts.append("角色标签：%s" % fields["role"])
+        if fields["appearance"]:
+            parts.append("外貌身材：%s" % self._resolved_appearance("single"))
         if fields["clothing"]:
             parts.append("初始服装：%s" % fields["clothing"])
         if fields["scene"]:
@@ -1943,6 +1975,7 @@ class MainWindow(QMainWindow):
 
     def _set_single_fields(self, fields: dict[str, Any]) -> None:
         self.single_role.setPlainText(str(fields.get("role", "")))
+        self.single_appearance.setPlainText(str(fields.get("appearance", "")))
         self.single_clothing.setPlainText(str(fields.get("clothing", "")))
         self.single_scene.setText(str(fields.get("scene", "")))
         self.single_desc.setPlainText(str(fields.get("plot", "")))
@@ -1951,6 +1984,7 @@ class MainWindow(QMainWindow):
     def _story_fields(self) -> dict[str, str]:
         return {
             "role": self.story_role.toPlainText().strip(),
+            "appearance": self.story_appearance.toPlainText().strip(),
             "clothing": self.story_clothing.toPlainText().strip(),
             "scene": self.story_scene.text().strip(),
             "plot": self.story_premise.toPlainText().strip(),
@@ -1962,6 +1996,8 @@ class MainWindow(QMainWindow):
         parts: list[str] = []
         if fields["role"]:
             parts.append("角色：%s" % fields["role"])
+        if fields["appearance"]:
+            parts.append("外貌身材：%s" % self._resolved_appearance("story"))
         if fields["clothing"]:
             parts.append("初始服装：%s" % fields["clothing"])
         if fields["scene"]:
@@ -1974,8 +2010,12 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _parse_story_text(text: str) -> dict[str, str]:
-        fields = {"role": "", "clothing": "", "scene": "", "plot": "", "extra": ""}
+        fields = {"role": "", "appearance": "", "clothing": "", "scene": "",
+                  "plot": "", "extra": ""}
         aliases = (
+            ("外貌身材", "appearance"), ("角色外貌", "appearance"),
+            ("人物外貌", "appearance"), ("外貌", "appearance"),
+            ("外形", "appearance"), ("身材", "appearance"), ("体型", "appearance"),
             ("初始服装标签", "clothing"), ("初始服装", "clothing"),
             ("初始装扮", "clothing"), ("服装", "clothing"),
             ("大场景", "scene"), ("场景", "scene"),
@@ -2011,6 +2051,7 @@ class MainWindow(QMainWindow):
 
     def _set_story_fields(self, fields: dict[str, Any]) -> None:
         self.story_role.setPlainText(str(fields.get("role", "")))
+        self.story_appearance.setPlainText(str(fields.get("appearance", "")))
         self.story_clothing.setPlainText(str(fields.get("clothing", "")))
         self.story_scene.setText(str(fields.get("scene", "")))
         self.story_premise.setPlainText(str(fields.get("plot", "")))
@@ -2035,6 +2076,49 @@ class MainWindow(QMainWindow):
                 self._activation_zh = text
                 return english
         return text
+
+    def _appearance_field(self, mode: str | None = None) -> str:
+        if mode == "story":
+            return self.story_appearance.toPlainText().strip()
+        if mode == "single":
+            return self.single_appearance.toPlainText().strip()
+        return (self.story_appearance.toPlainText().strip()
+                or self.single_appearance.toPlainText().strip())
+
+    def _resolved_appearance(self, mode: str | None = None) -> str:
+        text = self._appearance_field(mode)
+        if not text or not re.search(r"[\u4e00-\u9fff]", text):
+            return text
+        parts = [part.strip() for part in re.split(r"[；;\n]+", text) if part.strip()]
+        values: list[str] = []
+        for part in parts:
+            match = re.match(r"^([^:：]{1,24})[:：]\s*(.+)$", part)
+            value = match.group(2) if match else part
+            resolved = self._resolve_chinese_texts([value])
+            english = resolved[0] if resolved and resolved[0] else ""
+            values.append("%s：%s" % (match.group(1), english or value)
+                          if match else (english or value))
+        return "；".join(values) or text
+
+    def _combined_character_tags(self, mode: str | None = None) -> str:
+        if mode == "story":
+            role = self.story_role.toPlainText().strip()
+        elif mode == "single":
+            role = self.single_role.toPlainText().strip()
+        else:
+            role = (self.story_role.toPlainText().strip()
+                    or self.single_role.toPlainText().strip())
+        appearance = self._resolved_appearance(mode)
+        if mode == "story" and (":" in appearance or "：" in appearance):
+            appearance = ""
+        activation = self._character_tags()
+        if appearance:
+            locked = [tag.strip() for tag in appearance.split(",") if tag.strip()]
+            filtered = filter_locked_appearance(
+                [tag.strip() for tag in activation.split(",") if tag.strip()],
+                locked)
+            activation = ", ".join(filtered)
+        return append_tags(append_tags(role, activation), appearance)
 
     def _has_activation_tags(self) -> bool:
         return bool(self._character_tags())
@@ -2231,12 +2315,7 @@ class MainWindow(QMainWindow):
         data["loras"] = self._build_loras()
         data.pop("lora", None)
         data["character"] = copy.deepcopy(self.template.get("character") or {})
-        if mode == "story":
-            data["character"]["tags"] = (
-                self.story_role.toPlainText().strip() or self._character_tags())
-        else:
-            data["character"]["tags"] = (
-                self.single_role.toPlainText().strip() or self._character_tags())
+        data["character"]["tags"] = self._combined_character_tags(mode)
         ref = self.char_ref.text().strip()
         if ref:
             data["character"]["use_ipadapter"] = True
@@ -2317,8 +2396,7 @@ class MainWindow(QMainWindow):
             model=self._llm(),
             framing=self.framing.currentData(),
             setting="",
-            character_tags=(self.single_role.toPlainText().strip()
-                            or self._character_tags()),
+            character_tags=self._combined_character_tags("single"),
             style_positive=self._style_positive(),
             strip_appearance=self._has_character_lora(),
         )
@@ -2436,7 +2514,7 @@ class MainWindow(QMainWindow):
             model=self._llm(), shots=total,
             chunk=2 if external else 3,
             setting="",
-            character_tags=self._character_tags(),
+            character_tags=self._combined_character_tags("story"),
             style_positive=self._style_positive(),
             strip_appearance=self._has_character_lora(),
             full_story=True,
@@ -2804,8 +2882,7 @@ class MainWindow(QMainWindow):
         options = StoryboardOptions(
             model=self._llm(), shots=total, chunk=3,
             setting="",
-            character_tags=(self.single_role.toPlainText().strip()
-                            or self._character_tags()),
+            character_tags=self._combined_character_tags("single"),
             style_positive=self._style_positive(),
             strip_appearance=self._has_character_lora(),
         )
@@ -2822,10 +2899,12 @@ class MainWindow(QMainWindow):
 
     def _on_expanded(self, shots: list[dict[str, str]]) -> None:
         self._fill_shot_table(shots)
+        self._set_story_fields(self._single_fields())
+        self.story_shots.setValue(len(shots))
         self.btn_mode_single.setChecked(False)
         self.btn_mode_story.setChecked(True)
         self._switch_mode(1)
-        self.append_log("已扩写为 %d 镜" % len(shots))
+        self.append_log("已改写为 %d 镜" % len(shots))
         self._autosave_generated_story()
 
     def _on_prompt_failed(self, message: str) -> None:
@@ -3199,6 +3278,7 @@ class MainWindow(QMainWindow):
         self._single_prompt_en = ""
         self._single_prompt_zh = ""
         self.single_role.clear()
+        self.single_appearance.clear()
         self.single_clothing.clear()
         self.single_scene.clear()
         self.single_desc.clear()
@@ -3210,6 +3290,7 @@ class MainWindow(QMainWindow):
         self._activation_en = ""
         self._activation_zh = ""
         self.story_role.clear()
+        self.story_appearance.clear()
         self.story_clothing.clear()
         self.story_scene.clear()
         self.story_premise.clear()
@@ -3633,7 +3714,8 @@ class MainWindow(QMainWindow):
             model=self._llm(),
             current_prompt=current_prompt,
             instruction=instruction.strip(),
-            character_tags=self._character_tags(),
+            character_tags=self._combined_character_tags(
+                "story" if self.btn_mode_story.isChecked() else "single"),
             style_positive=self._style_positive(),
             strip_appearance=self._has_character_lora())
         self._rewrite_row = row

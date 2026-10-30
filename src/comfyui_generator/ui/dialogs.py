@@ -254,7 +254,6 @@ class TagReferenceDialog(QDialog):
             worker.failed.connect(self._translation_failed)
             worker.finished.connect(self._translation_finished)
             worker.finished.connect(worker.deleteLater)
-            self.finished.connect(lambda _result: worker.requestInterruption())
             self.worker = worker
             worker.start()
         else:

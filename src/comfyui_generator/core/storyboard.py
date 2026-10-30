@@ -143,8 +143,8 @@ TAG_SYSTEM = (
     "必须输出对应状态标签，不能改成普通完整服装。\n"
     "4. 必须按 script 的 cast 写清人数与性别：单人 1girl, solo；女主+我 1girl, 1boy；"
     "禁止出现 cast 之外的 second person、people、multiple boys、multiple girls。"
-    "角色锁定表里 appearance 非空时必须逐字保留该角色的发色、瞳色、发型、脸和身体特征，"
-    "不能改变；appearance 为空的角色不要自行补充。"
+    "角色锁定表里 appearance 非空时必须逐字保留该角色的发色、瞳色、发型、脸、身材、"
+    "身体和标志物特征，每一镜都要写，不能改变、减少或省略；appearance 为空的角色不要自行补充。"
     "禁止添加 script 或锁定表之外的内衣、内裤、丝袜、胸罩或蕾丝。\n"
     "5. 标签用标准 Danbooru 词，不写整句英文。\n"
     "6. 每条 prompt 建议 25-45 个标签，复杂场景 50-70，最多 100；英文逗号分隔、去重，不要为凑数堆标签。\n"
@@ -185,8 +185,10 @@ STORY_SYSTEM = (
     "2. 根据用户要求的总格数提供足够的剧情事件；30 格一幕，每一幕有独立事件和进展。\n"
     "3. 先建立角色锁定表 characters，覆盖剧情中所有实际出场角色：女主、男主、我/男性、配角、"
     "以及多人场景中的每个人。每个角色必须有唯一 name、gender、固定 appearance、initial_clothing。"
-    "appearance 写英文 Booru 外貌标签（发色、发型、瞳色、体型、标志物、服装以外的固定特征）；"
+    "appearance 写英文 Booru 外貌标签（发色、发型、瞳色、体型、身材、标志物、服装以外的固定特征）；"
     "男性和女性都适用。若角色使用角色 LoRA 且用户没有提供外貌，appearance 可以留空。"
+    "用户填写的“外貌身材”是硬锁定：必须逐字复制到该角色 appearance，"
+    "每一镜都要保留，不能增删改、不能省略、不能被其他角色或服装覆盖。"
     "用户给出某角色初始服装时必须逐字使用，不能添加该角色初始服装之外的单品；"
     "用户没有给出某角色服装时，可以在 characters 中为该角色一次性建立固定初始服装，"
     "必须用英文 Booru 标签，之后全片不得更换。男主/男性/我如果实际出现在画面中，"
@@ -284,6 +286,7 @@ class CharacterProfile:
     gender: str = "girl"
     appearance: list[str] = field(default_factory=list)
     initial_clothing: list[str] = field(default_factory=list)
+    appearance_locked: bool = False
 
 
 _JSON_PROMPT_KEYS = (
@@ -907,11 +910,21 @@ _HAIR_STYLES = {
     "braids", "bangs", "hime", "bun", "pixie", "curly", "wavy", "straight",
     "messy", "slicked", "undercut", "mohawk", "ahoge", "drill", "drills",
 }
+_BODY_TRAIT_GROUPS = (
+    ("chest", ("flat chest", "small breasts", "medium breasts", "large breasts",
+               "huge breasts", "gigantic breasts")),
+    ("height", ("petite", "short", "tall", "very tall")),
+    ("build", ("skinny", "slim", "slender", "curvy", "thick", "chubby", "fat",
+               "muscular", "toned")),
+    ("skin", ("pale skin", "fair skin", "light skin", "tan skin", "dark skin",
+              "brown skin")),
+)
 
 
 _TOP_SECTION_RE = re.compile(
-    r"^(?:角色设定|角色标签|角色|人物设定|人物|初始服装|初始装扮|服装|大场景|场景|"
-    r"剧情|故事|额外|画风)\s*[:：]")
+    r"^(?:角色设定|角色标签|角色|人物设定|人物|外貌身材|角色外貌|人物外貌|外貌|"
+    r"外形|身材|体型|初始服装|初始装扮|服装|大场景|场景|剧情|故事|额外|画风)"
+    r"\s*[:：]")
 
 
 def _section_text(premise: str, labels: tuple[str, ...]) -> str:
@@ -1009,34 +1022,51 @@ def parse_character_profiles(premise: str) -> list[CharacterProfile]:
                                          "人物设定：", "人物设定:", "人物：", "人物:"))
     clothing_text = _section_text(premise, ("初始服装：", "初始服装:", "初始装扮：",
                                              "初始装扮:", "服装：", "服装:"))
+    appearance_text = _section_text(
+        premise, ("外貌身材：", "外貌身材:", "角色外貌：", "角色外貌:",
+                  "人物外貌：", "人物外貌:", "外貌：", "外貌:", "外形：", "外形:"))
+    body_text = _section_text(premise, ("身材：", "身材:", "体型：", "体型:"))
+    if body_text:
+        appearance_text = "\n".join(part for part in (appearance_text, body_text)
+                                    if part)
     role_entries = _split_character_entries(role_text)
     clothing_entries = _split_character_entries(clothing_text)
+    appearance_entries = _split_character_entries(appearance_text)
     if "" in role_entries:
-        named = [label for label in clothing_entries if label]
+        named = [label for label in list(clothing_entries) + list(appearance_entries)
+                 if label]
         if named and named[0] not in role_entries:
             role_entries[named[0]] = role_entries.pop("")
-    labels = list(role_entries) + [label for label in clothing_entries if label not in role_entries]
+    labels = list(role_entries)
+    for entries in (clothing_entries, appearance_entries):
+        labels.extend(label for label in entries if label not in labels)
     if not labels:
         labels = [""]
     unlabeled_role = role_entries.get("")
     unlabeled_clothing = clothing_entries.get("")
+    unlabeled_appearance = appearance_entries.get("")
     profiles: list[CharacterProfile] = []
     for index, label in enumerate(labels):
-        appearance_text = role_entries.get(label)
+        role_value = role_entries.get(label)
         clothing_value = clothing_entries.get(label)
+        explicit_appearance = appearance_entries.get(label)
         if index == 0:
-            if appearance_text is None:
-                appearance_text = unlabeled_role
+            if role_value is None:
+                role_value = unlabeled_role
             if clothing_value is None:
                 clothing_value = unlabeled_clothing
+            if explicit_appearance is None:
+                explicit_appearance = unlabeled_appearance
         name = label or ("main" if len(labels) == 1 else "character_%02d" % (index + 1))
-        gender = _infer_gender(label, appearance_text or "")
+        gender = _infer_gender(label, role_value or "", explicit_appearance or "")
+        appearance_source = explicit_appearance if explicit_appearance else role_value
         profiles.append(CharacterProfile(
             key="char_%02d" % (index + 1),
             name=name,
             gender=gender,
-            appearance=_clean_appearance(_split_tags(appearance_text or "")),
+            appearance=_clean_appearance(_split_tags(appearance_source or "")),
             initial_clothing=_split_tags(clothing_value),
+            appearance_locked=bool(explicit_appearance),
         ))
     return profiles
 
@@ -1086,7 +1116,7 @@ def normalize_character_profiles(raw: Any, premise: str,
             continue
         existing = _find_character(profiles, name, gender)
         if existing:
-            if appearance and not strip_appearance:
+            if appearance and not strip_appearance and not existing.appearance_locked:
                 if not existing.appearance:
                     existing.appearance = appearance
                 else:
@@ -1117,12 +1147,14 @@ def character_bible_text(profiles: list[CharacterProfile]) -> str:
     lines = ["角色锁定表（全片硬约束，任何一镜都不得改变）："]
     for profile in profiles:
         lines.append(
-            "- %s（%s）：appearance=%s；initial_clothing=%s" % (
+            "- %s（%s）：appearance=%s%s；initial_clothing=%s" % (
                 profile.name or profile.key, profile.gender,
                 ", ".join(profile.appearance) or "未指定",
+                "（用户硬锁定，禁止增删改）" if profile.appearance_locked else "",
                 ", ".join(profile.initial_clothing) or "未指定"))
     lines.append(
-        "规则：每个出场角色的发色、发型、瞳色、体型、标志物必须与锁定表逐字一致；"
+        "规则：每个出场角色的发色、发型、瞳色、体型、身材、标志物必须与锁定表逐字一致；"
+        "用户填写的外貌/身材是硬锁定，任何镜头都必须原样保留，不能更改、减少或遗漏。"
         "男性和女性都适用。每个角色的服装和裸露状态独立连续，脱掉后不得复穿，"
         "不得凭空增加锁定表之外的衣物；没有出现的角色不得写进当前画面。"
         "男主/男性/我只要出现在画面中，就必须保持同一外貌、同一初始服装和同一裸露进度。")
@@ -1358,6 +1390,11 @@ def present_character_profiles(profiles: list[CharacterProfile], shot: dict[str,
     return profiles
 
 
+def _appearance_key(tag: str) -> str:
+    return re.sub(r"\s+", " ", str(tag).lower().replace("_", " ")
+                  .replace("-", " ")).strip()
+
+
 def _appearance_words(tag: str) -> set[str]:
     return set(re.findall(r"[a-z][a-z-]*", str(tag).lower()))
 
@@ -1419,7 +1456,27 @@ def _appearance_conflicts(tag: str, present: list[CharacterProfile]) -> bool:
             if locked_styles and not any(tag_styles & styles
                                          for styles in locked_styles):
                 return True
+    if not re.search(r"\b(?:hair|eyes?)\b", low):
+        key = _appearance_key(low)
+        for _group, terms in _BODY_TRAIT_GROUPS:
+            if key not in terms:
+                continue
+            locked = [
+                _appearance_key(tag) for profile in present
+                for tag in profile.appearance
+                if _appearance_key(tag) in terms
+            ]
+            if locked and key not in locked:
+                return True
+            break
     return False
+
+
+def filter_locked_appearance(tags: list[str], locked: list[str]) -> list[str]:
+    """Drop appearance tags that would conflict with an explicit locked look."""
+    locked_profile = CharacterProfile(
+        key="locked", appearance=[tag for tag in locked if tag])
+    return [tag for tag in tags if not _appearance_conflicts(tag, [locked_profile])]
 
 
 def apply_character_state(prompt: str, profiles: list[CharacterProfile],
