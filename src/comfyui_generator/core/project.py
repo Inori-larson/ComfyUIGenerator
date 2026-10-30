@@ -11,6 +11,7 @@ from typing import Any
 
 PROJECT_VERSION = 1
 SESSION_FILE = "ui_session.json"
+PARTIAL_STORY_FILE = "story_partial.json"
 
 
 def new_project(name: str, premise: str, template: dict[str, Any],
@@ -76,6 +77,39 @@ def load_session(root: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def partial_story_file(root: Path) -> Path:
+    path = root / "cache" / PARTIAL_STORY_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def save_story_partial(data: dict[str, Any], root: Path) -> Path:
+    path = partial_story_file(root)
+    data = dict(data)
+    data["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+    return path
+
+
+def load_story_partial(root: Path) -> dict[str, Any]:
+    path = partial_story_file(root)
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def clear_story_partial(root: Path) -> None:
+    path = partial_story_file(root)
+    if path.is_file():
+        path.unlink()
 
 
 def list_projects(root: Path) -> list[dict[str, Any]]:

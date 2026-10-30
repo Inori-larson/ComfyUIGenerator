@@ -112,6 +112,10 @@ class SettingsDialog(QDialog):
         self.external_model = QLineEdit(cfg.external_llm.model)
         self.external_model.setPlaceholderText("模型名，例如 gpt-4o")
         external_form.addRow("模型", self.external_model)
+        self.external_no_thinking = QCheckBox("关闭模型推理输出（DeepSeek/豆包结构化 JSON）")
+        self.external_no_thinking.setChecked(bool(
+            getattr(cfg.external_llm, "disable_thinking", True)))
+        external_form.addRow("", self.external_no_thinking)
         external_hint = QLabel("只用于外部提示词生成，不调用 Ollama；Key 仅保存在本机 config.json。")
         external_hint.setWordWrap(True)
         external_form.addRow("", external_hint)
@@ -189,6 +193,7 @@ class SettingsDialog(QDialog):
         c.external_llm.base_url = self.external_base.text().strip()
         c.external_llm.api_key = self.external_key.text().strip()
         c.external_llm.model = self.external_model.text().strip()
+        c.external_llm.disable_thinking = self.external_no_thinking.isChecked()
         c.lora.character_dir = self.character_lora_dir.text().strip()
         c.lora.style_dir = self.style_lora_dir.text().strip()
         c.lora.body_dir = self.body_lora_dir.text().strip()

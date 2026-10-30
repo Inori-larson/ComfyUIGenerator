@@ -34,8 +34,9 @@ from comfyui_generator.core.lora_info import is_style_lora, lora_tag_info
 from comfyui_generator.core.lora_sources import lora_entries
 from comfyui_generator.core.ollama import OllamaClient
 from comfyui_generator.core.project import (
-    list_projects, load_project, load_session, move_to_trash, new_project,
-    save_project, save_session,
+    clear_story_partial, list_projects, load_project, load_session,
+    load_story_partial, move_to_trash, new_project, save_project,
+    save_session, save_story_partial,
 )
 from comfyui_generator.core.services import ComfyService
 from comfyui_generator.core.single import FRAMING_TAGS, SingleOptions
@@ -202,6 +203,7 @@ class MainWindow(QMainWindow):
         self._init_defaults()
         self._setup_auto_translate()
         self._restore_ui_state()
+        self._update_partial_button()
         self._state_timer = QTimer(self)
         self._state_timer.setInterval(15000)
         self._state_timer.timeout.connect(self._save_ui_state)
@@ -450,6 +452,12 @@ class MainWindow(QMainWindow):
         self.btn_story_external = QPushButton("外部 AI 生成分镜")
         self.btn_story_external.clicked.connect(lambda: self.generate_story(True))
         form_layout.addWidget(self.btn_story_external)
+        self.btn_restore_partial = QPushButton("恢复上次未完成分镜")
+        self.btn_restore_partial.clicked.connect(self.restore_partial_story)
+        form_layout.addWidget(self.btn_restore_partial)
+        self.btn_continue_partial = QPushButton("继续未完成分镜")
+        self.btn_continue_partial.clicked.connect(self.continue_partial_story)
+        form_layout.addWidget(self.btn_continue_partial)
 
         self.shot_table = QTableWidget(0, 4)
         self.shot_table.setHorizontalHeaderLabels(["锁", "镜号", "名称", "画面提示词（中文，可编辑）"])
@@ -2075,7 +2083,71 @@ class MainWindow(QMainWindow):
             self._render_after_prompt = False
             self.start_render("single")
 
-    def generate_story(self, external: bool = False) -> None:
+    def _write_story_partial(self, premise: str, shots: list[dict[str, Any]],
+                             total: int, external: bool) -> None:
+        try:
+            save_story_partial({
+                "premise": premise, "shots": shots,
+                "total": int(total), "external": bool(external),
+            }, self.cfg.root)
+        except Exception:
+            pass
+
+    def _update_partial_button(self) -> None:
+        data = load_story_partial(self.cfg.root)
+        shots = data.get("shots") or []
+        self.btn_restore_partial.setEnabled(bool(shots))
+        self.btn_restore_partial.setText(
+            "恢复上次未完成分镜（%d）" % len(shots) if shots
+            else "恢复上次未完成分镜")
+        self.btn_continue_partial.setEnabled(bool(shots))
+        self.btn_continue_partial.setText(
+            "继续未完成分镜（%d）" % len(shots) if shots
+            else "继续未完成分镜")
+
+    def restore_partial_story(self) -> None:
+        data = load_story_partial(self.cfg.root)
+        shots = data.get("shots") or []
+        if not shots:
+            QMessageBox.information(self, "提示", "没有可恢复的未完成分镜。")
+            self._update_partial_button()
+            return
+        if self.shot_table.rowCount():
+            answer = QMessageBox.question(
+                self, "恢复未完成分镜", "用上次未完成的 %d 镜替换当前分镜？" % len(shots))
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        premise = str(data.get("premise") or "")
+        if premise:
+            self._set_story_fields(self._parse_story_text(premise))
+        self._fill_shot_table(shots)
+        self.btn_mode_story.setChecked(True)
+        self.btn_mode_single.setChecked(False)
+        self._switch_mode(1)
+        self.append_log("已恢复上次未完成分镜：%d 镜" % len(shots))
+        self.statusBar().showMessage("已恢复 %d 镜，可继续检查或出图" % len(shots))
+
+    def continue_partial_story(self) -> None:
+        data = load_story_partial(self.cfg.root)
+        shots = data.get("shots") or []
+        if not shots:
+            QMessageBox.information(self, "提示", "没有可继续的未完成分镜。")
+            self._update_partial_button()
+            return
+        premise = str(data.get("premise") or "")
+        total = int(data.get("total") or max(len(shots), self.story_shots.value()))
+        if premise:
+            self._set_story_fields(self._parse_story_text(premise))
+        self.story_shots.setValue(total)
+        self.btn_mode_story.setChecked(True)
+        self.btn_mode_single.setChecked(False)
+        self._switch_mode(1)
+        external = bool(data.get(
+            "external", bool(self.cfg.external_llm.base_url and self.cfg.external_llm.model)))
+        self.generate_story(external=external, initial_shots=shots)
+
+    def generate_story(self, external: bool = False,
+                       initial_shots: list[dict[str, Any]] | None = None) -> None:
         if self.prompt_worker and self.prompt_worker.isRunning():
             return
         text = self._story_premise_text()
@@ -2094,16 +2166,20 @@ class MainWindow(QMainWindow):
             if not self._llm():
                 QMessageBox.information(self, "提示", "没有可用的 Ollama 模型，请先在设置/模型页选择。")
                 return
+        total = int(self.story_shots.value())
         options = StoryboardOptions(
-            model=self._llm(), shots=self.story_shots.value(),
+            model=self._llm(), shots=total,
             chunk=2 if external else 3,
             setting="",
             character_tags=self._character_tags(),
             style_positive=self._style_positive(),
             strip_appearance=self._has_character_lora(),
+            on_partial=lambda shots: self._write_story_partial(
+                text, shots, total, external),
         )
         self._set_generation_enabled(False)
         worker = PromptWorker(self.cfg, "story", text, story_options=options,
+                              initial_shots=initial_shots,
                               use_external=external)
         worker.story_ready.connect(self._on_story_ready)
         worker.failed.connect(self._on_prompt_failed)
@@ -2114,6 +2190,8 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _on_story_ready(self, shots: list[dict[str, str]]) -> None:
+        clear_story_partial(self.cfg.root)
+        self._update_partial_button()
         self._fill_shot_table(shots)
         self.append_log("分镜已生成：%d 镜" % len(shots))
         self.statusBar().showMessage("分镜已生成（共 %d 镜）" % len(shots))
@@ -2462,8 +2540,9 @@ class MainWindow(QMainWindow):
 
     def _on_prompt_failed(self, message: str) -> None:
         self._render_after_prompt = False
+        self._update_partial_button()
         self.append_log("生成提示词失败：%s" % message)
-        self.statusBar().showMessage("生成失败")
+        self.statusBar().showMessage("生成失败（可点“恢复上次未完成分镜”）")
         QMessageBox.warning(self, "生成失败", message)
 
     def _on_prompt_worker_finished(self) -> None:
@@ -2815,6 +2894,8 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 return
         self.project = None
+        clear_story_partial(self.cfg.root)
+        self._update_partial_button()
         self._run_prefix = ""
         self._run_signature = ""
         self._single_prompt_en = ""

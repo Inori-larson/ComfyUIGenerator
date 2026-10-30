@@ -5,13 +5,16 @@ from comfyui_generator.core.project import (
     clear_trash, delete_from_trash,     list_trash, list_projects,
     load_project,
     load_profile,
+    clear_story_partial,
     load_session,
+    load_story_partial,
     move_to_trash,
     new_project,
     restore_from_trash,
     save_profile,
     save_project,
     save_session,
+    save_story_partial,
 )
 
 
@@ -61,6 +64,17 @@ def test_session_roundtrip_and_missing_file(tmp_path):
     }
     save_session(data, tmp_path)
     assert load_session(tmp_path) == data
+
+
+def test_partial_story_roundtrip_and_clear(tmp_path):
+    assert load_story_partial(tmp_path) == {}
+    save_story_partial({"premise": "story", "shots": [{"id": "01"}]}, tmp_path)
+    data = load_story_partial(tmp_path)
+    assert data["premise"] == "story"
+    assert data["shots"] == [{"id": "01"}]
+    assert data["updated"]
+    clear_story_partial(tmp_path)
+    assert load_story_partial(tmp_path) == {}
 
 
 def test_corrupt_session_is_ignored(tmp_path):

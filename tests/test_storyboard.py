@@ -181,7 +181,16 @@ def test_story_spine_allocates_discovery_seduction_and_sex():
     assert spine[2]["cast"] == "1girl 1boy"
     assert spine[-1]["cast"] == "1girl 1boy"
     assert spine[-1]["end"] == 30
-    assert spine[-1]["end"] - spine[-1]["start"] + 1 >= 14
+    assert spine[-1]["end"] - spine[-1]["start"] + 1 >= 9
+
+
+def test_upper_body_nudity_is_not_treated_as_full_nude():
+    premise = "初始服装：black leotard, black pantyhose, black platform heels, hairclip"
+    states = clothing_states_for_beats(premise, [
+        "上半身完全裸露，下半身仍着 black pantyhose 与 black platform heels",
+    ])
+    assert "black pantyhose" in states[0]
+    assert "black platform heels" in states[0]
 
 
 def test_clothing_state_never_redresses_removed_items():
@@ -230,12 +239,13 @@ def test_phase_terms_inject_explicit_sex_and_keep_erotic_clothing():
 
 def test_non_sex_phase_removes_explicit_sex_pose_tags():
     result = apply_phase_terms(
-        "1girl, solo, doggy style, sex, vaginal, sitting on bed",
+        "1girl, solo, doggy style, sex, vaginal, handjob, sitting on bed",
         "solo", "1girl solo")
     tags = [tag.strip() for tag in result.split(",")]
     assert "doggy style" not in tags
     assert "sex" not in tags
     assert "vaginal" not in tags
+    assert "handjob" not in tags
 
 
 def test_normalize_prompt_tags_dedupes_synonyms_and_camera_size():
@@ -546,8 +556,19 @@ def test_generate_bounds_output_tokens_and_timeout():
     generate_storyboard(client, "01. one\n02. two",
                         StoryboardOptions(model="test-model", shots=2, chunk=2))
     kwargs = client.calls[0][1]
-    assert 1536 <= kwargs["num_predict"] <= 8192
+    assert 1536 <= kwargs["num_predict"] <= 16384
     assert kwargs["timeout"] == 240.0
+
+
+def test_generate_writes_partial_checkpoint_after_each_chunk():
+    from comfyui_generator.core.storyboard import generate_storyboard
+    snapshots = []
+    client = FakeClient()
+    generate_storyboard(
+        client, "01. one\n02. two",
+        StoryboardOptions(model="test-model", shots=2, chunk=2,
+                          on_partial=lambda shots: snapshots.append(len(shots))))
+    assert snapshots == [2]
 
 
 def test_generate_with_initial_shot_keeps_it():
@@ -573,6 +594,27 @@ def test_generate_passes_exact_numbered_beats_for_chunk():
     assert "硬性剧情条目" in user
     assert "1. first action" in user
     assert "2. second action" in user
+
+
+def test_long_story_is_split_into_acts_and_keeps_global_ids():
+    from comfyui_generator.core.storyboard import generate_storyboard
+
+    class LongFake:
+        def chat_json(self, model, messages, **kwargs):
+            return {"shots": [
+                {"id": "%02d" % index, "name": "s%02d" % index,
+                 "script": "脚本", "prompt": "1girl, solo",
+                 "outline": "镜头", "cast": "1girl solo"}
+                for index in range(1, 7)
+            ]}
+
+    shots = generate_storyboard(
+        LongFake(), "剧情：她回家，自慰，被我看到，做爱",
+        StoryboardOptions(model="test-model", shots=31, chunk=3,
+                          log=lambda _message: None))
+    assert len(shots) == 31
+    assert shots[0]["id"] == "01"
+    assert shots[-1]["id"] == "31"
 
 
 def test_generate_with_initial_and_no_extra_shots_does_not_call_model():

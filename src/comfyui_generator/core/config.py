@@ -171,6 +171,7 @@ class ExternalLLMConfig:
     api_key: str = ""
     model: str = ""
     timeout: float = 240.0
+    disable_thinking: bool = True
 
 
 @dataclass

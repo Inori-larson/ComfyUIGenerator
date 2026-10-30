@@ -39,6 +39,7 @@ def test_external_client_parses_openai_json(monkeypatch):
     assert captured["url"] == "https://example.test/v1/chat/completions"
     assert captured["headers"]["Authorization"] == "Bearer secret"
     assert captured["body"]["model"] == "test-model"
+    assert captured["body"]["thinking"] == {"type": "disabled"}
 
 
 def test_external_client_accepts_array_root(monkeypatch):
