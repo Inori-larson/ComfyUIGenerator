@@ -629,6 +629,10 @@ def compose_pass_prompts(cfg: dict[str, Any], shot: dict[str, Any],
         pass_continuity["state"] = ""
     pass_shot = dict(shot)
     pass_shot["prompt"] = text
+    continuity_shot = shot
+    if gender == "boy":
+        pass_shot.pop("continuity_state", None)
+        continuity_shot = pass_shot
     chain = lora_chain(cfg, pass_shot)
     action_tags = ""
     clothing_tags = ""
@@ -655,7 +659,7 @@ def compose_pass_prompts(cfg: dict[str, Any], shot: dict[str, Any],
         action_tags,
         clothing_tags,
         body_tags,
-        continuity_positive(pass_continuity, shot),
+        continuity_positive(pass_continuity, continuity_shot),
         render_text,
         shot.get("style_suffix", style.get("suffix", "")),
     )

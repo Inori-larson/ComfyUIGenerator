@@ -440,7 +440,9 @@ def shots_from_json(data: Any, fallback_prefix: str = "shot") -> list[dict[str, 
                 ("phase", ("phase", "阶段")),
                 ("shot_size", ("shot_size", "景别")),
                 ("camera_angle", ("camera_angle", "机位", "camera")),
-                ("composition", ("composition", "构图"))):
+                ("composition", ("composition", "构图")),
+                ("continuity_state", ("continuity_state", "连续性状态")),
+                ("continuity_scene", ("continuity_scene", "连续性场景"))):
             value = _json_field(item, aliases)
             if value:
                 shot[key] = value

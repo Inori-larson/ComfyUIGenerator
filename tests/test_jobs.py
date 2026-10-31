@@ -2,7 +2,9 @@ from comfyui_generator.core.expand import apply_expansion_delta, sanitize_expans
 from comfyui_generator.core.expand_ai import (
     build_expansion_messages, generate_expansions,
 )
-from comfyui_generator.core.jobs import TaskRunner, build_tasks
+from comfyui_generator.core.jobs import (
+    TaskRunner, build_tasks, cross_shot_allowed,
+)
 
 
 SHOTS = [
@@ -33,6 +35,44 @@ def test_random_seed_bounds():
     tasks = build_tasks({}, [SHOTS[0]], variants=4, seed_mode="random", base_seed=1)
     assert len(tasks) == 4
     assert all(0 <= task.seed <= 2 ** 31 - 1 for task in tasks)
+
+
+def _cross_tasks():
+    shots = [
+        {"id": "01", "name": "a", "prompt": "1girl, bedroom", "scene": "bedroom"},
+        {"id": "02", "name": "b", "prompt": "1girl, bedroom", "scene": "bedroom"},
+    ]
+    prev, curr = build_tasks({}, shots, 1, "fixed", 1)
+    prev.image = "one.png"
+    prev.state = "done"
+    return prev, curr
+
+
+def test_cross_shot_requires_enabled_switch():
+    prev, curr = _cross_tasks()
+    assert cross_shot_allowed(prev, curr, {"enabled": True, "cross_shot": True})
+    assert not cross_shot_allowed(prev, curr, {"enabled": True})
+    assert not cross_shot_allowed(prev, curr, {"enabled": False, "cross_shot": True})
+
+
+def test_cross_shot_skips_same_shot_and_double_shot():
+    prev, curr = _cross_tasks()
+    same = build_tasks({}, [SHOTS[0]], 1, "fixed", 1)[0]
+    same.image = "one.png"
+    same.state = "done"
+    assert not cross_shot_allowed(same, same, {"enabled": True, "cross_shot": True})
+    double = build_tasks({}, [{
+        "id": "02", "name": "b", "prompt": "1girl, 1boy, bedroom",
+        "scene": "bedroom",
+    }], 1, "fixed", 1)[0]
+    assert not cross_shot_allowed(prev, double, {"enabled": True, "cross_shot": True})
+    curr.shot["scene"] = "kitchen"
+    assert not cross_shot_allowed(prev, curr, {"enabled": True, "cross_shot": True})
+    curr.shot["scene"] = "bedroom, night"
+    assert cross_shot_allowed(prev, curr, {"enabled": True, "cross_shot": True})
+    curr.shot["scene"] = "bedroom"
+    curr.shot["init_image"] = "manual.png"
+    assert not cross_shot_allowed(prev, curr, {"enabled": True, "cross_shot": True})
 
 
 def test_task_summary_fields():

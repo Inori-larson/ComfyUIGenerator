@@ -165,7 +165,12 @@ def strip_shot_grammar(text: Any) -> str:
 
 def continuity_positive(value: Any, shot: dict[str, Any] | None = None) -> str:
     data = normalize_continuity(value)
-    parts = [data["character"], data["scene"], data["state"]]
+    scene = data["scene"]
+    state = data["state"]
+    if isinstance(shot, dict):
+        scene = str(shot.get("continuity_scene") or scene)
+        state = str(shot.get("continuity_state") or state)
+    parts = [data["character"], scene, state]
     if isinstance(shot, dict):
         parts.extend([
             str(shot.get("shot_size") or ""),

@@ -55,6 +55,15 @@ def test_continuity_prompt_includes_bible_state_and_grammar():
         assert expected in text
 
 
+def test_shot_ledger_overrides_global_state():
+    text = continuity_positive(
+        {"character": "silver hair", "scene": "bedroom", "state": "sweat"},
+        {"continuity_scene": "kitchen", "continuity_state": "torn stockings"})
+    assert "kitchen" in text
+    assert "torn stockings" in text
+    assert "sweat" not in text
+
+
 def test_continuity_negative():
     assert continuity_negative({"negative": "different hair, extra people"}) == (
         "different hair, extra people")
@@ -101,7 +110,9 @@ def test_boy_pass_does_not_receive_female_character_anchor():
             "state": "cum on thigh",
         },
     }
-    shot = {"prompt": "1boy, standing"}
+    shot = {"prompt": "1boy, standing",
+            "continuity_scene": "bedroom",
+            "continuity_state": "cum on thigh"}
     positive, _ = compose_pass_prompts(
         cfg, shot, {"gender": "boy", "prompt": "1boy, standing"})
     assert "silver hair" not in positive

@@ -117,6 +117,28 @@ def build_tasks(cfg: dict[str, Any], shots: list[dict[str, Any]], variants: int,
     return tasks
 
 
+def cross_shot_allowed(previous: Task | None, current: Task,
+                       setting: dict[str, Any] | None) -> bool:
+    """Whether a keyframe may use the last finished image as img2img init."""
+    data = setting if isinstance(setting, dict) else {}
+    if not data.get("enabled") or not data.get("cross_shot"):
+        return False
+    if current.kind != "keyframe" or previous is None or not previous.image:
+        return False
+    if previous.shot_id == current.shot_id:
+        return False
+    if is_double_shot(current.shot):
+        return False
+    if str(current.shot.get("init_image") or "").strip():
+        return False
+    prev_scene = str(previous.shot.get("scene") or "").strip().lower()
+    curr_scene = str(current.shot.get("scene") or "").strip().lower()
+    if (prev_scene and curr_scene and prev_scene != curr_scene
+            and prev_scene not in curr_scene and curr_scene not in prev_scene):
+        return False
+    return True
+
+
 class TaskRunner:
     def __init__(self, client: ComfyClient, cfg: dict[str, Any],
                  tasks: list[Task],
@@ -144,6 +166,7 @@ class TaskRunner:
         self._done = threading.Event()
         self._thread: threading.Thread | None = None
         self._previous: Task | None = None
+        self._last_done: Task | None = None
         self._pose_controlnet_cache: str | None = None
         self._pose_missing_logged = False
         self._pose_image_cache: dict[tuple[Any, ...], str] = {}
@@ -243,6 +266,8 @@ class TaskRunner:
                     continue
                 self._run_one(task)
                 self._previous = task if task.state == "done" and task.image else None
+                if task.state == "done" and task.image:
+                    self._last_done = task
         finally:
             stream.stop()
             self._done.set()
@@ -546,6 +571,18 @@ class TaskRunner:
             self.log("Expand %s: step %d/%d, denoise %.2f" % (
                 task.label, task.expand_step, task.expand_steps,
                 shot["init_denoise"]))
+        img2img_setting = (self.cfg.get("settings") or {}).get("img2img") or {}
+        if cross_shot_allowed(self._last_done, task, img2img_setting):
+            cross_image = self._upload_output_image(
+                client, task, str(self._last_done.image), "cross")
+            if cross_image:
+                shot["init_image"] = cross_image
+                shot["init_denoise"] = float(
+                    img2img_setting.get("cross_shot_denoise", 0.35))
+                self.log(
+                    "Task %s cross-shot init from %s, denoise %.2f" % (
+                        task.label, self._last_done.label,
+                        shot["init_denoise"]))
         prefix = "%s/%s" % ((self.cfg.get("prefix") or "anime_story").rstrip("/"), task.prefix)
         setting = (self.cfg.get("settings") or {}).get("split") or {}
         pose_setting = (self.cfg.get("settings") or {}).get("pose") or {}

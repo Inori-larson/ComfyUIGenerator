@@ -46,6 +46,7 @@ from comfyui_generator.core.project import (
     load_story_partial, move_to_trash, new_project, save_project,
     save_session, save_story_partial,
 )
+from comfyui_generator.core.quality import check_project, format_report, repair_project
 from comfyui_generator.core.services import ComfyService
 from comfyui_generator.core.single import FRAMING_TAGS, SingleOptions
 from comfyui_generator.core.style_profile import (
@@ -58,12 +59,16 @@ from comfyui_generator.core.storyboard import (
 )
 from comfyui_generator.core.tag_cache import load_tag_cache, update_tag_cache
 from comfyui_generator.core.tags import append_tags, estimate_tokens
+from comfyui_generator.core.vision import format_similarity, vision_ready
 from comfyui_generator.core.translate import translate_to_tags
 from comfyui_generator.ui.branding import app_icon, logo_pixmap
+from comfyui_generator.ui.contact_sheet import build_contact_sheet, build_face_sheet
+from comfyui_generator.ui.continuity_worker import ContinuityWorker
 from comfyui_generator.ui.dialogs import (
     CompareDialog, ProjectDialog, ShotDetailsDialog, TagReferenceDialog, TrashDialog,
 )
 from comfyui_generator.ui.settings_dialog import SettingsDialog
+from comfyui_generator.ui.vision_worker import VisionWorker
 from comfyui_generator.ui.widgets import SearchComboBox, WrappingTabs
 from comfyui_generator.ui.workers import AssetsWorker, AutoTranslateWorker, ConnectWorker, ExpansionWorker, LoraTagsWorker, PromptWorker, RenderWorker, TagTranslateWorker
 
@@ -137,6 +142,8 @@ CHARACTER_STATES_ROLE = CHARACTERS_ROLE + 1
 SCENE_ROLE = CHARACTER_STATES_ROLE + 1
 CLOTHING_DETAILS_ROLE = SCENE_ROLE + 1
 PROMPT_GROUPS_ROLE = CLOTHING_DETAILS_ROLE + 1
+CONTINUITY_STATE_ROLE = PROMPT_GROUPS_ROLE + 1
+CONTINUITY_SCENE_ROLE = CONTINUITY_STATE_ROLE + 1
 
 
 def _label(text: str, name: str = "Section") -> QLabel:
@@ -165,6 +172,8 @@ class MainWindow(QMainWindow):
         self.prompt_worker: PromptWorker | None = None
         self.render_worker: RenderWorker | None = None
         self.reference_sheet_worker: RenderWorker | None = None
+        self.vision_worker: VisionWorker | None = None
+        self.continuity_worker: ContinuityWorker | None = None
         self.expansion_worker: ExpansionWorker | None = None
         self._pending_render: tuple[dict[str, Any], list[dict[str, Any]], int] | None = None
         self.tasks_by_id: dict[str, Any] = {}
@@ -626,7 +635,10 @@ class MainWindow(QMainWindow):
     def _build_right(self) -> QWidget:
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         inner = QWidget()
+        inner.setMinimumWidth(0)
         layout = QVBoxLayout(inner)
         layout.setContentsMargins(4, 10, 10, 10)
         self.tabs = WrappingTabs()
@@ -645,8 +657,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.tabs)
         layout.addStretch(1)
         scroll.setWidget(inner)
-        scroll.setMinimumWidth(380)
-        scroll.setMaximumWidth(500)
+        scroll.setMinimumWidth(420)
+        scroll.setMaximumWidth(560)
         return scroll
 
     def _build_models_tab(self) -> QWidget:
@@ -1059,6 +1071,25 @@ class MainWindow(QMainWindow):
         img_hint.setWordWrap(True)
         layout.addWidget(img_hint)
 
+        self.cross_shot_check = QCheckBox("跨镜沿用上一镜画面")
+        self.cross_shot_check.setToolTip(
+            "同一场景的下一镜以上一镜成品为底图，低重绘保持背景和人物连续；"
+            "换场景、双人镜头或单图模式不会启用")
+        layout.addWidget(self.cross_shot_check)
+        row = QHBoxLayout()
+        row.addWidget(_label("跨镜重绘幅度", "Hint"))
+        self.cross_shot_denoise = QDoubleSpinBox()
+        self.cross_shot_denoise.setRange(0.15, 0.8)
+        self.cross_shot_denoise.setSingleStep(0.05)
+        self.cross_shot_denoise.setValue(0.35)
+        row.addWidget(self.cross_shot_denoise)
+        row.addStretch(1)
+        layout.addLayout(row)
+        cross_hint = _label(
+            "建议 0.25-0.45；过高会失去承接，过低会几乎复制上一镜。", "Hint")
+        cross_hint.setWordWrap(True)
+        layout.addWidget(cross_hint)
+
         layout.addWidget(_label("输出名称（可空，自动生成）"))
         self.output_name = QLineEdit()
         layout.addWidget(self.output_name)
@@ -1148,6 +1179,19 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setSpacing(8)
+        self.auto_continuity_check = QCheckBox(
+            "自动连贯模式（模型优先外部 AI）")
+        self.auto_continuity_check.setToolTip(
+            "生成分镜后自动提取角色/场景锚点和每镜台账；渲染前自动质检修复；"
+            "渲染后自动联系表和相似度")
+        self.auto_continuity_check.toggled.connect(
+            self._on_auto_continuity_toggled)
+        layout.addWidget(self.auto_continuity_check)
+        auto_hint = _label(
+            "开启后优先使用设置里的外部 OpenAI 兼容模型；没有配置时改用本地 Ollama。",
+            "Hint")
+        auto_hint.setWordWrap(True)
+        layout.addWidget(auto_hint)
         layout.addWidget(_label("角色锚点（补充，英文标签）"))
         self.continuity_character = QPlainTextEdit()
         self.continuity_character.setFixedHeight(72)
@@ -1185,9 +1229,37 @@ class MainWindow(QMainWindow):
         self.btn_regenerate_grammar = QPushButton("按当前分镜重新分配镜头语法")
         self.btn_regenerate_grammar.clicked.connect(self.regenerate_shot_grammar)
         layout.addWidget(self.btn_regenerate_grammar)
+        quality_row = QHBoxLayout()
+        self.btn_quality_check = QPushButton("运行连贯质检")
+        self.btn_quality_check.clicked.connect(self.run_quality_check)
+        quality_row.addWidget(self.btn_quality_check)
+        self.btn_quality_repair = QPushButton("质检并自动修复")
+        self.btn_quality_repair.clicked.connect(self.run_quality_repair)
+        quality_row.addWidget(self.btn_quality_repair)
+        layout.addLayout(quality_row)
+        self.contact_sheet_auto = QCheckBox("渲染完成后自动生成联系表")
+        self.contact_sheet_auto.setChecked(True)
+        layout.addWidget(self.contact_sheet_auto)
+        sheet_row = QHBoxLayout()
+        self.btn_contact_sheet = QPushButton("生成联系表")
+        self.btn_contact_sheet.clicked.connect(
+            lambda: self.generate_contact_sheet(False))
+        sheet_row.addWidget(self.btn_contact_sheet)
+        self.btn_face_sheet = QPushButton("生成人脸抽检表")
+        self.btn_face_sheet.clicked.connect(
+            lambda: self.generate_contact_sheet(True))
+        sheet_row.addWidget(self.btn_face_sheet)
+        layout.addLayout(sheet_row)
+        self.similarity_auto = QCheckBox("渲染后自动做角色相似度抽检")
+        layout.addWidget(self.similarity_auto)
+        self.btn_similarity = QPushButton("角色/画面相似度（CLIP）")
+        self.btn_similarity.clicked.connect(self.run_similarity_check)
+        layout.addWidget(self.btn_similarity)
         hint = _label(
             "连续性标签会追加到每镜和双人分步，不会覆盖角色/动作/服装状态机。"
-            "分镜表新增“景别 / 机位”两列，可直接编辑；角色参考表在“角色”页设置。",
+            "分镜表新增“景别 / 机位”两列，可直接编辑；角色参考表在“角色”页设置。"
+            "CLIP 相似度以角色参考图（没有则用第一张成品）为基准，"
+            "会同时受服装和背景影响；低于 0.55 建议人工检查。",
             "Hint")
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -1294,6 +1366,9 @@ class MainWindow(QMainWindow):
             "external_ai", bool(self.cfg.external_llm.base_url
                                and self.cfg.external_llm.api_key
                                and self.cfg.external_llm.model))))
+        self.cross_shot_check.setChecked(bool(img2img.get("cross_shot", False)))
+        self.cross_shot_denoise.setValue(float(
+            img2img.get("cross_shot_denoise", 0.35)))
         split = settings.get("split") or {}
         self.split_check.setChecked(bool(split.get(
             "enabled", getattr(self.cfg.generation, "split_enabled", True))))
@@ -2459,6 +2534,19 @@ class MainWindow(QMainWindow):
         self.append_log("已切换风格方案「%s」：%s" % (label, summary.replace("\n", "；")))
         self.statusBar().showMessage("已应用风格方案：%s" % label)
 
+    def _on_auto_continuity_toggled(self, checked: bool) -> None:
+        if not checked:
+            return
+        self.cross_shot_check.setChecked(True)
+        self.contact_sheet_auto.setChecked(True)
+        self.similarity_auto.setChecked(True)
+        if self._external_llm_ready():
+            self.expand_external.setChecked(True)
+        if not self._restoring_state:
+            self.append_log(
+                "自动连贯模式已开启：外部模型优先，渲染前自动修复，"
+                "渲染后自动联系表/相似度。")
+
     def _continuity_settings(self) -> dict[str, Any]:
         return normalize_continuity({
             "character": self.continuity_character.toPlainText(),
@@ -2804,6 +2892,8 @@ class MainWindow(QMainWindow):
                 "denoise": self.img2img_denoise.value(),
                 "expansions": self.expand_spin.value(),
                 "external_ai": self.expand_external.isChecked(),
+                "cross_shot": self.cross_shot_check.isChecked(),
+                "cross_shot_denoise": self.cross_shot_denoise.value(),
             },
             "split": {
                 "enabled": self.split_check.isChecked(),
@@ -2838,6 +2928,7 @@ class MainWindow(QMainWindow):
         data["style"]["lora_tags"] = ", ".join(self._style_activation_tags())
         data["style_profile"] = self._style_profile_settings()
         data["continuity"] = self._continuity_settings()
+        data["auto_continuity"] = self.auto_continuity_check.isChecked()
         data["body"] = {"tags": ", ".join(self._body_activation_tags())}
         data["action"] = {"tags": ", ".join(self._action_activation_tags())}
         data["clothing"] = {"tags": ", ".join(self._clothing_activation_tags())}
@@ -3004,6 +3095,10 @@ class MainWindow(QMainWindow):
         if not text:
             QMessageBox.information(self, "提示", "请先输入角色、剧情或场景。")
             return
+        if (not external and self.auto_continuity_check.isChecked()
+                and self._external_llm_ready()):
+            external = True
+            self.append_log("自动连贯模式：优先使用外部模型生成分镜。")
         if external:
             if not (self.cfg.external_llm.base_url and self.cfg.external_llm.model):
                 QMessageBox.information(
@@ -3048,6 +3143,80 @@ class MainWindow(QMainWindow):
         self.append_log("分镜已生成：%d 镜" % len(shots))
         self.statusBar().showMessage("分镜已生成（共 %d 镜）" % len(shots))
         self._autosave_generated_story()
+        self._start_auto_continuity(shots)
+
+    def _external_llm_ready(self) -> bool:
+        external = self.cfg.external_llm
+        return bool(external.base_url and external.model)
+
+    def _start_auto_continuity(self, shots: list[dict[str, Any]]) -> None:
+        if not self.auto_continuity_check.isChecked():
+            return
+        if self.continuity_worker and self.continuity_worker.isRunning():
+            return
+        premise = self._story_premise_text()
+        if not premise:
+            return
+        use_external = self._external_llm_ready()
+        model = self.cfg.external_llm.model if use_external else self._llm()
+        if not model:
+            self.append_log("自动连贯跳过：没有可用的外部模型或 Ollama 模型。")
+            return
+        worker = ContinuityWorker(
+            self.cfg, premise, shots, self._combined_character_tags("story"),
+            model, use_external)
+        worker.done.connect(self._on_auto_continuity_ready)
+        worker.failed.connect(self._on_auto_continuity_failed)
+        worker.log.connect(self.append_log)
+        worker.finished.connect(self._on_auto_continuity_finished)
+        self.continuity_worker = worker
+        self._set_generation_enabled(False)
+        self.statusBar().showMessage("正在自动提取连贯性台账...")
+        self.append_log("自动连贯：使用%s模型提取角色/场景/台账。" % (
+            "外部" if use_external else "本地"))
+        worker.start()
+
+    def _on_auto_continuity_ready(self, data: dict[str, Any]) -> None:
+        current = self._continuity_settings()
+        current.update({
+            "character": str(data.get("character") or ""),
+            "scene": str(data.get("scene") or ""),
+            "state": "",
+            "negative": str(data.get("negative") or ""),
+        })
+        self._set_continuity_settings(current)
+        ledger = {
+            str(item.get("id") or ""): item
+            for item in (data.get("ledger") or []) if isinstance(item, dict)
+        }
+        self._syncing_shots = True
+        try:
+            for row in range(self.shot_table.rowCount()):
+                id_item = self.shot_table.item(row, 1)
+                prompt_item = self.shot_table.item(row, 3)
+                if not id_item or not prompt_item:
+                    continue
+                entry = ledger.get(id_item.text())
+                if not entry:
+                    continue
+                prompt_item.setData(
+                    CONTINUITY_STATE_ROLE, str(entry.get("state") or ""))
+                prompt_item.setData(
+                    CONTINUITY_SCENE_ROLE, str(entry.get("scene") or ""))
+        finally:
+            self._syncing_shots = False
+        self._autosave_generated_story()
+        self.append_log(
+            "自动连贯完成：角色锚点、场景锚点、%d 镜台账已写入。" % len(ledger))
+        self.statusBar().showMessage("自动连贯完成，可检查后出图")
+
+    def _on_auto_continuity_failed(self, message: str) -> None:
+        self.append_log("自动连贯提取失败：%s" % message)
+        self.statusBar().showMessage("自动连贯提取失败，保留手动锚点")
+
+    def _on_auto_continuity_finished(self) -> None:
+        self.continuity_worker = None
+        self._set_generation_enabled(True)
 
     def _autosave_generated_story(self) -> None:
         if not self.shot_table.rowCount():
@@ -3099,6 +3268,10 @@ class MainWindow(QMainWindow):
                 shot.get("clothing_details") or {}, ensure_ascii=False))
             prompt_item.setData(PROMPT_GROUPS_ROLE, json.dumps(
                 shot.get("prompt_groups") or [], ensure_ascii=False))
+            prompt_item.setData(CONTINUITY_STATE_ROLE,
+                                str(shot.get("continuity_state") or ""))
+            prompt_item.setData(CONTINUITY_SCENE_ROLE,
+                                str(shot.get("continuity_scene") or ""))
             self.shot_table.setItem(row, 3, prompt_item)
             self.shot_table.setItem(row, 4, QTableWidgetItem(
                 str(shot.get("shot_size") or "")))
@@ -3152,6 +3325,248 @@ class MainWindow(QMainWindow):
         self._autofill_shot_grammar(overwrite=True)
         self.append_log("已按当前镜头语法重新分配景别和机位。")
 
+    def _quality_report_for_current(self):
+        mode = self._current_mode()
+        if mode == "single":
+            prompt_zh = self.single_prompt.toPlainText().strip()
+            prompt = self._resolve_single_en()
+            shots = [{"id": "01", "name": "single", "prompt": prompt,
+                      "prompt_zh": prompt_zh or prompt}] if prompt else []
+            text = self._single_input_text() or prompt_zh or prompt
+        else:
+            shots = self._collect_shots(False, allow_empty=True)
+            text = self._story_premise_text() or "quality check"
+        project = self._build_project(mode, shots, text or "quality check")
+        return check_project(project)
+
+    def run_quality_check(self) -> None:
+        try:
+            report = self._quality_report_for_current()
+        except Exception as exc:
+            QMessageBox.warning(self, "质检失败", str(exc))
+            return
+        for line in report.lines():
+            self.append_log("质检 · " + line)
+        if report.critical:
+            QMessageBox.warning(self, "连贯质检", format_report(report))
+        elif report.warnings:
+            QMessageBox.information(self, "连贯质检", format_report(report))
+        else:
+            QMessageBox.information(
+                self, "连贯质检", "未发现连续性问题。\n" + format_report(report))
+        self.statusBar().showMessage("连贯质检完成")
+
+    def _resolve_output_image(self, image: Any) -> Path | None:
+        text = str(image or "").strip()
+        if not text:
+            return None
+        direct = Path(text)
+        if direct.is_file():
+            return direct
+        if self.cfg.comfy.output_dir:
+            local = Path(self.cfg.comfy.output_dir) / Path(
+                text.replace("\\", "/"))
+            if local.is_file():
+                return local
+        return None
+
+    def _contact_sheet_paths(
+            self, results: list[dict[str, Any]] | None = None) -> list[Path]:
+        if results is not None:
+            images = [item.get("image") for item in results
+                      if item.get("state") == "done" and item.get("image")]
+        else:
+            images = list((self.project or {}).get("outputs") or [])
+        paths: list[Path] = []
+        seen: set[str] = set()
+        for image in images:
+            path = self._resolve_output_image(image)
+            if path and str(path) not in seen:
+                seen.add(str(path))
+                paths.append(path)
+        return paths
+
+    def generate_contact_sheet(self, faces: bool = False,
+                               silent: bool = False,
+                               results: list[dict[str, Any]] | None = None) -> Path | None:
+        paths = self._contact_sheet_paths(results)
+        if not paths:
+            if not silent:
+                QMessageBox.information(self, "提示", "当前项目还没有可用的成品图。")
+            return None
+        project_id = str((self.project or {}).get("id") or "")
+        folder = (self.cfg.root / "projects" / project_id / "contact_sheets"
+                  if project_id else self.cfg.root / "contact_sheets")
+        prefix = "faces" if faces else "storyboard"
+        target = folder / ("%s_%s_%s.png" % (
+            prefix, time.strftime("%Y%m%d_%H%M%S"), uuid.uuid4().hex[:4]))
+        title = "%s · %s" % (
+            (self.project or {}).get("name") or "Project",
+            "Face / Character Check" if faces else "Storyboard")
+        try:
+            if faces:
+                build_face_sheet(paths, target, title=title)
+            else:
+                build_contact_sheet(paths, target, title=title)
+        except Exception as exc:
+            self.append_log("联系表生成失败：%s" % exc)
+            if not silent:
+                QMessageBox.warning(self, "联系表生成失败", str(exc))
+            return None
+        self.append_log("已生成%s：%s" % (
+            "人脸抽检表" if faces else "联系表", target))
+        self.statusBar().showMessage(
+            "已生成%s" % ("人脸抽检表" if faces else "联系表"))
+        if not silent:
+            QMessageBox.information(
+                self, "联系表", "已生成：\n%s" % target)
+        return target
+
+    def _maybe_auto_contact_sheet(self, results: list[dict[str, Any]]) -> None:
+        if not self.contact_sheet_auto.isChecked():
+            return
+        self.generate_contact_sheet(False, silent=True, results=results)
+
+    def _vision_reference(self, paths: list[Path]) -> Path:
+        text = self.char_ref.text().strip()
+        if text:
+            path = Path(text)
+            if path.is_file():
+                return path
+            resolved = self._resolve_output_image(text)
+            if resolved:
+                return resolved
+        return paths[0]
+
+    def run_similarity_check(self, silent: bool = False,
+                             results: list[dict[str, Any]] | None = None) -> None:
+        if self.vision_worker and self.vision_worker.isRunning():
+            return
+        paths = self._contact_sheet_paths(results)
+        if not paths:
+            if not silent:
+                QMessageBox.information(self, "提示", "当前项目还没有可用的成品图。")
+            return
+        reference = self._vision_reference(paths)
+        ready, reason = vision_ready(
+            self.cfg.root, self.cfg.comfy.python, self.cfg.comfy.base_dir)
+        if not ready:
+            if "open_clip" in reason:
+                if silent:
+                    self.append_log(
+                        "角色相似度抽检跳过：首次需要手动点击按钮安装 open_clip 依赖。")
+                    return
+                answer = QMessageBox.question(
+                    self, "首次使用",
+                    "首次使用角色相似度抽检需要安装 open_clip 依赖到应用数据目录，"
+                    "约几十 MB。是否继续？",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes)
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
+            else:
+                if not silent:
+                    QMessageBox.warning(self, "无法检测", reason)
+                self.append_log("角色相似度检测不可用：%s" % reason)
+                return
+        self.append_log("角色相似度基准图：%s" % reference)
+        if not self.char_ref.text().strip():
+            self.append_log("未设置角色参考图，使用第一张成品作为基准。")
+        worker = VisionWorker(self.cfg, reference, paths, device="cpu")
+        worker.log.connect(self.append_log)
+        worker.done.connect(
+            lambda scores: self._on_vision_done(scores, silent))
+        worker.failed.connect(
+            lambda message: self._on_vision_failed(message, silent))
+        worker.finished.connect(self._on_vision_finished)
+        self.vision_worker = worker
+        self.btn_similarity.setEnabled(False)
+        self.statusBar().showMessage("正在检测角色相似度...")
+        worker.start()
+
+    def _on_vision_done(self, scores: list[dict[str, Any]],
+                        silent: bool) -> None:
+        text = format_similarity(scores)
+        self.append_log("角色相似度抽检：\n" + text)
+        low = [item for item in scores
+               if item.get("score") is not None and float(item["score"]) < 0.55]
+        if silent:
+            message = "角色相似度抽检完成"
+            if low:
+                message += "，%d 张偏低，详见日志" % len(low)
+            self.statusBar().showMessage(message)
+            return
+        if low:
+            QMessageBox.warning(self, "角色相似度偏低", text)
+        else:
+            QMessageBox.information(self, "角色相似度抽检", text)
+
+    def _on_vision_failed(self, message: str, silent: bool) -> None:
+        self.append_log("角色相似度抽检失败：%s" % message)
+        if not silent:
+            QMessageBox.warning(self, "角色相似度抽检失败", message)
+        self.statusBar().showMessage("角色相似度抽检失败")
+
+    def _on_vision_finished(self) -> None:
+        self.vision_worker = None
+        self.btn_similarity.setEnabled(True)
+
+    def run_quality_repair(self) -> None:
+        try:
+            project = self._build_project(
+                self._current_mode(),
+                self._collect_shots(False, allow_empty=True)
+                if self._current_mode() == "story"
+                else [{"id": "01", "name": "single",
+                       "prompt": self._resolve_single_en()}],
+                self._current_text() or "quality repair")
+            repaired, changes = repair_project(project)
+        except Exception as exc:
+            QMessageBox.warning(self, "修复失败", str(exc))
+            return
+        if not changes:
+            QMessageBox.information(self, "自动修复", "没有发现可安全自动修复的问题。")
+            return
+        self._apply_repaired_project(repaired)
+        for change in changes:
+            self.append_log("自动修复 · " + change)
+        self.statusBar().showMessage("已自动修复 %d 项" % len(changes))
+        QMessageBox.information(
+            self, "自动修复", "已修复：\n" + "\n".join("- " + item for item in changes))
+
+    def _apply_repaired_project(self, project: dict[str, Any],
+                                replace_table: bool = True) -> None:
+        character = project.get("character") or {}
+        if not character.get("use_ipadapter"):
+            self.char_ref.clear()
+        style_ref = project.get("style_ref") or {}
+        if style_ref.get("enabled") is False:
+            self.style_ref_check.setChecked(False)
+        split = (project.get("settings") or {}).get("split") or {}
+        if split.get("enabled"):
+            self.split_check.setChecked(True)
+        shots = project.get("shots") or []
+        if replace_table and shots:
+            self._fill_shot_table(shots)
+
+    def _preflight_quality(self, project: dict[str, Any]) -> bool:
+        report = check_project(project)
+        for line in report.lines():
+            if line.startswith("提示："):
+                continue
+            self.append_log("质检 · " + line)
+        if report.warnings and not report.critical:
+            self.statusBar().showMessage(
+                "连贯质检发现 %d 个警告，详见日志" % len(report.warnings))
+        if not report.critical:
+            return True
+        answer = QMessageBox.warning(
+            self, "连贯质检发现严重问题",
+            format_report(report) + "\n\n仍要继续生成吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        return answer == QMessageBox.StandardButton.Yes
+
     def _row_data(self, row: int) -> dict[str, Any]:
         lock_item = self.shot_table.item(row, 0)
         prompt_item = self.shot_table.item(row, 3)
@@ -3197,6 +3612,10 @@ class MainWindow(QMainWindow):
             "clothing_details": details,
             "prompt_groups": prompt_groups,
             "scene": (prompt_item.data(SCENE_ROLE) or "") if prompt_item else "",
+            "continuity_state": (prompt_item.data(CONTINUITY_STATE_ROLE) or ""
+                                 if prompt_item else ""),
+            "continuity_scene": (prompt_item.data(CONTINUITY_SCENE_ROLE) or ""
+                                 if prompt_item else ""),
             "shot_size": (self.shot_table.item(row, 4).text()
                           if self.shot_table.item(row, 4) else ""),
             "camera_angle": (self.shot_table.item(row, 5).text()
@@ -3310,6 +3729,8 @@ class MainWindow(QMainWindow):
                 "cast": item.get("cast", ""),
                 "shot_size": item.get("shot_size", ""),
                 "camera_angle": item.get("camera_angle", ""),
+                "continuity_state": item.get("continuity_state", ""),
+                "continuity_scene": item.get("continuity_scene", ""),
             })
         premise = self._story_premise_text() or self._single_input_text()
         payload = {"version": 1, "premise": premise, "shots": shots}
@@ -3489,6 +3910,7 @@ class MainWindow(QMainWindow):
         self._switch_mode(1)
         self.append_log("已改写为 %d 镜" % len(shots))
         self._autosave_generated_story()
+        self._start_auto_continuity(shots)
 
     def _on_prompt_canceled(self, message: str) -> None:
         self._render_after_prompt = False
@@ -3504,7 +3926,12 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, "生成失败", message)
 
     def _on_prompt_worker_finished(self) -> None:
-        if not (self.render_worker and self.render_worker.isRunning()):
+        busy = any(
+            worker is not None and worker.isRunning()
+            for worker in (self.render_worker, self.reference_sheet_worker,
+                           self.continuity_worker, self.expansion_worker,
+                           self.vision_worker))
+        if not busy:
             self._set_generation_enabled(True)
 
     # ---------------------------------------------------------------- rendering
@@ -3547,6 +3974,8 @@ class MainWindow(QMainWindow):
                               "clothing_details": data.get("clothing_details") or {},
                               "prompt_groups": data.get("prompt_groups") or [],
                               "scene": data.get("scene", ""),
+                              "continuity_state": data.get("continuity_state", ""),
+                              "continuity_scene": data.get("continuity_scene", ""),
                               "shot_size": data.get("shot_size", ""),
                               "camera_angle": data.get("camera_angle", ""),
                               "locked": data["locked"]})
@@ -3570,6 +3999,8 @@ class MainWindow(QMainWindow):
                           "clothing_details": data.get("clothing_details") or {},
                           "prompt_groups": data.get("prompt_groups") or [],
                           "scene": data.get("scene", ""),
+                          "continuity_state": data.get("continuity_state", ""),
+                          "continuity_scene": data.get("continuity_scene", ""),
                           "shot_size": data.get("shot_size", ""),
                           "camera_angle": data.get("camera_angle", ""),
                           "locked": data["locked"]})
@@ -3624,6 +4055,15 @@ class MainWindow(QMainWindow):
 
         project = self._build_project(mode, shots, text)
         self._reuse_project_identity(project)
+        if self.auto_continuity_check.isChecked():
+            project, repairs = repair_project(project)
+            if repairs:
+                self._apply_repaired_project(project, replace_table=False)
+                shots = list(project.get("shots") or shots)
+            for change in repairs:
+                self.append_log("自动连贯修复 · " + change)
+        if not self._preflight_quality(project):
+            return
         prefix = self._run_prefix_for(mode, text)
         project["prefix"] = prefix
         self.project = project
@@ -4095,6 +4535,9 @@ class MainWindow(QMainWindow):
             self._set_story_fields(
                 project.get("story_fields") or self._parse_story_text(premise))
         self._set_continuity_settings(project.get("continuity") or {})
+        if "auto_continuity" in project:
+            self.auto_continuity_check.setChecked(
+                bool(project.get("auto_continuity")))
         shots = project.get("shots") or []
         self._fill_shot_table(shots)
         if mode == "single" and shots:
@@ -4130,6 +4573,9 @@ class MainWindow(QMainWindow):
             "external_ai", bool(self.cfg.external_llm.base_url
                                and self.cfg.external_llm.api_key
                                and self.cfg.external_llm.model))))
+        self.cross_shot_check.setChecked(bool(img2img.get("cross_shot", False)))
+        self.cross_shot_denoise.setValue(float(
+            img2img.get("cross_shot_denoise", 0.35)))
         split = s.get("split") or {}
         self.split_check.setChecked(bool(split.get(
             "enabled", getattr(self.cfg.generation, "split_enabled", True))))
@@ -4454,6 +4900,10 @@ class MainWindow(QMainWindow):
         self.progress.setValue(100 if not failed else self.progress.value())
         if self.project and self.project.get("mode") == "single":
             self.btn_expand.setEnabled(True)
+        if done:
+            self._maybe_auto_contact_sheet(results)
+            if self.similarity_auto.isChecked():
+                self.run_similarity_check(silent=True, results=results)
 
     def _on_render_failed(self, message: str) -> None:
         self.btn_cancel.setEnabled(False)
@@ -4771,12 +5221,17 @@ class MainWindow(QMainWindow):
                 "wildcard_dir": self.wildcard_dir.text(),
                 "img2img_enabled": self.img2img_check.isChecked(),
                 "img2img_denoise": self.img2img_denoise.value(),
+                "cross_shot": self.cross_shot_check.isChecked(),
+                "cross_shot_denoise": self.cross_shot_denoise.value(),
                 "expand_count": self.expand_spin.value(),
                 "expand_external": self.expand_external.isChecked(),
                 "split_enabled": self.split_check.isChecked(),
                 "split_region": self.split_region.currentValue(),
                 "pose": self._pose_settings(),
                 "style_profile": self._style_profile_settings(),
+                "auto_continuity": self.auto_continuity_check.isChecked(),
+                "contact_sheet_auto": self.contact_sheet_auto.isChecked(),
+                "similarity_auto": self.similarity_auto.isChecked(),
                 "follow_preview": self.chk_follow.isChecked(),
             },
         }
@@ -4901,6 +5356,8 @@ class MainWindow(QMainWindow):
             "cast": shot.get("cast", ""),
             "script": shot.get("script", ""),
             "phase": shot.get("phase", ""),
+            "continuity_state": shot.get("continuity_state", ""),
+            "continuity_scene": shot.get("continuity_scene", ""),
             "shot_size": shot.get("shot_size", ""),
             "camera_angle": shot.get("camera_angle", ""),
             "locked": bool(shot.get("locked")),
@@ -4953,6 +5410,9 @@ class MainWindow(QMainWindow):
         self.wildcard_dir.setText(str(options.get("wildcard_dir") or ""))
         self.img2img_check.setChecked(bool(options.get("img2img_enabled", True)))
         self.img2img_denoise.setValue(float(options.get("img2img_denoise", 0.35)))
+        self.cross_shot_check.setChecked(bool(options.get("cross_shot", False)))
+        self.cross_shot_denoise.setValue(float(
+            options.get("cross_shot_denoise", 0.35)))
         self.expand_spin.setValue(int(options.get("expand_count", 3)))
         self.expand_external.setChecked(bool(options.get(
             "expand_external", bool(self.cfg.external_llm.base_url
@@ -4972,6 +5432,12 @@ class MainWindow(QMainWindow):
             }
         self._set_pose_settings(pose)
         self._set_style_profile_settings(options.get("style_profile") or {})
+        self.auto_continuity_check.setChecked(bool(
+            options.get("auto_continuity", False)))
+        self.contact_sheet_auto.setChecked(bool(
+            options.get("contact_sheet_auto", True)))
+        self.similarity_auto.setChecked(bool(
+            options.get("similarity_auto", False)))
         self.chk_follow.setChecked(bool(options.get("follow_preview", True)))
 
         mode = state.get("mode", "single")
@@ -5039,6 +5505,22 @@ class MainWindow(QMainWindow):
                 return
             self.reference_sheet_worker.cancel()
             self.reference_sheet_worker.wait(8000)
+        if self.continuity_worker and self.continuity_worker.isRunning():
+            answer = QMessageBox.question(
+                self, "正在提取连贯性", "自动连贯提取还在运行，退出前需要等待完成。继续退出吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+            self.continuity_worker.wait(120000)
+        if self.vision_worker and self.vision_worker.isRunning():
+            answer = QMessageBox.question(
+                self, "正在检测", "角色相似度检测还在运行，退出前需要等待完成。继续退出吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+            self.vision_worker.wait(120000)
         if self.prompt_worker and self.prompt_worker.isRunning():
             self.prompt_worker.wait(3000)
         if self.connect_worker and self.connect_worker.isRunning():

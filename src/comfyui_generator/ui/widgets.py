@@ -7,7 +7,7 @@ from typing import Any
 from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtWidgets import (
     QButtonGroup, QComboBox, QCompleter, QGridLayout, QPushButton,
-    QStackedWidget, QVBoxLayout, QWidget,
+    QSizePolicy, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 
@@ -170,15 +170,24 @@ class WrappingTabs(QWidget):
         self._group = QButtonGroup(self)
         self._group.setExclusive(True)
         self._last_width = 0
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored,
+                           QSizePolicy.Policy.Preferred)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
         self._bar = QWidget()
+        self._bar.setMinimumWidth(0)
+        self._bar.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                QSizePolicy.Policy.Fixed)
         self._grid = QGridLayout(self._bar)
         self._grid.setContentsMargins(0, 0, 0, 0)
         self._grid.setSpacing(6)
         layout.addWidget(self._bar)
         self.stack = QStackedWidget()
+        self.stack.setMinimumWidth(0)
+        self.stack.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                 QSizePolicy.Policy.Expanding)
         layout.addWidget(self.stack, 1)
 
     def addTab(self, widget, title):
@@ -186,6 +195,7 @@ class WrappingTabs(QWidget):
         button = QPushButton(title)
         button.setCheckable(True)
         button.setObjectName("Tab")
+        button.setMinimumWidth(0)
         button.clicked.connect(lambda _checked=False, i=index: self.setCurrentIndex(i))
         self._group.addButton(button, index)
         self._buttons.append(button)
@@ -206,25 +216,25 @@ class WrappingTabs(QWidget):
         return self.stack.count()
 
     def _relayout(self):
-        width = self._bar.width() or self.width() - 20
-        if width <= 40:
-            return
+        # A fixed column count avoids stale grid columns shrinking labels when
+        # the right panel is narrowed.  Four columns leave comfortable side
+        # padding for longer labels such as 提示词 / 参考图.
+        columns = 4
         while self._grid.count():
             self._grid.takeAt(0)
-        x = 0
-        row = 0
-        col = 0
-        for button in self._buttons:
-            step = button.sizeHint().width() + 8
-            if x + step > width and x > 0:
-                row += 1
-                col = 0
-                x = 0
+        for index, button in enumerate(self._buttons):
+            row, col = divmod(index, columns)
             self._grid.addWidget(button, row, col)
-            col += 1
-            x += step
-        self._bar.adjustSize()
+        height = max((button.sizeHint().height() for button in self._buttons),
+                     default=0)
+        rows = (len(self._buttons) + columns - 1) // columns
+        spacing = self._grid.verticalSpacing()
+        bar_height = rows * height + max(0, rows - 1) * spacing
+        self._bar.setFixedHeight(bar_height)
+        self._bar.setMinimumWidth(0)
+        self._bar.setMaximumWidth(16777215)
         self._bar.updateGeometry()
+        self.updateGeometry()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
