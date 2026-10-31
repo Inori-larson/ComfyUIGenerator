@@ -238,13 +238,15 @@ class ExpansionWorker(QThread):
     log = Signal(str)
 
     def __init__(self, cfg: AppConfig, shots: list[dict[str, Any]], count: int,
-                 model: str = "", use_external: bool = False):
+                 model: str = "", use_external: bool = False,
+                 sequence: bool = False):
         super().__init__()
         self.cfg = cfg
         self.shots = copy.deepcopy(shots)
         self.count = count
         self.model = model
         self.use_external = use_external
+        self.sequence = sequence
 
     def cancel(self) -> None:
         self.requestInterruption()
@@ -261,7 +263,8 @@ class ExpansionWorker(QThread):
                 self.canceled.emit("AI expansion canceled")
                 return
             result = generate_expansions(
-                client, model, self.shots, self.count, log=self.log.emit)
+                client, model, self.shots, self.count,
+                sequence=self.sequence, log=self.log.emit)
             if self.isInterruptionRequested():
                 self.canceled.emit("AI expansion canceled")
                 return

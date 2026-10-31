@@ -442,10 +442,15 @@ def shots_from_json(data: Any, fallback_prefix: str = "shot") -> list[dict[str, 
                 ("camera_angle", ("camera_angle", "机位", "camera")),
                 ("composition", ("composition", "构图")),
                 ("continuity_state", ("continuity_state", "连续性状态")),
-                ("continuity_scene", ("continuity_scene", "连续性场景"))):
+                ("continuity_scene", ("continuity_scene", "连续性场景")),
+                ("keyframe_prompt", ("keyframe_prompt", "起始提示词"))):
             value = _json_field(item, aliases)
             if value:
                 shot[key] = value
+        expansions = item.get("ai_expansions")
+        if isinstance(expansions, list):
+            shot["ai_expansions"] = [str(value).strip() for value in expansions
+                                     if str(value).strip()]
         shots.append(shot)
     if not shots:
         raise ValueError("JSON 里没有可用的分镜 prompt。")

@@ -26,6 +26,19 @@ def test_single_variant_has_no_suffix():
     assert tasks[0].label == "01_a"
 
 
+def test_variants_and_expansions_get_unique_increment_seeds():
+    shots = [{
+        "id": "01", "name": "a", "prompt": "p",
+        "ai_expansions": ["e1", "e2"],
+    }]
+    tasks = build_tasks({}, shots, variants=3, seed_mode="increment",
+                        base_seed=100, expansions=2)
+    seeds = [task.seed for task in tasks]
+    assert len(seeds) == 9
+    assert len(set(seeds)) == 9
+    assert seeds == list(range(100, 109))
+
+
 def test_fixed_seed():
     tasks = build_tasks({}, [SHOTS[0]], variants=3, seed_mode="fixed", base_seed=777)
     assert {task.seed for task in tasks} == {777}
@@ -83,6 +96,19 @@ def test_task_summary_fields():
     assert summary["seed"] == 1
 
 
+def test_keyframe_prompt_overrides_only_keyframe_task():
+    shot = {
+        "id": "01", "name": "a", "prompt": "final state",
+        "keyframe_prompt": "start state",
+        "ai_expansions": ["next state"],
+    }
+    tasks = build_tasks({}, [shot], 1, "fixed", 1, expansions=1)
+    assert tasks[0].kind == "keyframe"
+    assert tasks[0].shot["prompt"] == "start state"
+    assert tasks[1].kind == "expand"
+    assert tasks[1].shot["prompt"] == "next state"
+
+
 def test_expansion_tasks_use_ai_prompts():
     shots = [
         {"id": "01", "name": "a", "prompt": "cowgirl_position, riding",
@@ -117,6 +143,49 @@ def test_expansion_denoise_stays_low_and_rises():
     assert 0.65 <= values[0] <= 0.74
     assert values[-1] <= 0.85
     assert values[0] < values[-1]
+
+
+def test_expansion_replaces_old_hand_and_expression_tags():
+    shot = {
+        "id": "01", "name": "a",
+        "prompt": "1girl, red_eyes, red_hair, arms_up, grabbing_own_breast, "
+                  "open_mouth, half-closed_eyes, looking_at_viewer, bedroom",
+    }
+    result = apply_expansion_delta(
+        shot["prompt"], [],
+        ["hand_resting_on_hip", "arm_under_head", "calm_expression"],
+        shot, None)
+    assert "hand_resting_on_hip" in result
+    assert "arm_under_head" in result
+    assert "calm_expression" in result
+    assert "red_eyes" in result
+    assert "red_hair" in result
+    assert "arms_up" not in result
+    assert "grabbing_own_breast" not in result
+    assert "open_mouth" not in result
+    assert "half-closed_eyes" not in result
+    assert "looking_at_viewer" not in result
+    assert "bedroom" in result
+
+
+def test_expansion_replaces_penetration_depth_and_pullout():
+    shot = {
+        "id": "01", "name": "a",
+        "prompt": "1girl, deep penetration, penis in pussy, cum, bedroom",
+    }
+    shallow = apply_expansion_delta(
+        shot["prompt"], [], ["shallow penetration"], shot, None)
+    assert "shallow penetration" in shallow
+    assert "deep penetration" not in shallow
+    assert "penis in pussy" not in shallow
+    assert "cum" in shallow
+
+    pulled = apply_expansion_delta(
+        shallow, [], ["penis pullout", "after sex"], shot, None)
+    assert "penis pullout" in pulled
+    assert "after sex" in pulled
+    assert "shallow penetration" not in pulled
+    assert "penis in pussy" not in pulled
 
 
 def test_sanitize_expansion_blocks_future_clothing_and_penetration():
@@ -178,8 +247,15 @@ def test_build_expansion_messages_includes_next_shot_and_count():
     ]
     messages = build_expansion_messages(shots, 4)
     user = messages[-1]["content"]
-    assert '"expansion_count": 4' in user
+    assert '"state_count": 4' in user
     assert '"next"' in user and '"prompt": "p2"' in user
+    assert '"mode": "continuation"' in user
+
+
+def test_build_expansion_messages_can_request_sequence_mode():
+    messages = build_expansion_messages(
+        [{"id": "01", "prompt": "p1"}], 5, sequence=True)
+    assert '"mode": "sequence"' in messages[-1]["content"]
 
 
 def test_generate_expansions_parses_ai_json():
@@ -204,6 +280,62 @@ def test_generate_expansions_parses_ai_json():
     assert "tree" in result["01"][0]
     assert "bench" in result["01"][1]
     assert result["01"][0] != result["01"][1]
+
+
+def test_sequence_mode_can_reset_final_state_on_first_step():
+    class FakeClient:
+        def chat_json(self, model, messages, **kwargs):
+            return {"expansions": [{
+                "id": "01",
+                "steps": [
+                    {"remove": ["cum", "deep penetration"],
+                     "add": ["shallow penetration", "calm expression"]},
+                    {"remove": ["shallow penetration"],
+                     "add": ["moderate penetration", "arm under head"]},
+                    {"remove": ["moderate penetration"],
+                     "add": ["deeper penetration", "parted lips"]},
+                ],
+            }]}
+
+    shots = [{
+        "id": "01",
+        "prompt": "1girl, cum, cum on body, deep penetration, bedroom",
+    }]
+    result = generate_expansions(
+        FakeClient(), "model", shots, 2, sequence=True)
+    prompts = result["01"]
+    assert len(prompts) == 3
+    assert "cum" not in prompts[0]
+    assert "cum on body" not in prompts[0]
+    assert "deep penetration" not in prompts[0]
+    assert "shallow penetration" in prompts[0]
+    assert "moderate penetration" in prompts[1]
+
+
+def test_sequence_does_not_reset_state_already_present_in_previous_shot():
+    class FakeClient:
+        def chat_json(self, model, messages, **kwargs):
+            return {"expansions": [
+                {"id": "01", "steps": [
+                    {"remove": ["cum", "deep penetration"],
+                     "add": ["shallow penetration", "calm expression"]},
+                ]},
+                {"id": "02", "steps": [
+                    {"remove": ["cum", "deep penetration"],
+                     "add": ["shallow penetration", "calm expression"]},
+                ]},
+            ]}
+
+    shots = [
+        {"id": "01", "prompt": "1girl, cum, deep penetration, bedroom"},
+        {"id": "02", "prompt": "1girl, cum, deep penetration, bedroom"},
+    ]
+    result = generate_expansions(
+        FakeClient(), "model", shots, 1, sequence=True, chunk=6)
+    assert result["01"][0].count("cum") == 0
+    assert "cum" in result["02"][0]
+    assert "deep penetration" in result["02"][0]
+    assert "shallow penetration" not in result["02"][0]
 
 
 def test_apply_delta_never_removes_existing_fluid():

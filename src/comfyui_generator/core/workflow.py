@@ -412,6 +412,25 @@ _MALE_ONLY_NEGATIVE = (
     "1girl, female, woman, breasts, pussy, vagina, long hair, dress, skirt, "
     "bra, panties, pantyhose, stockings, high heels"
 )
+_EXPLICIT_TAGS = (
+    "penis", "pussy", "vagina", "labia", "clitoris", "sex", "hetero",
+    "cum", "semen", "ejaculat", "creampie",
+)
+_UNCENSORED_POSITIVE = (
+    "uncensored, mosaic removal, no mosaic, no pixelation, "
+    "detailed genitals, detailed penis, detailed pussy"
+)
+_UNCENSORED_NEGATIVE = (
+    "mosaic, pixelated, pixelation, censor bar, censored penis, "
+    "censored pussy, blurred penis, blurred pussy, mosaic censoring"
+)
+
+
+def _apply_uncensored(positive: str, negative: str) -> tuple[str, str]:
+    if not _contains_any(positive, _EXPLICIT_TAGS):
+        return positive, negative
+    return (join_tags(positive, _UNCENSORED_POSITIVE),
+            join_tags(negative, _UNCENSORED_NEGATIVE))
 
 
 def _cast_counts(shot: dict[str, Any]) -> tuple[int, int]:
@@ -670,7 +689,7 @@ def compose_pass_prompts(cfg: dict[str, Any], shot: dict[str, Any],
         _gender_negative(gender, text),
         continuity_negative(cfg.get("continuity")),
     )
-    return positive, negative
+    return _apply_uncensored(positive, negative)
 
 
 def compose_prompts(cfg: dict[str, Any], shot: dict[str, Any]) -> tuple[str, str]:
@@ -712,7 +731,7 @@ def compose_prompts(cfg: dict[str, Any], shot: dict[str, Any]) -> tuple[str, str
         render_prompt,
         shot.get("style_suffix", style.get("suffix", "")),
     )
-    return positive, negative
+    return _apply_uncensored(positive, negative)
 
 
 def lora_chain(cfg: dict[str, Any], shot: dict[str, Any] | None = None) -> list[dict[str, Any]]:

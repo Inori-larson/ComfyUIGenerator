@@ -45,10 +45,45 @@ _STATE_WORDS = (
 _LIMB_SLOTS = {
     "legs": ("leg", "legs", "thigh", "thighs", "knee", "knees",
              "calf", "calves", "foot", "feet", "toe", "toes"),
-    "arms": ("arm", "arms", "elbow", "elbows", "wrist", "wrists", "forearm",
-             "hand", "hands", "finger", "fingers", "palm"),
-    "hands": ("hand", "hands", "finger", "fingers", "palm"),
+    "arms": ("arm", "arms", "elbow", "elbows", "wrist", "wrists", "forearm"),
+    "hands": ("hand", "hands", "finger", "fingers", "palm",
+              "grab", "grabbing", "grip", "gripping", "hold", "holding",
+              "touch", "touching", "fingering"),
     "hips": ("hip", "hips", "waist", "pelvis"),
+}
+
+_EXPRESSION_SLOTS = {
+    "eyes": (
+        "gaze", "looking at viewer", "looking away",
+        "looking down", "looking up", "looking back", "eye contact",
+        "closed eyes", "half closed eyes", "open eyes", "teary eyes",
+        "rolling eyes", "empty eyes", "wide eyes",
+        "eyes squeezed shut", "eyes rolled up",
+    ),
+    "mouth": (
+        "mouth", "lip", "lips", "tongue", "biting lip", "open mouth",
+        "closed mouth", "parted lips", "licking lips",
+    ),
+    "expression": (
+        "expression", "smile", "smirk", "frown", "calm", "ahegao",
+        "pout", "orgasm face", "seductive",
+    ),
+}
+
+_STATE_SLOTS = {
+    "depth": (
+        "penetration", "deep penetration", "shallow penetration",
+        "moderate penetration", "deep insertion", "shallow insertion",
+        "penis in pussy", "vaginal", "insertion", "thrusting",
+    ),
+    "pullout": (
+        "pullout", "penis pullout", "pull out", "penis out", "withdrawal",
+        "after sex",
+    ),
+    "vagina": (
+        "gaping", "gape", "wet pussy", "pussy juice", "cream",
+        "creampie", "used pussy", "after sex",
+    ),
 }
 _POSE_WORDS = (
     "spread", "wrapped", "raised", "lifted", "lifting", "raising",
@@ -84,15 +119,25 @@ _CLOTHING_DETAILS = {
 }
 
 
+def _norm(text: Any) -> str:
+    return re.sub(r"[\s_-]+", " ", str(text or "").lower()).strip()
+
+
 def _text(shot: dict[str, Any] | None) -> str:
     shot = shot or {}
-    return " ".join(str(shot.get(key) or "") for key in
-                    ("prompt", "script", "outline", "scene", "clothing",
-                     "character_states", "clothing_details")).lower().strip()
+    return _norm(" ".join(str(shot.get(key) or "") for key in
+                            ("prompt", "script", "outline", "scene", "clothing",
+                             "character_states", "clothing_details")))
 
 
 def _has(text: str, words: tuple[str, ...]) -> bool:
-    return any(word in text for word in words)
+    blob = " " + _norm(text) + " "
+    for word in words:
+        needle = _norm(word)
+        if needle and re.search(
+                r"(?<![a-z0-9])" + re.escape(needle) + r"[a-z]*", blob):
+            return True
+    return False
 
 
 def guard_next(next_shot: dict[str, Any] | None) -> set[str]:
@@ -146,12 +191,12 @@ def _clothing_gate(tags: list[str], shot: dict[str, Any]) -> list[str]:
                for item, words in _CLOTHING_ITEM_WORDS.items()}
     result: list[str] = []
     for tag in tags:
-        low = tag.lower()
-        if nude and any(word in low for details in _CLOTHING_DETAILS.values()
-                        for word in details):
+        low = _norm(tag)
+        if nude and any(_has(low, details)
+                        for details in _CLOTHING_DETAILS.values()):
             continue
         matched = [item for item, details in _CLOTHING_DETAILS.items()
-                   if any(word in low for word in details)]
+                   if _has(low, details)]
         if not matched or any(allowed[item] for item in matched):
             result.append(tag)
     return result
@@ -165,7 +210,7 @@ def _damage_gate(tags: list[str], shot: dict[str, Any]) -> list[str]:
         damaged.add("pantyhose")
     result: list[str] = []
     for tag in tags:
-        low = tag.lower()
+        low = _norm(tag)
         if "intact" in low and any(item in low for item in damaged):
             continue
         result.append(tag)
@@ -175,8 +220,8 @@ def _damage_gate(tags: list[str], shot: dict[str, Any]) -> list[str]:
 def _filtered(tags: list[str], banned: set[str]) -> list[str]:
     result: list[str] = []
     for tag in tags:
-        low = tag.lower()
-        if any(word in low for word in banned):
+        low = _norm(tag)
+        if any(_has(low, (word,)) for word in banned):
             continue
         result.append(tag)
     return result
@@ -189,8 +234,9 @@ def _anchor_tags(shot: dict[str, Any],
     next_text = _text(next_shot)
     anchors: list[str] = []
     for tag in base:
-        low = tag.lower()
-        if any(word in low for word in _STATE_WORDS):
+        low = _norm(tag)
+        if (_has(low, _STATE_WORDS) or _is_pose_tag(low)
+                or _expression_slots(low) or _state_slots(low)):
             continue
         clothing = [item for item, words in _CLOTHING_ITEM_WORDS.items()
                     if _has(low, words)]
@@ -220,51 +266,88 @@ def sanitize_expansion_prompt(prompt: str, shot: dict[str, Any],
 
 
 def _limb_slots(tag: str) -> set[str]:
-    low = tag.lower()
+    low = _norm(tag)
     slots: set[str] = set()
     for slot, words in _LIMB_SLOTS.items():
-        if any(re.search(r"\b" + re.escape(word) + r"\b", low) for word in words):
+        if any(_has(low, (word,)) for word in words):
             slots.add(slot)
     return slots
 
 
+def _expression_slots(tag: str) -> set[str]:
+    low = _norm(tag)
+    return {
+        slot for slot, words in _EXPRESSION_SLOTS.items()
+        if any(_has(low, (word,)) for word in words)
+    }
+
+
+def _state_slots(tag: str) -> set[str]:
+    low = _norm(tag)
+    return {
+        slot for slot, words in _STATE_SLOTS.items()
+        if any(_has(low, (word,)) for word in words)
+    }
+
+
 def _is_pose_tag(tag: str) -> bool:
-    low = tag.lower()
-    return any(re.search(r"\b" + re.escape(word) + r"\b", low)
-               for word in _POSE_WORDS)
+    low = _norm(tag)
+    return any(_has(low, (word,)) for word in _POSE_WORDS)
 
 
 def apply_expansion_delta(prompt: str, remove: list[str], add: list[str],
                           shot: dict[str, Any],
-                          next_shot: dict[str, Any] | None) -> str:
+                          next_shot: dict[str, Any] | None,
+                          preserve_irreversible: bool = True) -> str:
     tags = [tag.strip() for tag in str(prompt or "").split(",") if tag.strip()]
     irreversible = [tag for tag in tags
-                    if any(word in tag.lower() for word in _IRREVERSIBLE)]
-    remove_words = [str(item).strip().lower() for item in remove if str(item).strip()]
+                    if any(_has(tag, (word,)) for word in _IRREVERSIBLE)]
+    remove_words = [_norm(item) for item in remove if str(item).strip()]
     if remove_words:
         tags = [tag for tag in tags
-                if not any(word in tag.lower() for word in remove_words)]
+                if not any(_has(tag, (word,)) for word in remove_words)]
     added: list[str] = []
     added_slots: set[str] = set()
+    added_state: set[str] = set()
+    expression_replaced = False
     seen = {tag.lower() for tag in tags}
     for item in add:
         tag = str(item or "").strip()
         if tag and tag.lower() not in seen:
-            if _is_pose_tag(tag):
-                slots = _limb_slots(tag)
-                if slots:
-                    if slots & added_slots:
-                        continue
-                    tags = [old for old in tags
-                            if not (slots & _limb_slots(old))]
-                    added_slots.update(slots)
+            slots = _limb_slots(tag)
+            if slots:
+                if slots & added_slots:
+                    continue
+                remove_slots = set(slots)
+                if "hands" in slots or "arms" in slots:
+                    remove_slots.update(("hands", "arms"))
+                tags = [old for old in tags
+                        if not (remove_slots & _limb_slots(old))]
+                added_slots.update(slots)
+            expression = _expression_slots(tag)
+            if expression and not expression_replaced:
+                tags = [old for old in tags if not _expression_slots(old)]
+                expression_replaced = True
+            state = _state_slots(tag)
+            if state:
+                if (("depth" in state and "depth" in added_state)
+                        or ("vagina" in state and "vagina" in added_state
+                            and "pullout" not in state)):
+                    continue
+                remove_slots = set(state)
+                if "depth" in state or "pullout" in state:
+                    remove_slots.update(("depth", "pullout"))
+                tags = [old for old in tags
+                        if not (remove_slots & _state_slots(old))]
+                added_state.update(state)
             seen.add(tag.lower())
             added.append(tag)
     result = sanitize_expansion_prompt(", ".join(added + tags), shot, next_shot)
     result_tags = [tag.strip() for tag in result.split(",") if tag.strip()]
     seen = {tag.lower() for tag in result_tags}
-    for tag in irreversible:
-        if tag.lower() not in seen:
-            seen.add(tag.lower())
-            result_tags.append(tag)
+    if preserve_irreversible:
+        for tag in irreversible:
+            if tag.lower() not in seen:
+                seen.add(tag.lower())
+                result_tags.append(tag)
     return ", ".join(result_tags)

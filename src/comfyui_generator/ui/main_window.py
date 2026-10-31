@@ -61,6 +61,9 @@ from comfyui_generator.core.tag_cache import load_tag_cache, update_tag_cache
 from comfyui_generator.core.tags import append_tags, estimate_tokens
 from comfyui_generator.core.vision import format_similarity, vision_ready
 from comfyui_generator.core.translate import translate_to_tags
+from comfyui_generator.core.workflow import (
+    compose_pass_prompts, compose_prompts, is_double_shot, prompt_groups,
+)
 from comfyui_generator.ui.branding import app_icon, logo_pixmap
 from comfyui_generator.ui.contact_sheet import build_contact_sheet, build_face_sheet
 from comfyui_generator.ui.continuity_worker import ContinuityWorker
@@ -144,6 +147,8 @@ CLOTHING_DETAILS_ROLE = SCENE_ROLE + 1
 PROMPT_GROUPS_ROLE = CLOTHING_DETAILS_ROLE + 1
 CONTINUITY_STATE_ROLE = PROMPT_GROUPS_ROLE + 1
 CONTINUITY_SCENE_ROLE = CONTINUITY_STATE_ROLE + 1
+KEYFRAME_PROMPT_ROLE = CONTINUITY_SCENE_ROLE + 1
+AI_EXPANSIONS_ROLE = KEYFRAME_PROMPT_ROLE + 1
 
 
 def _label(text: str, name: str = "Section") -> QLabel:
@@ -388,6 +393,14 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
+        copy_row = QHBoxLayout()
+        copy_row.addStretch(1)
+        self.btn_single_to_story = QPushButton("复制到连续剧情 →")
+        self.btn_single_to_story.setToolTip(
+            "把单图的角色、外貌、服装、场景、画面描述和其它复制到连续剧情")
+        self.btn_single_to_story.clicked.connect(self.copy_single_to_story)
+        copy_row.addWidget(self.btn_single_to_story)
+        layout.addLayout(copy_row)
         layout.addWidget(_label("角色标签（会拼入提示词）"))
         self.single_role = QPlainTextEdit()
         self.single_role.setPlaceholderText("例：yixuan \\(zenless zone zero\\), solo, hairclip")
@@ -455,6 +468,9 @@ class MainWindow(QMainWindow):
         self.btn_single_render.setObjectName("Primary")
         self.btn_single_render.clicked.connect(self.render_single_clicked)
         layout.addWidget(self.btn_single_render)
+        self.btn_single_effective = QPushButton("查看实际正负提示词…")
+        self.btn_single_effective.clicked.connect(self.show_effective_prompt)
+        layout.addWidget(self.btn_single_effective)
 
         self.btn_expand = QPushButton("扩写成分镜…")
         self.btn_expand.setEnabled(False)
@@ -467,6 +483,14 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
+        copy_row = QHBoxLayout()
+        self.btn_story_to_single = QPushButton("← 复制到单图")
+        self.btn_story_to_single.setToolTip(
+            "把连续剧情的角色、外貌、服装、场景、剧情和其它复制到单图")
+        self.btn_story_to_single.clicked.connect(self.copy_story_to_single)
+        copy_row.addWidget(self.btn_story_to_single)
+        copy_row.addStretch(1)
+        layout.addLayout(copy_row)
 
         form = QWidget()
         form_layout = QVBoxLayout(form)
@@ -586,6 +610,9 @@ class MainWindow(QMainWindow):
         self.btn_shot_details = QPushButton("查看分镜详情…")
         self.btn_shot_details.clicked.connect(self.show_shot_details)
         layout.addWidget(self.btn_shot_details)
+        self.btn_effective_prompt = QPushButton("查看实际正负提示词…")
+        self.btn_effective_prompt.clicked.connect(self.show_effective_prompt)
+        layout.addWidget(self.btn_effective_prompt)
 
         json_row = QHBoxLayout()
         self.btn_export_shots = QPushButton("导出全部分镜 JSON")
@@ -944,6 +971,10 @@ class MainWindow(QMainWindow):
         row.addWidget(self.variants_spin)
         layout.addLayout(row)
 
+        self.generation_count_label = _label("", "Hint")
+        self.generation_count_label.setWordWrap(True)
+        layout.addWidget(self.generation_count_label)
+
         self.split_check = QCheckBox("双人镜头分步生成（先女后男 inpaint）")
         self.split_check.setChecked(True)
         self.split_check.setToolTip("双人镜头先只生成女主，再在右侧遮罩内补男主，减少串衣和串发色")
@@ -1071,6 +1102,17 @@ class MainWindow(QMainWindow):
         img_hint.setWordWrap(True)
         layout.addWidget(img_hint)
 
+        self.sequence_mode_check = QCheckBox("序列模式（关键帧从起始状态开始）")
+        self.sequence_mode_check.setToolTip(
+            "开启后 AI 多生成一个起始状态：第 1 张作为关键帧，后续按顺序推进；"
+            "分镜原文不会被覆盖。关闭时第 1 张仍是原分镜终态。")
+        layout.addWidget(self.sequence_mode_check)
+        sequence_hint = _label(
+            "适合抽插、拔出、射精、余韵需要明显过程的镜头；总张数仍然是 "
+            "1 + 每镜扩展张数。", "Hint")
+        sequence_hint.setWordWrap(True)
+        layout.addWidget(sequence_hint)
+
         self.cross_shot_check = QCheckBox("跨镜沿用上一镜画面")
         self.cross_shot_check.setToolTip(
             "同一场景的下一镜以上一镜成品为底图，低重绘保持背景和人物连续；"
@@ -1093,6 +1135,11 @@ class MainWindow(QMainWindow):
         layout.addWidget(_label("输出名称（可空，自动生成）"))
         self.output_name = QLineEdit()
         layout.addWidget(self.output_name)
+        self.variants_spin.valueChanged.connect(self._update_generation_count)
+        self.expand_spin.valueChanged.connect(self._update_generation_count)
+        self.img2img_check.toggled.connect(self._update_generation_count)
+        self.chk_selected.toggled.connect(self._update_generation_count)
+        self._update_generation_count()
         layout.addStretch(1)
         return page
 
@@ -1362,6 +1409,8 @@ class MainWindow(QMainWindow):
         self.img2img_check.setChecked(bool(img2img.get("enabled", True)))
         self.img2img_denoise.setValue(float(img2img.get("denoise", 0.35)))
         self.expand_spin.setValue(int(img2img.get("expansions", 3)))
+        self.sequence_mode_check.setChecked(bool(
+            img2img.get("sequence_mode", False)))
         self.expand_external.setChecked(bool(img2img.get(
             "external_ai", bool(self.cfg.external_llm.base_url
                                and self.cfg.external_llm.api_key
@@ -2311,6 +2360,44 @@ class MainWindow(QMainWindow):
         self.single_desc.setPlainText(str(fields.get("plot", "")))
         self.single_extra.setPlainText(str(fields.get("extra", "")))
 
+    @staticmethod
+    def _fields_have_content(fields: dict[str, Any]) -> bool:
+        return any(str(value or "").strip() for value in fields.values())
+
+    def copy_single_to_story(self) -> None:
+        source = self._single_fields()
+        if not self._fields_have_content(source):
+            QMessageBox.information(self, "提示", "单图没有可复制的自然语言输入。")
+            return
+        if self._fields_have_content(self._story_fields()):
+            answer = QMessageBox.question(
+                self, "复制到连续剧情",
+                "连续剧情已有输入，确定用单图内容覆盖吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self._set_story_fields(source)
+        self.append_log("已把单图自然语言输入复制到连续剧情。")
+        self.statusBar().showMessage("已复制到连续剧情")
+
+    def copy_story_to_single(self) -> None:
+        source = self._story_fields()
+        if not self._fields_have_content(source):
+            QMessageBox.information(self, "提示", "连续剧情没有可复制的自然语言输入。")
+            return
+        if self._fields_have_content(self._single_fields()):
+            answer = QMessageBox.question(
+                self, "复制到单图",
+                "单图已有输入，确定用连续剧情内容覆盖吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self._set_single_fields(source)
+        self.append_log("已把连续剧情自然语言输入复制到单图。")
+        self.statusBar().showMessage("已复制到单图")
+
     def _story_fields(self) -> dict[str, str]:
         return {
             "role": self.story_role.toPlainText().strip(),
@@ -2894,6 +2981,7 @@ class MainWindow(QMainWindow):
                 "external_ai": self.expand_external.isChecked(),
                 "cross_shot": self.cross_shot_check.isChecked(),
                 "cross_shot_denoise": self.cross_shot_denoise.value(),
+                "sequence_mode": self.sequence_mode_check.isChecked(),
             },
             "split": {
                 "enabled": self.split_check.isChecked(),
@@ -3272,6 +3360,10 @@ class MainWindow(QMainWindow):
                                 str(shot.get("continuity_state") or ""))
             prompt_item.setData(CONTINUITY_SCENE_ROLE,
                                 str(shot.get("continuity_scene") or ""))
+            prompt_item.setData(KEYFRAME_PROMPT_ROLE,
+                                str(shot.get("keyframe_prompt") or ""))
+            prompt_item.setData(AI_EXPANSIONS_ROLE, json.dumps(
+                shot.get("ai_expansions") or [], ensure_ascii=False))
             self.shot_table.setItem(row, 3, prompt_item)
             self.shot_table.setItem(row, 4, QTableWidgetItem(
                 str(shot.get("shot_size") or "")))
@@ -3573,6 +3665,7 @@ class MainWindow(QMainWindow):
         states: dict[str, Any] = {}
         details: dict[str, Any] = {}
         prompt_groups: list[Any] = []
+        ai_expansions: list[Any] = []
         if prompt_item:
             raw_states = prompt_item.data(CHARACTER_STATES_ROLE)
             if isinstance(raw_states, str) and raw_states.strip():
@@ -3595,6 +3688,13 @@ class MainWindow(QMainWindow):
                     prompt_groups = parsed if isinstance(parsed, list) else []
                 except (TypeError, ValueError):
                     prompt_groups = []
+            raw_expansions = prompt_item.data(AI_EXPANSIONS_ROLE)
+            if isinstance(raw_expansions, str) and raw_expansions.strip():
+                try:
+                    parsed = json.loads(raw_expansions)
+                    ai_expansions = parsed if isinstance(parsed, list) else []
+                except (TypeError, ValueError):
+                    ai_expansions = []
         return {
             "locked": bool(lock_item and lock_item.checkState() == Qt.CheckState.Checked),
             "id": self.shot_table.item(row, 1).text() if self.shot_table.item(row, 1) else "",
@@ -3616,6 +3716,9 @@ class MainWindow(QMainWindow):
                                  if prompt_item else ""),
             "continuity_scene": (prompt_item.data(CONTINUITY_SCENE_ROLE) or ""
                                  if prompt_item else ""),
+            "keyframe_prompt": (prompt_item.data(KEYFRAME_PROMPT_ROLE) or ""
+                                if prompt_item else ""),
+            "ai_expansions": ai_expansions,
             "shot_size": (self.shot_table.item(row, 4).text()
                           if self.shot_table.item(row, 4) else ""),
             "camera_angle": (self.shot_table.item(row, 5).text()
@@ -3631,6 +3734,26 @@ class MainWindow(QMainWindow):
         finally:
             self._syncing_shots = False
         self._update_shot_stats()
+
+    def _update_generation_count(self) -> None:
+        if not hasattr(self, "generation_count_label"):
+            return
+        if self._current_mode() == "single":
+            shots = 1
+            unit = "1 个提示词"
+        else:
+            if self.chk_selected.isChecked():
+                shots = len({index.row() for index in
+                             self.shot_table.selectedIndexes()})
+            else:
+                shots = self.shot_table.rowCount()
+            unit = "%d 个分镜" % shots
+        expansions = self.expand_spin.value() if self.img2img_check.isChecked() else 0
+        variants = self.variants_spin.value()
+        total = shots * variants * (1 + expansions)
+        self.generation_count_label.setText(
+            "预计生成 %d 张 = %s × %d 变体 × (1 + %d 张单镜扩展)" % (
+                total, unit, variants, expansions))
 
     def _update_shot_stats(self) -> None:
         total_tags = 0
@@ -3650,6 +3773,90 @@ class MainWindow(QMainWindow):
         suffix = " · 含修改待映射" if dirty else ""
         self.shot_stats.setText("%d 镜 · %d 英文标签 · 约 %d tokens%s" % (
             self.shot_table.rowCount(), total_tags, total_tokens, suffix))
+        self._update_generation_count()
+
+    @staticmethod
+    def _effective_prompt_blocks(project: dict[str, Any],
+                                 shot: dict[str, Any]) -> str:
+        blocks: list[str] = []
+        keyframe_prompt = str(shot.get("keyframe_prompt") or "").strip()
+        if keyframe_prompt:
+            keyframe_shot = dict(shot)
+            keyframe_shot["prompt"] = keyframe_prompt
+            positive, negative = compose_prompts(project, keyframe_shot)
+            blocks.append("【关键帧 · 起始状态】\n正向：\n%s\n\n负向：\n%s" % (
+                positive, negative))
+            for index, prompt in enumerate(shot.get("ai_expansions") or [], 1):
+                sequence_shot = dict(shot)
+                sequence_shot["prompt"] = str(prompt)
+                positive, negative = compose_prompts(project, sequence_shot)
+                blocks.append("【序列 %d】\n正向：\n%s\n\n负向：\n%s" % (
+                    index, positive, negative))
+            return "\n\n".join(blocks)
+        if is_double_shot(shot):
+            groups = prompt_groups(shot)
+            for index, group in enumerate(groups, 1):
+                positive, negative = compose_pass_prompts(project, shot, group)
+                label = group.get("name") or group.get("gender") or str(index)
+                blocks.append(
+                    "【分步 %d · %s】\n正向：\n%s\n\n负向：\n%s" % (
+                        index, label, positive, negative))
+        else:
+            positive, negative = compose_prompts(project, shot)
+            blocks.append("正向：\n%s\n\n负向：\n%s" % (positive, negative))
+        return "\n\n".join(blocks)
+
+    def show_effective_prompt(self) -> None:
+        mode = self._current_mode()
+        if mode == "single":
+            prompt = self._resolve_single_en()
+            if not prompt and not self._has_activation_tags():
+                QMessageBox.information(self, "提示", "单图还没有提示词或激活标签。")
+                return
+            shot_data = {
+                "id": "01", "name": "single", "prompt": prompt,
+                "prompt_zh": self.single_prompt.toPlainText().strip() or prompt,
+            }
+            project = self._build_project(
+                "single", [shot_data], self._single_input_text() or "single")
+            shot = (project.get("shots") or [shot_data])[0]
+        else:
+            if not self.shot_table.rowCount():
+                QMessageBox.information(self, "提示", "还没有分镜。")
+                return
+            row = self.shot_table.currentRow()
+            if row < 0:
+                row = 0
+            shots = self._collect_shots(False, allow_empty=True)
+            if row >= len(shots):
+                return
+            project = self._build_project(
+                "story", shots, self._story_premise_text() or "story")
+            shot = project["shots"][row]
+        text = self._effective_prompt_blocks(project, shot)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("实际正负提示词")
+        layout = QVBoxLayout(dialog)
+        hint = _label(
+            "下面是实际送入 ComfyUI 的正负提示词，已包含配置的正负词、风格词、"
+            "连贯锚点和镜头语法。", "Hint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        edit = QPlainTextEdit(text)
+        edit.setReadOnly(True)
+        layout.addWidget(edit, 1)
+        row_buttons = QHBoxLayout()
+        copy_button = QPushButton("复制全部")
+        copy_button.clicked.connect(
+            lambda: QApplication.clipboard().setText(edit.toPlainText()))
+        close_button = QPushButton("关闭")
+        close_button.clicked.connect(dialog.accept)
+        row_buttons.addWidget(copy_button)
+        row_buttons.addStretch(1)
+        row_buttons.addWidget(close_button)
+        layout.addLayout(row_buttons)
+        dialog.resize(820, 620)
+        dialog.exec()
 
     def show_shot_details(self) -> None:
         if not self.shot_table.rowCount():
@@ -3731,6 +3938,8 @@ class MainWindow(QMainWindow):
                 "camera_angle": item.get("camera_angle", ""),
                 "continuity_state": item.get("continuity_state", ""),
                 "continuity_scene": item.get("continuity_scene", ""),
+                "keyframe_prompt": item.get("keyframe_prompt", ""),
+                "ai_expansions": item.get("ai_expansions") or [],
             })
         premise = self._story_premise_text() or self._single_input_text()
         payload = {"version": 1, "premise": premise, "shots": shots}
@@ -3976,6 +4185,8 @@ class MainWindow(QMainWindow):
                               "scene": data.get("scene", ""),
                               "continuity_state": data.get("continuity_state", ""),
                               "continuity_scene": data.get("continuity_scene", ""),
+                              "keyframe_prompt": data.get("keyframe_prompt", ""),
+                              "ai_expansions": data.get("ai_expansions") or [],
                               "shot_size": data.get("shot_size", ""),
                               "camera_angle": data.get("camera_angle", ""),
                               "locked": data["locked"]})
@@ -4001,6 +4212,8 @@ class MainWindow(QMainWindow):
                           "scene": data.get("scene", ""),
                           "continuity_state": data.get("continuity_state", ""),
                           "continuity_scene": data.get("continuity_scene", ""),
+                          "keyframe_prompt": data.get("keyframe_prompt", ""),
+                          "ai_expansions": data.get("ai_expansions") or [],
                           "shot_size": data.get("shot_size", ""),
                           "camera_angle": data.get("camera_angle", ""),
                           "locked": data["locked"]})
@@ -4097,7 +4310,9 @@ class MainWindow(QMainWindow):
             self._pending_render = (self.project, shots, expansions)
             worker = ExpansionWorker(
                 self.cfg, shots, expansions, model=model,
-                use_external=use_external)
+                use_external=use_external,
+                sequence=bool((settings.get("img2img") or {}).get(
+                    "sequence_mode", False)))
             worker.done.connect(self._on_expansions_ready)
             worker.failed.connect(self._on_expansions_failed)
             worker.canceled.connect(self._on_expansions_canceled)
@@ -4140,6 +4355,25 @@ class MainWindow(QMainWindow):
         self._set_generation_enabled(True)
         self.btn_cancel.setEnabled(False)
 
+    def _sync_sequence_to_table(self, shots: list[dict[str, Any]]) -> None:
+        by_id = {str(shot.get("id") or ""): shot for shot in shots}
+        self._syncing_shots = True
+        try:
+            for row in range(self.shot_table.rowCount()):
+                id_item = self.shot_table.item(row, 1)
+                prompt_item = self.shot_table.item(row, 3)
+                if not id_item or not prompt_item:
+                    continue
+                shot = by_id.get(id_item.text())
+                if not shot:
+                    continue
+                prompt_item.setData(
+                    KEYFRAME_PROMPT_ROLE, str(shot.get("keyframe_prompt") or ""))
+                prompt_item.setData(AI_EXPANSIONS_ROLE, json.dumps(
+                    shot.get("ai_expansions") or [], ensure_ascii=False))
+        finally:
+            self._syncing_shots = False
+
     def _start_render_tasks(self, project: dict[str, Any],
                             shots: list[dict[str, Any]],
                             expansions: dict[str, list[str]] | None) -> None:
@@ -4147,11 +4381,27 @@ class MainWindow(QMainWindow):
         seed_mode = settings.get("seed_mode", "increment")
         base_seed = int(settings.get("base_seed", 1))
         count = 0
+        sequence = bool((settings.get("img2img") or {}).get(
+            "sequence_mode", False))
+        requested = int((settings.get("img2img") or {}).get("expansions", 0))
+        if not expansions:
+            for shot in shots:
+                shot.pop("keyframe_prompt", None)
+                shot.pop("ai_expansions", None)
         if expansions:
             for shot in shots:
                 prompts = expansions.get(str(shot.get("id") or ""), [])
-                shot["ai_expansions"] = prompts
-                count = max(count, len(prompts))
+                if sequence and len(prompts) >= requested + 1:
+                    shot["keyframe_prompt"] = prompts[0]
+                    shot["ai_expansions"] = prompts[1:requested + 1]
+                else:
+                    shot.pop("keyframe_prompt", None)
+                    shot["ai_expansions"] = prompts
+                    if sequence and prompts:
+                        self.append_log(
+                            "镜头 %s 序列数据不足，回退普通扩展。" % shot.get("id"))
+                count = max(count, len(shot.get("ai_expansions") or []))
+        self._sync_sequence_to_table(shots)
         tasks = build_tasks(project, shots, int(project["variants"]),
                             seed_mode, base_seed, expansions=count)
         if seed_mode == "increment" and tasks:
@@ -4569,6 +4819,8 @@ class MainWindow(QMainWindow):
         self.img2img_check.setChecked(bool(img2img.get("enabled", True)))
         self.img2img_denoise.setValue(float(img2img.get("denoise", 0.35)))
         self.expand_spin.setValue(int(img2img.get("expansions", 3)))
+        self.sequence_mode_check.setChecked(bool(
+            img2img.get("sequence_mode", False)))
         self.expand_external.setChecked(bool(img2img.get(
             "external_ai", bool(self.cfg.external_llm.base_url
                                and self.cfg.external_llm.api_key
@@ -4937,6 +5189,7 @@ class MainWindow(QMainWindow):
 
     def _switch_mode(self, index: int) -> None:
         self.left_stack.setCurrentIndex(index)
+        self._update_generation_count()
 
     def _set_busy(self, busy: bool) -> None:
         for btn in (self.btn_reconnect, self.btn_restart, self.btn_settings):
@@ -5223,6 +5476,7 @@ class MainWindow(QMainWindow):
                 "img2img_denoise": self.img2img_denoise.value(),
                 "cross_shot": self.cross_shot_check.isChecked(),
                 "cross_shot_denoise": self.cross_shot_denoise.value(),
+                "sequence_mode": self.sequence_mode_check.isChecked(),
                 "expand_count": self.expand_spin.value(),
                 "expand_external": self.expand_external.isChecked(),
                 "split_enabled": self.split_check.isChecked(),
@@ -5358,6 +5612,8 @@ class MainWindow(QMainWindow):
             "phase": shot.get("phase", ""),
             "continuity_state": shot.get("continuity_state", ""),
             "continuity_scene": shot.get("continuity_scene", ""),
+            "keyframe_prompt": shot.get("keyframe_prompt", ""),
+            "ai_expansions": shot.get("ai_expansions") or [],
             "shot_size": shot.get("shot_size", ""),
             "camera_angle": shot.get("camera_angle", ""),
             "locked": bool(shot.get("locked")),
@@ -5413,6 +5669,8 @@ class MainWindow(QMainWindow):
         self.cross_shot_check.setChecked(bool(options.get("cross_shot", False)))
         self.cross_shot_denoise.setValue(float(
             options.get("cross_shot_denoise", 0.35)))
+        self.sequence_mode_check.setChecked(bool(
+            options.get("sequence_mode", False)))
         self.expand_spin.setValue(int(options.get("expand_count", 3)))
         self.expand_external.setChecked(bool(options.get(
             "expand_external", bool(self.cfg.external_llm.base_url

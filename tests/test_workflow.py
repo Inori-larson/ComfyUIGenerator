@@ -475,6 +475,21 @@ def test_compose_pass_prompts_do_not_negate_male_long_hair(cfg):
     assert "long hair" not in negative
 
 
+def test_explicit_prompts_get_uncensored_reinforcement(cfg):
+    positive, negative = compose_prompts(
+        cfg, {"prompt": "1girl, hetero, penis_in_pussy"})
+    assert "uncensored" in positive
+    assert "detailed penis" in positive
+    assert "mosaic" in negative
+    assert "pixelated" in negative
+
+
+def test_non_explicit_prompts_do_not_get_uncensored_tags(cfg):
+    positive, negative = compose_prompts(cfg, {"prompt": "1girl, bedroom"})
+    assert "uncensored" not in positive
+    assert "pixelated" not in negative
+
+
 def test_workflow_inpaints_second_character_in_masked_region(cfg):
     shot = {
         "prompt": "1boy",

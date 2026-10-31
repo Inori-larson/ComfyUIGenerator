@@ -81,22 +81,40 @@ def build_tasks(cfg: dict[str, Any], shots: list[dict[str, Any]], variants: int,
         label = "%s_%s" % (shot.get("id", index), shot.get("name", "shot"))
         next_shot = shots[index + 1] if index + 1 < len(shots) else None
         shot_tasks: list[Task] = []
+        shot_counter = 0
         for variant in range(variants):
             if shot.get("seed") is not None:
-                seed = int(shot["seed"]) + (variant if seed_mode != "fixed" else 0)
+                seed = int(shot["seed"]) + (
+                    shot_counter if seed_mode != "fixed" else 0)
             elif seed_mode == "fixed":
                 seed = int(base_seed)
             elif seed_mode == "random":
                 seed = random.randint(0, 2 ** 31 - 1)
             else:
-                seed = int(base_seed) + index * variants + variant
+                seed = int(base_seed) + shot_counter
+            shot_counter += 1
             suffix = label + (("_v%02d" % (variant + 1)) if variants > 1 else "")
+            keyframe_shot = shot
+            if str(shot.get("keyframe_prompt") or "").strip():
+                keyframe_shot = dict(shot)
+                keyframe_shot["prompt"] = str(shot["keyframe_prompt"])
             shot_tasks.append(Task(
                 shot_id=str(shot.get("id", "")),
                 shot_name=shot.get("name", ""),
-                variant=variant + 1, seed=seed, shot=shot, label=suffix))
+                variant=variant + 1, seed=seed, shot=keyframe_shot,
+                label=suffix))
             ai_prompts = list(shot.get("ai_expansions") or [])[:expansions]
             for step, prompt in enumerate(ai_prompts, 1):
+                if seed_mode == "fixed":
+                    expand_seed = seed + step
+                elif seed_mode == "random":
+                    expand_seed = random.randint(0, 2 ** 31 - 1)
+                elif shot.get("seed") is not None:
+                    expand_seed = int(shot["seed"]) + shot_counter
+                    shot_counter += 1
+                else:
+                    expand_seed = int(base_seed) + shot_counter
+                    shot_counter += 1
                 expanded = dict(shot)
                 expanded["id"] = "%s_e%02d" % (shot.get("id", ""), step)
                 expanded["name"] = "%s_expand_%02d" % (
@@ -110,7 +128,7 @@ def build_tasks(cfg: dict[str, Any], shots: list[dict[str, Any]], variants: int,
                 shot_tasks.append(Task(
                     shot_id=str(expanded.get("id", "")),
                     shot_name=str(expanded.get("name", "")),
-                    variant=variant + 1, seed=seed + step, shot=expanded,
+                    variant=variant + 1, seed=expand_seed, shot=expanded,
                     kind="expand", expand_step=step, expand_steps=len(ai_prompts),
                     label="%s_e%02d" % (suffix, step)))
         tasks.extend(shot_tasks)
@@ -493,6 +511,8 @@ class TaskRunner:
         first_positive, first_negative = compose_pass_prompts(
             self.cfg, first_shot, girl)
         self.log("Task %s split pass 1/2: girl only" % task.label)
+        self.log("Task %s split 1 positive: %s" % (task.label, first_positive))
+        self.log("Task %s split 1 negative: %s" % (task.label, first_negative))
         first_image = self._execute_workflow(
             task, first_shot, first_positive, first_negative,
             prefix + "_split1", stage="base")
@@ -523,6 +543,8 @@ class TaskRunner:
             self.cfg, second_shot, boy)
         self.log("Task %s split pass 2/2: boy inpaint %s" % (
             task.label, mask.get("region") or region))
+        self.log("Task %s split 2 positive: %s" % (task.label, second_positive))
+        self.log("Task %s split 2 negative: %s" % (task.label, second_negative))
         second_image = self._execute_workflow(
             task, second_shot, second_positive, second_negative,
             prefix + "_split2", stage="inpaint", hires=False)
@@ -607,6 +629,8 @@ class TaskRunner:
         if task.kind != "expand" and is_double_shot(shot):
             self._attach_pose(task, shot, ("girl", "boy"))
         positive, negative = compose_prompts(self.cfg, shot)
+        self.log("Task %s effective positive: %s" % (task.label, positive))
+        self.log("Task %s effective negative: %s" % (task.label, negative))
         image = self._execute_workflow(
             task, shot, positive, negative, prefix, stage="base")
         if self._cancel.is_set():

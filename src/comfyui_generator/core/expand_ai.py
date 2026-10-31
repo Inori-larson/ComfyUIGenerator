@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 
-from comfyui_generator.core.expand import _is_pose_tag, apply_expansion_delta
+from comfyui_generator.core.expand import (
+    _expression_slots, _is_pose_tag, _limb_slots, _state_slots,
+    apply_expansion_delta,
+)
 
 _DEPTH_WORDS = ("deep penetration", "shallow penetration", "deeper penetration")
 _FLUID_WORDS = ("cum", "semen", "creampie", "ejaculat", "pussy juice")
@@ -18,7 +21,9 @@ _ACTION_WORDS = (
     "pressing", "straddle",
 )
 _EXPRESSION_WORDS = (
-    "eye", "eyes", "mouth", "lip", "lips", "tongue", "blush", "smile",
+    "closed eyes", "half closed eyes", "open eyes", "teary eyes",
+    "rolling eyes", "empty eyes", "wide eyes", "eye contact",
+    "mouth", "lip", "lips", "tongue", "blush", "smile",
     "tear", "tears", "moan", "breath", "breathing", "sweat", "trembl",
 )
 _CLOTHING_WORDS = (
@@ -57,6 +62,8 @@ EXPANSION_SCHEMA: dict[str, Any] = {
 }
 
 SYSTEM = (
+    "0. 如果 mode=sequence：输出 N+1 个状态，第 1 个是起始状态，后续按时间推进到输入 prompt 的最终状态；每步仍然是增量。\n"
+    "0b. 如果输入里 prev 已经含 cum/体液、penetration 或 pullout，sequence 第一步不能清除这些状态，必须从 prev 的状态继续推进。\n"
     "你是二次元 Danbooru 提示词扩展器。根据每一镜的当前 prompt、脚本和下一镜约束，"
     "生成连续的单镜细节变化。只输出 JSON，不解释。\n"
     "每步输出一个增量，不是完整 prompt：\n"
@@ -77,20 +84,25 @@ SYSTEM = (
     "6. 不要换场景、不要换人、不要换主要动作。\n"
     "7. 一旦当前 prompt 已有 cum/semen/体液或 torn/ripped 破损衣物，后续步骤不能删除，"
     "只能增加、累积或加重。\n"
-    "8. 不要输出质量词或解释，只输出 JSON，不要 markdown。\n"
+    "8. 每步必须替换旧的手/手臂动作和表情：add 新手势时同时 remove 冲突的旧手势，"
+    "add 新表情/视线时同时 remove 旧表情/视线，禁止只追加导致新旧标签打架。\n"
+    "9. 透深度/拔出/射精程度/阴道状态必须逐步变化：用 remove 替换旧的 penetration/pullout/vagina 状态，"
+    "不要把 deep penetration 和 shallow penetration 同时保留；最后一步应能出现拔出、事后或射精后的状态。\n"
+    "10. 不要输出质量词或解释，只输出 JSON，不要 markdown。\n"
 )
 
 USER_HEADER = (
     "为每镜生成指定数量的增量步骤。输出格式："
     "{\"expansions\":[{\"id\":\"01\",\"steps\":[{\"remove\":[\"...\"],\"add\":[\"...\"]}]}]}。"
-    "每个 id 的 steps 数量必须等于 expansion_count；"
+    "每个 id 的 steps 数量必须等于 state_count；"
     "每个 step 的 remove+add 至少 4 个标签，步骤之间不能重复；"
     "不要只替换表情，动作、四肢小动作、深度、体液和衣物状态也要形成递进；"
     "体液和破损衣物只能增加，不能删除。\n"
 )
 
 
-def _shot_payload(shot: dict[str, Any], next_shot: dict[str, Any] | None) -> dict[str, Any]:
+def _shot_payload(shot: dict[str, Any], next_shot: dict[str, Any] | None,
+                  prev_shot: dict[str, Any] | None = None) -> dict[str, Any]:
     payload = {
         "id": str(shot.get("id") or ""),
         "prompt": str(shot.get("prompt") or ""),
@@ -99,8 +111,15 @@ def _shot_payload(shot: dict[str, Any], next_shot: dict[str, Any] | None) -> dic
         "scene": str(shot.get("scene") or ""),
         "clothing": str(shot.get("clothing") or ""),
         "clothing_details": shot.get("clothing_details") or {},
+        "prev": None,
         "next": None,
     }
+    if prev_shot:
+        payload["prev"] = {
+            "prompt": str(prev_shot.get("prompt") or ""),
+            "script": str(prev_shot.get("script") or prev_shot.get("outline") or ""),
+            "scene": str(prev_shot.get("scene") or ""),
+        }
     if next_shot:
         payload["next"] = {
             "prompt": str(next_shot.get("prompt") or ""),
@@ -114,13 +133,17 @@ def _shot_payload(shot: dict[str, Any], next_shot: dict[str, Any] | None) -> dic
 
 
 def build_expansion_messages(shots: list[dict[str, Any]], count: int,
-                             start: int = 0) -> list[dict[str, str]]:
+                             start: int = 0,
+                             sequence: bool = False,
+                             previous_shot: dict[str, Any] | None = None) -> list[dict[str, str]]:
     items = []
     for index, shot in enumerate(shots):
         nxt = shots[index + 1] if index + 1 < len(shots) else None
-        items.append(_shot_payload(shot, nxt))
+        prev = shots[index - 1] if index > 0 else previous_shot
+        items.append(_shot_payload(shot, nxt, prev))
     user = USER_HEADER + json.dumps({
-        "expansion_count": max(1, int(count)),
+        "mode": "sequence" if sequence else "continuation",
+        "state_count": max(1, int(count)),
         "shots": items,
     }, ensure_ascii=False)
     return [{"role": "system", "content": SYSTEM},
@@ -152,10 +175,48 @@ def _pose_tags(keys: set[str]) -> set[str]:
     return {key for key in keys if _is_pose_tag(key)}
 
 
+def _hand_tags(keys: set[str]) -> set[str]:
+    return {
+        key for key in keys
+        if _limb_slots(key) & {"hands", "arms"}
+    }
+
+
+def _expression_tags(keys: set[str]) -> set[str]:
+    return {key for key in keys if _expression_slots(key)}
+
+
+def _penetration_tags(keys: set[str]) -> set[str]:
+    return {
+        key for key in keys
+        if _state_slots(key) & {"depth", "pullout"}
+    }
+
+
+def _sequence_reset_tags(prompt: str) -> list[str]:
+    tags = [tag.strip() for tag in str(prompt or "").split(",") if tag.strip()]
+    reset: list[str] = []
+    for tag in tags:
+        low = tag.lower()
+        if any(word in low for word in _FLUID_WORDS):
+            reset.append(tag)
+        elif _state_slots(tag) & {"depth", "pullout"}:
+            reset.append(tag)
+    return reset
+
+
+def _sequence_can_reset(shot: dict[str, Any],
+                        previous_shot: dict[str, Any] | None) -> bool:
+    if not previous_shot:
+        return True
+    previous_prompt = str(previous_shot.get("prompt") or "")
+    return not _sequence_reset_tags(previous_prompt)
+
+
 def _categories(keys: set[str]) -> set[str]:
     categories: set[str] = set()
     for key in keys:
-        low = key.lower()
+        low = key.lower().replace("_", " ").replace("-", " ")
         if any(word in low for word in _ACTION_WORDS):
             categories.add("action")
         if any(word in low for word in _EXPRESSION_WORDS):
@@ -168,7 +229,8 @@ def _categories(keys: set[str]) -> set[str]:
 
 
 def _cleaned_batch(raw: Any, batch: list[dict[str, Any]],
-                   count: int) -> dict[str, list[str]]:
+                   count: int, sequence: bool = False,
+                   previous_shot: dict[str, Any] | None = None) -> dict[str, list[str]]:
     items = _split_shots(raw)
     by_id = {str(item.get("id") or ""): item for item in items
              if isinstance(item, dict)}
@@ -182,14 +244,23 @@ def _cleaned_batch(raw: Any, batch: list[dict[str, Any]],
         if not isinstance(steps, list):
             continue
         next_shot = batch[index + 1] if index + 1 < len(batch) else None
+        prev_shot = previous_shot if index == 0 else batch[index - 1]
+        can_reset = _sequence_can_reset(shot, prev_shot)
         current = str(shot.get("prompt") or "")
         cleaned = []
-        for step in steps[:count]:
+        for step_index, step in enumerate(steps[:count]):
             if not isinstance(step, dict):
                 continue
+            remove = _as_list(step.get("remove"))
+            add = _as_list(step.get("add"))
+            reset = sequence and step_index == 0 and can_reset
+            if reset:
+                remove += _sequence_reset_tags(current)
+            elif sequence and step_index == 0:
+                add = _sequence_reset_tags(current) + add
             current = apply_expansion_delta(
-                current, _as_list(step.get("remove")),
-                _as_list(step.get("add")), shot, next_shot)
+                current, remove, add, shot, next_shot,
+                preserve_irreversible=not reset)
             cleaned.append(current)
         if cleaned:
             result[shot_id] = cleaned
@@ -207,6 +278,7 @@ def _needs_retry(cleaned: dict[str, list[str]], batch: list[dict[str, Any]],
                 str(shot.get("prompt") or "").split(",") if tag.strip()}
         seen: set[str] = set()
         previous_pose = _pose_tags(base)
+        previous_penetration = _penetration_tags(base)
         for index, prompt in enumerate(prompts):
             keys = {tag.strip().lower() for tag in prompt.split(",") if tag.strip()}
             if len(keys ^ base) < 4 or prompt.lower() in seen:
@@ -217,6 +289,15 @@ def _needs_retry(cleaned: dict[str, list[str]], batch: list[dict[str, Any]],
                 return True
             if len(base_categories) >= 2 and len(changed_categories) < 2:
                 return True
+            added = keys - base
+            if _hand_tags(base) and not _hand_tags(added):
+                return True
+            if _expression_tags(base) and not _expression_tags(added):
+                return True
+            penetration = _penetration_tags(keys)
+            if previous_penetration and penetration == previous_penetration:
+                return True
+            previous_penetration = penetration
             pose = _pose_tags(keys)
             if pose == previous_pose:
                 return True
@@ -232,14 +313,19 @@ def _needs_retry(cleaned: dict[str, list[str]], batch: list[dict[str, Any]],
 
 def generate_expansions(client: Any, model: str, shots: list[dict[str, Any]],
                         count: int, *, chunk: int = 6,
+                        sequence: bool = False,
                         log: Callable[[str], None] | None = None,
                         **kwargs: Any) -> dict[str, list[str]]:
     count = max(1, int(count))
+    steps_needed = count + 1 if sequence else count
     result: dict[str, list[str]] = {}
     chunk = max(1, int(chunk))
     for offset in range(0, len(shots), chunk):
         batch = shots[offset:offset + chunk]
-        messages = build_expansion_messages(batch, count, start=offset)
+        previous_shot = shots[offset - 1] if offset > 0 else None
+        messages = build_expansion_messages(
+            batch, steps_needed, start=offset, sequence=sequence,
+            previous_shot=previous_shot)
         if log:
             log("AI 扩展：%d/%d" % (offset + 1, len(shots)))
         convo = messages
@@ -250,8 +336,9 @@ def generate_expansions(client: Any, model: str, shots: list[dict[str, Any]],
                 temperature=0.75 if attempt == 0 else 0.95,
                 num_predict=8192, num_ctx=32768,
                 timeout=300.0, retries=2 if attempt == 0 else 1, **kwargs)
-            cleaned = _cleaned_batch(raw, batch, count)
-            if not _needs_retry(cleaned, batch, count):
+            cleaned = _cleaned_batch(
+                raw, batch, steps_needed, sequence, previous_shot)
+            if not _needs_retry(cleaned, batch, steps_needed):
                 break
             if attempt >= 2:
                 if log:
@@ -268,8 +355,11 @@ def generate_expansions(client: Any, model: str, shots: list[dict[str, Any]],
                     "remove+add tags, must not remove scene/character/main "
                     "action anchors, and must form a clear progression. "
                     "Every step must change at least one action/limb/body "
-                    "tag, not only expression. Never remove cum/semen/fluid "
-                    "or torn/ripped clothing once present. Return JSON only.")},
+                    "tag, not only expression. In sequence mode the first "
+                    "state may reset final cum/penetration tags to create "
+                    "the starting state; from the second state onward never "
+                    "remove cum/semen/fluid or torn/ripped clothing. Return "
+                    "JSON only.")},
             ]
         result.update(cleaned)
     return result
