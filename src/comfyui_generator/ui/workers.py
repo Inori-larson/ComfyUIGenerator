@@ -18,6 +18,7 @@ from comfyui_generator.core.assets import Assets
 from comfyui_generator.core.comfy import ComfyClient
 from comfyui_generator.core.config import AppConfig
 from comfyui_generator.core.external_llm import ExternalLLMClient
+from comfyui_generator.core.expand_ai import generate_expansions
 from comfyui_generator.core.jobs import Task, TaskRunner
 from comfyui_generator.core.ollama import OllamaClient
 from comfyui_generator.core.preview import PreviewFrame
@@ -93,6 +94,7 @@ class PromptWorker(QThread):
     story_ready = Signal(list)
     rewritten = Signal(dict)
     failed = Signal(str)
+    canceled = Signal(str)
     log = Signal(str)
 
     def __init__(self, cfg: AppConfig, kind: str, text: str, *,
@@ -125,6 +127,12 @@ class PromptWorker(QThread):
         self.strip_appearance = strip_appearance
         self.use_external = use_external
 
+    def cancel(self) -> None:
+        self.requestInterruption()
+
+    def _canceled(self) -> bool:
+        return self.isInterruptionRequested()
+
     def run(self) -> None:
         if self.use_external:
             client = ExternalLLMClient(self.cfg.external_llm)
@@ -140,14 +148,20 @@ class PromptWorker(QThread):
             if self.story_options is not None:
                 self.story_options.model = model
         try:
+            if self._canceled():
+                raise InterruptedError
             if self.kind == "single":
                 result = generate_single_prompt(client, self.text, self.single_options)
+                if self._canceled():
+                    raise InterruptedError
                 tags = self._split_tags(result["prompt"])
                 if local_model:
                     result["prompt_zh"] = self._translate_tags(
                         local_client, local_model, tags)
                 else:
                     result["prompt_zh"] = "，".join(tags)
+                if self._canceled():
+                    raise InterruptedError
                 self.single_ready.emit(result)
             elif self.kind == "rewrite":
                 prompt = rewrite_shot_prompt(
@@ -155,24 +169,34 @@ class PromptWorker(QThread):
                     character_tags=self.character_tags,
                     style_positive=self.style_positive,
                     strip_appearance=self.strip_appearance)
+                if self._canceled():
+                    raise InterruptedError
                 if local_model:
                     prompt_zh = self._translate_tags(
                         local_client, local_model, self._split_tags(prompt))
                 else:
                     prompt_zh = prompt
+                if self._canceled():
+                    raise InterruptedError
                 self.rewritten.emit({"prompt": prompt, "prompt_zh": prompt_zh})
             else:
                 shots = generate_storyboard(
                     client, self.text, self.story_options, initial_shots=self.initial_shots)
+                if self._canceled():
+                    raise InterruptedError
                 all_tags: list[str] = []
                 for shot in shots:
                     all_tags += self._split_tags(shot.get("prompt", ""))
                 mapping = (self._translate_map(local_client, local_model, all_tags)
                            if local_model else {})
+                if self._canceled():
+                    raise InterruptedError
                 for shot in shots:
                     zh_tags = [mapping.get(tag, tag) for tag in self._split_tags(shot.get("prompt", ""))]
                     shot["prompt_zh"] = "，".join(zh_tags)
                 self.story_ready.emit(shots)
+        except InterruptedError:
+            self.canceled.emit("已打断生成")
         except Exception as exc:
             self.failed.emit(str(exc))
         finally:
@@ -205,6 +229,50 @@ class PromptWorker(QThread):
     def _translate_tags(self, client: OllamaClient, model: str, tags: list[str]) -> str:
         mapping = self._translate_map(client, model, tags)
         return "，".join(mapping.get(tag, tag) for tag in tags)
+
+
+class ExpansionWorker(QThread):
+    done = Signal(dict)
+    failed = Signal(str)
+    canceled = Signal(str)
+    log = Signal(str)
+
+    def __init__(self, cfg: AppConfig, shots: list[dict[str, Any]], count: int,
+                 model: str = "", use_external: bool = False):
+        super().__init__()
+        self.cfg = cfg
+        self.shots = copy.deepcopy(shots)
+        self.count = count
+        self.model = model
+        self.use_external = use_external
+
+    def cancel(self) -> None:
+        self.requestInterruption()
+
+    def run(self) -> None:
+        if self.use_external:
+            client = ExternalLLMClient(self.cfg.external_llm)
+            model = self.model or self.cfg.external_llm.model
+        else:
+            client = OllamaClient(self.cfg.ollama.base_url)
+            model = self.model or self.cfg.ollama.default_model
+        try:
+            if self.isInterruptionRequested():
+                self.canceled.emit("AI expansion canceled")
+                return
+            result = generate_expansions(
+                client, model, self.shots, self.count, log=self.log.emit)
+            if self.isInterruptionRequested():
+                self.canceled.emit("AI expansion canceled")
+                return
+            self.done.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        finally:
+            try:
+                client.unload(model)
+            except Exception:
+                pass
 
 
 class RenderWorker(QThread):

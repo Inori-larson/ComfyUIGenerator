@@ -6,7 +6,8 @@ from pathlib import Path
 
 from PySide6.QtWidgets import (
     QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QLabel,
-    QGroupBox, QHBoxLayout, QLineEdit, QPushButton, QSpinBox, QVBoxLayout,
+    QGroupBox, QHBoxLayout, QLineEdit, QPushButton, QScrollArea, QSpinBox,
+    QVBoxLayout, QWidget,
 )
 
 from comfyui_generator.ui.widgets import SearchComboBox
@@ -48,6 +49,12 @@ class SettingsDialog(QDialog):
         self.resize(760, 720)
 
         root = QVBoxLayout(self)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        form = QVBoxLayout(content)
+        scroll.setWidget(content)
+        root.addWidget(scroll, 1)
         comfy_box = QGroupBox("ComfyUI")
         comfy_form = QFormLayout(comfy_box)
         self.mode = SearchComboBox(placeholder="搜索模式")
@@ -79,7 +86,7 @@ class SettingsDialog(QDialog):
         self.keep_running = QCheckBox("退出应用时保留下次启动的 ComfyUI")
         self.keep_running.setChecked(cfg.comfy.keep_running_on_exit)
         comfy_form.addRow("", self.keep_running)
-        root.addWidget(comfy_box)
+        form.addWidget(comfy_box)
 
         ollama_box = QGroupBox("Ollama")
         ollama_form = QFormLayout(ollama_box)
@@ -98,7 +105,7 @@ class SettingsDialog(QDialog):
                                    [(name, name) for name in model_names])
         self.ollama_model.selectValue(cfg.ollama.default_model or "")
         ollama_form.addRow("默认模型", self.ollama_model)
-        root.addWidget(ollama_box)
+        form.addWidget(ollama_box)
 
         external_box = QGroupBox("外部 OpenAI 兼容 API（提示词生成）")
         external_form = QFormLayout(external_box)
@@ -119,7 +126,7 @@ class SettingsDialog(QDialog):
         external_hint = QLabel("只用于外部提示词生成，不调用 Ollama；Key 仅保存在本机 config.json。")
         external_hint.setWordWrap(True)
         external_form.addRow("", external_hint)
-        root.addWidget(external_box)
+        form.addWidget(external_box)
 
         lora_box = QGroupBox("LoRA 数据源")
         lora_form = QFormLayout(lora_box)
@@ -143,7 +150,7 @@ class SettingsDialog(QDialog):
         self.civitai_base = QLineEdit(cfg.lora.civitai_base)
         self.civitai_base.setPlaceholderText("https://civitai.red")
         lora_form.addRow("Civitai 地址", self.civitai_base)
-        root.addWidget(lora_box)
+        form.addWidget(lora_box)
 
         models_box = QGroupBox("模型目录（浏览选择）")
         models_form = QFormLayout(models_box)
@@ -156,7 +163,31 @@ class SettingsDialog(QDialog):
             "Ollama、采样器、调度器由服务自动读取，也可在下拉框直接输入。")
         models_hint.setWordWrap(True)
         models_form.addRow("", models_hint)
-        root.addWidget(models_box)
+        form.addWidget(models_box)
+
+        generation_box = QGroupBox("生成默认")
+        generation_form = QFormLayout(generation_box)
+        self.split_double = QCheckBox("双人镜头分步生成（先女后男 inpaint）")
+        self.split_double.setChecked(bool(
+            getattr(cfg.generation, "split_enabled", True)))
+        generation_form.addRow("", self.split_double)
+        self.split_region = SearchComboBox(placeholder="选择遮罩区域")
+        self.split_region.setItems([
+            ("自动（按剧情判断）", "auto"),
+            ("右侧", "right"),
+            ("左侧", "left"),
+            ("上半", "top"),
+            ("下半", "bottom"),
+            ("中心/重叠", "center"),
+        ])
+        self.split_region.selectValue(
+            str(getattr(cfg.generation, "split_region", "auto")))
+        generation_form.addRow("默认遮罩区域", self.split_region)
+        split_hint = QLabel(
+            "双人镜头先只生成女主，再在遮罩区域补男主。上下叠、骑乘、贴身镜头请用自动或手动选区域。")
+        split_hint.setWordWrap(True)
+        generation_form.addRow("", split_hint)
+        form.addWidget(generation_box)
 
         app_box = QGroupBox("应用")
         app_form = QFormLayout(app_box)
@@ -168,7 +199,8 @@ class SettingsDialog(QDialog):
         self.storage = QLineEdit(str(cfg.root))
         self.storage.setReadOnly(True)
         app_form.addRow("数据目录", self.storage)
-        root.addWidget(app_box)
+        form.addWidget(app_box)
+        form.addStretch(1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._save)
@@ -208,6 +240,8 @@ class SettingsDialog(QDialog):
         c.models.checkpoint_dir = self.checkpoint_dir.text().strip()
         c.models.upscaler_dir = self.upscaler_dir.text().strip()
         c.generation.template = self.template.text().strip()
+        c.generation.split_enabled = self.split_double.isChecked()
+        c.generation.split_region = self.split_region.currentValue()
         c.ui.language = self.language.currentValue()
         save_config(c)
         self.accept()

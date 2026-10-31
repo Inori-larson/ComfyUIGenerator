@@ -318,6 +318,9 @@ class ShotDetailsDialog(QDialog):
     def __init__(self, shots: list[dict[str, Any]], outlines: list[str], parent=None):
         super().__init__(parent)
         self.setWindowTitle("分镜详情")
+        self.setWindowFlags(self.windowFlags()
+                            | Qt.WindowType.WindowMaximizeButtonHint
+                            | Qt.WindowType.WindowMinimizeButtonHint)
         self.resize(1120, 760)
         self._shots = [dict(shot) for shot in shots]
         self._outlines = list(outlines)
@@ -371,11 +374,14 @@ class ShotDetailsDialog(QDialog):
         hint = QLabel("修改英文 prompt 后保存，会更新分镜并自动重新译中文。")
         hint.setWordWrap(True)
         row.addWidget(hint, 1)
+        self.btn_fullscreen = QPushButton("全屏")
+        self.btn_fullscreen.clicked.connect(self._toggle_fullscreen)
         btn_cancel = QPushButton("取消")
         btn_save = QPushButton("保存修改")
         btn_save.setObjectName("Primary")
         btn_cancel.clicked.connect(self.reject)
         btn_save.clicked.connect(self._save)
+        row.addWidget(self.btn_fullscreen)
         row.addWidget(btn_cancel)
         row.addWidget(btn_save)
         layout.addLayout(row)
@@ -386,6 +392,25 @@ class ShotDetailsDialog(QDialog):
             self.list.setCurrentRow(0)
         self._loading = False
         self._load_shot(0 if self._shots else -1)
+
+    def _toggle_fullscreen(self) -> None:
+        if self.isFullScreen():
+            self.showNormal()
+            self.btn_fullscreen.setText("全屏")
+        else:
+            self.showFullScreen()
+            self.btn_fullscreen.setText("退出全屏")
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.key() == Qt.Key.Key_F11:
+            self._toggle_fullscreen()
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_Escape and self.isFullScreen():
+            self._toggle_fullscreen()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def _store_current(self) -> None:
         row = self._current_row

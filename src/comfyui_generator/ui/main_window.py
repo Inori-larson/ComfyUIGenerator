@@ -33,6 +33,10 @@ from comfyui_generator.core.jobs import Task, build_tasks
 from comfyui_generator.core.lora_info import is_style_lora, lora_tag_info
 from comfyui_generator.core.lora_sources import lora_display_label, lora_entries
 from comfyui_generator.core.ollama import OllamaClient
+from comfyui_generator.core.pose import (
+    CLASSIC_POSE_LABELS, POSE_PRESET_LABELS, load_pose_presets,
+    save_pose_presets,
+)
 from comfyui_generator.core.project import (
     clear_story_partial, list_projects, load_project, load_session,
     load_story_partial, move_to_trash, new_project, save_project,
@@ -53,7 +57,7 @@ from comfyui_generator.ui.dialogs import (
 )
 from comfyui_generator.ui.settings_dialog import SettingsDialog
 from comfyui_generator.ui.widgets import SearchComboBox, WrappingTabs
-from comfyui_generator.ui.workers import AssetsWorker, AutoTranslateWorker, ConnectWorker, LoraTagsWorker, PromptWorker, RenderWorker, TagTranslateWorker
+from comfyui_generator.ui.workers import AssetsWorker, AutoTranslateWorker, ConnectWorker, ExpansionWorker, LoraTagsWorker, PromptWorker, RenderWorker, TagTranslateWorker
 
 RESOLUTIONS = [
     ("竖屏 832x1216", 832, 1216),
@@ -123,6 +127,8 @@ CLOTHING_ROLE = PHASE_ROLE + 1
 CHARACTERS_ROLE = CLOTHING_ROLE + 1
 CHARACTER_STATES_ROLE = CHARACTERS_ROLE + 1
 SCENE_ROLE = CHARACTER_STATES_ROLE + 1
+CLOTHING_DETAILS_ROLE = SCENE_ROLE + 1
+PROMPT_GROUPS_ROLE = CLOTHING_DETAILS_ROLE + 1
 
 
 def _label(text: str, name: str = "Section") -> QLabel:
@@ -150,6 +156,8 @@ class MainWindow(QMainWindow):
         self.assets_worker: AssetsWorker | None = None
         self.prompt_worker: PromptWorker | None = None
         self.render_worker: RenderWorker | None = None
+        self.expansion_worker: ExpansionWorker | None = None
+        self._pending_render: tuple[dict[str, Any], list[dict[str, Any]], int] | None = None
         self.tasks_by_id: dict[str, Any] = {}
         self.task_rows: dict[str, int] = {}
         self.row_task_ids: dict[int, str] = {}
@@ -218,6 +226,8 @@ class MainWindow(QMainWindow):
         self._single_prompt_en = ""
         self._single_prompt_zh = ""
         self._restoring_state = False
+        self._pose_custom = load_pose_presets(
+            self.cfg.root / "pose_presets.json")
 
         self._build_ui()
         self._build_menu()
@@ -323,13 +333,18 @@ class MainWindow(QMainWindow):
         self._set_status("ollama", "等待连接", "#95a5a6")
         row.addStretch(1)
 
+        self.btn_interrupt = QPushButton("打断生成")
+        self.btn_interrupt.setObjectName("Primary")
+        self.btn_interrupt.setEnabled(False)
+        self.btn_interrupt.clicked.connect(self.interrupt_generation)
+        row.addWidget(self.btn_interrupt)
         self.btn_reconnect = QPushButton("重新连接")
         self.btn_reconnect.clicked.connect(lambda: self.connect_services(False))
         self.btn_restart = QPushButton("重启 ComfyUI")
         self.btn_restart.clicked.connect(self.restart_comfy)
         self.btn_settings = QPushButton("设置")
         self.btn_settings.clicked.connect(self.open_settings)
-        self.btn_output = QPushButton("输出目录")
+        self.btn_output = QPushButton("打开目录")
         self.btn_output.clicked.connect(self.open_output_dir)
         for btn in (self.btn_reconnect, self.btn_restart, self.btn_settings, self.btn_output):
             row.addWidget(btn)
@@ -505,12 +520,17 @@ class MainWindow(QMainWindow):
                                         | QAbstractItemView.EditTrigger.EditKeyPressed)
         self.shot_table.itemChanged.connect(self._on_shot_item_changed)
 
+        form_scroll = QScrollArea()
+        form_scroll.setWidgetResizable(True)
+        form_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        form_scroll.setWidget(form)
         splitter = QSplitter(Qt.Orientation.Vertical)
-        splitter.addWidget(form)
+        splitter.addWidget(form_scroll)
         splitter.addWidget(self.shot_table)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([250, 520])
+        splitter.setSizes([520, 260])
         self.shot_table.setMinimumHeight(180)
         layout.addWidget(splitter, 1)
         self.shot_stats = _label("0 镜 · 0 英文标签 · 约 0 tokens", "Hint")
@@ -860,11 +880,119 @@ class MainWindow(QMainWindow):
         row.addWidget(self.variants_spin)
         layout.addLayout(row)
 
-        self.img2img_check = QCheckBox("启用镜头间图生图桥接")
+        self.split_check = QCheckBox("双人镜头分步生成（先女后男 inpaint）")
+        self.split_check.setChecked(True)
+        self.split_check.setToolTip("双人镜头先只生成女主，再在右侧遮罩内补男主，减少串衣和串发色")
+        layout.addWidget(self.split_check)
+        split_hint = _label("双人镜头会先生成女主，再按遮罩区域补男主；设置页也可修改全局默认", "Hint")
+        split_hint.setWordWrap(True)
+        layout.addWidget(split_hint)
+        row = QHBoxLayout()
+        row.addWidget(_label("双人分步遮罩", "Hint"))
+        self.split_region = SearchComboBox()
+        self.split_region.setItems([
+            ("自动（按剧情判断）", "auto"),
+            ("右侧", "right"),
+            ("左侧", "left"),
+            ("上半", "top"),
+            ("下半", "bottom"),
+            ("中心/重叠", "center"),
+        ])
+        self.split_region.selectValue("auto")
+        self.split_region.setToolTip(
+            "自动会从分镜脚本判断男主在左/右/上/下/重叠；判断错时手动指定")
+        row.addWidget(self.split_region, 1)
+        layout.addLayout(row)
+
+        self.pose_check = QCheckBox("自动 OpenPose 双人骨架")
+        self.pose_check.setChecked(False)
+        self.pose_check.setToolTip("按剧情自动选择双人姿势并送入 ControlNet；需要 OpenPose ControlNet 模型")
+        layout.addWidget(self.pose_check)
+        row = QHBoxLayout()
+        row.addWidget(_label("OpenPose 模型", "Hint"))
+        self.pose_controlnet = SearchComboBox(
+            placeholder="自动选择 openpose 模型", allow_free_text=True)
+        row.addWidget(self.pose_controlnet, 1)
+        layout.addLayout(row)
+        row = QHBoxLayout()
+        row.addWidget(_label("姿势预设", "Hint"))
+        self.pose_preset = SearchComboBox()
+        self.pose_preset.addItem("自动（按剧情）", "auto")
+        for key, label in POSE_PRESET_LABELS.items():
+            self.pose_preset.addItem(label, key)
+        for key, label in CLASSIC_POSE_LABELS.items():
+            self.pose_preset.addItem(label, key)
+        row.addWidget(self.pose_preset, 1)
+        row.addWidget(_label("强度", "Hint"))
+        self.pose_strength = QDoubleSpinBox()
+        self.pose_strength.setRange(0.0, 1.5)
+        self.pose_strength.setSingleStep(0.05)
+        self.pose_strength.setValue(0.7)
+        row.addWidget(self.pose_strength)
+        layout.addLayout(row)
+        pose_hint = _label(
+            "双人分步时分别使用女/男单骨架；普通双人使用双骨架。"
+            "“经典”预设是整张双人骨架，会自动跳过分步。没有模型时自动跳过。", "Hint")
+        pose_hint.setWordWrap(True)
+        layout.addWidget(pose_hint)
+        self.btn_pose_editor = QPushButton("预览 / 编辑所有骨架")
+        self.btn_pose_editor.clicked.connect(self.open_pose_editor)
+        layout.addWidget(self.btn_pose_editor)
+
+        ref_box = QGroupBox("参考骨架（可选，优先于自动预设）")
+        ref_layout = QVBoxLayout(ref_box)
+        for label, attr in (
+                ("双人骨架", "pose_pair_ref"),
+                ("女主骨架", "pose_girl_ref"),
+                ("男主骨架", "pose_boy_ref")):
+            row = QHBoxLayout()
+            row.addWidget(_label(label, "Hint"))
+            edit = QLineEdit()
+            setattr(self, attr, edit)
+            row.addWidget(edit, 1)
+            button = QPushButton("浏览")
+            button.clicked.connect(
+                lambda _checked=False, field=edit: self._pick_pose_ref(field))
+            row.addWidget(button)
+            ref_layout.addLayout(row)
+        layout.addWidget(ref_box)
+
+        layout.addWidget(_label("骨架微调", "Section"))
+        for label, prefix in (("女主", "pose_girl"), ("男主", "pose_boy")):
+            row = QHBoxLayout()
+            row.addWidget(_label(label, "Hint"))
+            for text, suffix, low, high, step, value, width in (
+                    ("X", "%", -30.0, 30.0, 1.0, 0.0, 68),
+                    ("Y", "%", -30.0, 30.0, 1.0, 0.0, 68),
+                    ("缩放", "", 0.5, 1.8, 0.05, 1.0, 68),
+                    ("旋转", "°", -180.0, 180.0, 5.0, 0.0, 74)):
+                row.addWidget(QLabel(text))
+                spin = QDoubleSpinBox()
+                spin.setRange(low, high)
+                spin.setSingleStep(step)
+                spin.setValue(value)
+                spin.setSuffix(suffix)
+                spin.setFixedWidth(width)
+                setattr(self, "%s_%s" % (prefix, "scale" if text == "缩放"
+                                        else "rotation" if text == "旋转"
+                                        else text.lower()), spin)
+                row.addWidget(spin)
+            row.addStretch(1)
+            layout.addLayout(row)
+
+        self.img2img_check = QCheckBox("启用单镜图生图细节扩展")
         self.img2img_check.setChecked(True)
         layout.addWidget(self.img2img_check)
         row = QHBoxLayout()
-        row.addWidget(_label("桥接重绘幅度", "Hint"))
+        row.addWidget(_label("每镜扩展张数", "Hint"))
+        self.expand_spin = QSpinBox()
+        self.expand_spin.setRange(0, 8)
+        self.expand_spin.setValue(3)
+        row.addWidget(self.expand_spin)
+        self.expand_external = QCheckBox("扩展使用外部 AI（更稳，可能计费）")
+        self.expand_external.setToolTip("使用配置的外部 OpenAI 兼容 API 生成扩展提示词")
+        row.addWidget(self.expand_external)
+        row.addWidget(_label("基础重绘幅度", "Hint"))
         self.img2img_denoise = QDoubleSpinBox()
         self.img2img_denoise.setRange(0.15, 0.9)
         self.img2img_denoise.setSingleStep(0.05)
@@ -872,7 +1000,10 @@ class MainWindow(QMainWindow):
         row.addWidget(self.img2img_denoise)
         row.addStretch(1)
         layout.addLayout(row)
-        img_hint = _label("30 个关键帧不变；两镜之间的过渡图张数由镜头差异自动决定，从上一镜逐渐过渡到下一镜", "Hint")
+        img_hint = _label(
+            "扩展提示词由 AI 根据当前镜生成；关键帧先生成，后续每张以上一张为底图，"
+            "保持角色、环境和主要动作不变，只追加细节。单图不受上下镜限制；"
+            "多镜只把下一镜作为上限约束，只做单镜扩展，不做镜头间过渡。", "Hint")
         img_hint.setWordWrap(True)
         layout.addWidget(img_hint)
 
@@ -1056,6 +1187,17 @@ class MainWindow(QMainWindow):
         img2img = settings.get("img2img") or {}
         self.img2img_check.setChecked(bool(img2img.get("enabled", True)))
         self.img2img_denoise.setValue(float(img2img.get("denoise", 0.35)))
+        self.expand_spin.setValue(int(img2img.get("expansions", 3)))
+        self.expand_external.setChecked(bool(img2img.get(
+            "external_ai", bool(self.cfg.external_llm.base_url
+                               and self.cfg.external_llm.api_key
+                               and self.cfg.external_llm.model))))
+        split = settings.get("split") or {}
+        self.split_check.setChecked(bool(split.get(
+            "enabled", getattr(self.cfg.generation, "split_enabled", True))))
+        self.split_region.selectValue(str(split.get(
+            "region", getattr(self.cfg.generation, "split_region", "auto"))))
+        self._set_pose_settings(settings.get("pose") or {})
         wildcard_dir = (self.cfg.generation.wildcards or {}).get("dir", "")
         if not wildcard_dir and self.cfg.comfy.base_dir:
             wildcard_dir = str(Path(self.cfg.comfy.base_dir) / "user" / "default" / "wildcards")
@@ -1221,6 +1363,15 @@ class MainWindow(QMainWindow):
             [current_up]))
         if current_up:
             self.upscaler_combo.selectValue(current_up)
+        current_pose = self.pose_controlnet.currentValue() or ""
+        pose_names = [
+            name for name in self.assets.controlnets
+            if "openpose" in name.lower() or "open pose" in name.lower()
+            or "pose" in name.lower()]
+        self.pose_controlnet.setValues(
+            self._merge_values(pose_names, [current_pose]))
+        if current_pose:
+            self.pose_controlnet.selectValue(current_pose)
         self._populate_loras()
         self._populate_detailers()
 
@@ -2249,8 +2400,10 @@ class MainWindow(QMainWindow):
         return result
 
     def _build_loras(self) -> list[dict[str, Any]]:
-        result = (self._selected_loras(self.lora_table)
-                  + self._selected_loras(self.style_lora_table))
+        character = self._selected_loras(self.lora_table)
+        for item in character:
+            item["character"] = True
+        result = character + self._selected_loras(self.style_lora_table)
         for table, scope in ((self.body_lora_table, "body"),
                              (self.action_lora_table, "action"),
                              (self.clothing_lora_table, "clothing")):
@@ -2283,6 +2436,70 @@ class MainWindow(QMainWindow):
             })
         return result
 
+    def _pose_settings(self) -> dict[str, Any]:
+        return {
+            "enabled": self.pose_check.isChecked(),
+            "controlnet": self.pose_controlnet.currentValue(),
+            "preset": self.pose_preset.currentValue(),
+            "strength": self.pose_strength.value(),
+            "custom": self._pose_custom,
+            "reference": {
+                "pair": self.pose_pair_ref.text().strip(),
+                "girl": self.pose_girl_ref.text().strip(),
+                "boy": self.pose_boy_ref.text().strip(),
+            },
+            "adjust": {
+                "girl": {
+                    "dx": self.pose_girl_x.value() / 100.0,
+                    "dy": self.pose_girl_y.value() / 100.0,
+                    "scale": self.pose_girl_scale.value(),
+                    "rotation": self.pose_girl_rotation.value(),
+                },
+                "boy": {
+                    "dx": self.pose_boy_x.value() / 100.0,
+                    "dy": self.pose_boy_y.value() / 100.0,
+                    "scale": self.pose_boy_scale.value(),
+                    "rotation": self.pose_boy_rotation.value(),
+                },
+            },
+        }
+
+    def _set_pose_settings(self, pose: dict[str, Any]) -> None:
+        custom = pose.get("custom")
+        if isinstance(custom, dict):
+            self._pose_custom = custom
+        enabled = pose.get("enabled")
+        if enabled is None:
+            enabled = getattr(self.cfg.generation, "pose_enabled", True)
+        controlnet = pose.get("controlnet")
+        if controlnet is None:
+            controlnet = getattr(self.cfg.generation, "pose_controlnet", "")
+        preset = pose.get("preset")
+        if preset is None:
+            preset = getattr(self.cfg.generation, "pose_preset", "auto")
+        strength = pose.get("strength")
+        if strength is None:
+            strength = getattr(self.cfg.generation, "pose_strength", 0.7)
+        self.pose_check.setChecked(bool(enabled))
+        self.pose_controlnet.selectValue(str(controlnet))
+        self.pose_preset.selectValue(str(preset))
+        self.pose_strength.setValue(float(strength))
+        reference = pose.get("reference") or {}
+        self.pose_pair_ref.setText(str(reference.get("pair") or ""))
+        self.pose_girl_ref.setText(str(reference.get("girl") or ""))
+        self.pose_boy_ref.setText(str(reference.get("boy") or ""))
+        adjust = pose.get("adjust") or {}
+        for key, prefix in (("girl", "pose_girl"), ("boy", "pose_boy")):
+            values = adjust.get(key) or {}
+            getattr(self, prefix + "_x").setValue(
+                float(values.get("dx") or 0.0) * 100.0)
+            getattr(self, prefix + "_y").setValue(
+                float(values.get("dy") or 0.0) * 100.0)
+            getattr(self, prefix + "_scale").setValue(
+                float(values.get("scale") or 1.0))
+            getattr(self, prefix + "_rotation").setValue(
+                float(values.get("rotation") or 0.0))
+
     def _build_settings(self) -> dict[str, Any]:
         hires = {
             "enabled": self.hires_check.isChecked(),
@@ -2305,7 +2522,14 @@ class MainWindow(QMainWindow):
             "img2img": {
                 "enabled": self.img2img_check.isChecked(),
                 "denoise": self.img2img_denoise.value(),
+                "expansions": self.expand_spin.value(),
+                "external_ai": self.expand_external.isChecked(),
             },
+            "split": {
+                "enabled": self.split_check.isChecked(),
+                "region": self.split_region.currentValue(),
+            },
+            "pose": self._pose_settings(),
         }
 
     def _build_project(self, mode: str, shots: list[dict[str, Any]], text: str) -> dict[str, Any]:
@@ -2405,6 +2629,7 @@ class MainWindow(QMainWindow):
                               use_external=external)
         worker.single_ready.connect(self._on_single_prompt)
         worker.failed.connect(self._on_prompt_failed)
+        worker.canceled.connect(self._on_prompt_canceled)
         worker.log.connect(self.append_log)
         worker.finished.connect(self._on_prompt_worker_finished)
         self.prompt_worker = worker
@@ -2527,6 +2752,7 @@ class MainWindow(QMainWindow):
                               use_external=external)
         worker.story_ready.connect(self._on_story_ready)
         worker.failed.connect(self._on_prompt_failed)
+        worker.canceled.connect(self._on_prompt_canceled)
         worker.log.connect(self.append_log)
         worker.finished.connect(self._on_prompt_worker_finished)
         self.prompt_worker = worker
@@ -2587,6 +2813,10 @@ class MainWindow(QMainWindow):
             prompt_item.setData(CHARACTER_STATES_ROLE, json.dumps(
                 states, ensure_ascii=False))
             prompt_item.setData(SCENE_ROLE, str(shot.get("scene", "")))
+            prompt_item.setData(CLOTHING_DETAILS_ROLE, json.dumps(
+                shot.get("clothing_details") or {}, ensure_ascii=False))
+            prompt_item.setData(PROMPT_GROUPS_ROLE, json.dumps(
+                shot.get("prompt_groups") or [], ensure_ascii=False))
             self.shot_table.setItem(row, 3, prompt_item)
         finally:
             self._syncing_shots = False
@@ -2605,6 +2835,8 @@ class MainWindow(QMainWindow):
         lock_item = self.shot_table.item(row, 0)
         prompt_item = self.shot_table.item(row, 3)
         states: dict[str, Any] = {}
+        details: dict[str, Any] = {}
+        prompt_groups: list[Any] = []
         if prompt_item:
             raw_states = prompt_item.data(CHARACTER_STATES_ROLE)
             if isinstance(raw_states, str) and raw_states.strip():
@@ -2613,6 +2845,20 @@ class MainWindow(QMainWindow):
                     states = parsed if isinstance(parsed, dict) else {}
                 except (TypeError, ValueError):
                     states = {}
+            raw_details = prompt_item.data(CLOTHING_DETAILS_ROLE)
+            if isinstance(raw_details, str) and raw_details.strip():
+                try:
+                    parsed = json.loads(raw_details)
+                    details = parsed if isinstance(parsed, dict) else {}
+                except (TypeError, ValueError):
+                    details = {}
+            raw_groups = prompt_item.data(PROMPT_GROUPS_ROLE)
+            if isinstance(raw_groups, str) and raw_groups.strip():
+                try:
+                    parsed = json.loads(raw_groups)
+                    prompt_groups = parsed if isinstance(parsed, list) else []
+                except (TypeError, ValueError):
+                    prompt_groups = []
         return {
             "locked": bool(lock_item and lock_item.checkState() == Qt.CheckState.Checked),
             "id": self.shot_table.item(row, 1).text() if self.shot_table.item(row, 1) else "",
@@ -2627,12 +2873,19 @@ class MainWindow(QMainWindow):
             "clothing": (prompt_item.data(CLOTHING_ROLE) or "") if prompt_item else "",
             "characters": (prompt_item.data(CHARACTERS_ROLE) or "") if prompt_item else "",
             "character_states": states,
+            "clothing_details": details,
+            "prompt_groups": prompt_groups,
             "scene": (prompt_item.data(SCENE_ROLE) or "") if prompt_item else "",
         }
 
     def _on_shot_item_changed(self, item: QTableWidgetItem) -> None:
         if self._syncing_shots or item.column() != 3:
             return
+        self._syncing_shots = True
+        try:
+            item.setData(PROMPT_GROUPS_ROLE, "[]")
+        finally:
+            self._syncing_shots = False
         self._update_shot_stats()
 
     def _update_shot_stats(self) -> None:
@@ -2696,6 +2949,7 @@ class MainWindow(QMainWindow):
                 new_en = str(shot.get("prompt", ""))
                 if new_en and new_en != old_en:
                     prompt_item.setData(PROMPT_EN_ROLE, new_en)
+                    prompt_item.setData(PROMPT_GROUPS_ROLE, "[]")
                     changed.append((row, new_en))
         finally:
             self._syncing_shots = False
@@ -2891,6 +3145,7 @@ class MainWindow(QMainWindow):
                               story_options=options, initial_shots=initial)
         worker.story_ready.connect(self._on_expanded)
         worker.failed.connect(self._on_prompt_failed)
+        worker.canceled.connect(self._on_prompt_canceled)
         worker.log.connect(self.append_log)
         worker.finished.connect(self._on_prompt_worker_finished)
         self.prompt_worker = worker
@@ -2906,6 +3161,12 @@ class MainWindow(QMainWindow):
         self._switch_mode(1)
         self.append_log("已改写为 %d 镜" % len(shots))
         self._autosave_generated_story()
+
+    def _on_prompt_canceled(self, message: str) -> None:
+        self._render_after_prompt = False
+        self._update_partial_button()
+        self.append_log(message or "已打断生成")
+        self.statusBar().showMessage("已打断生成")
 
     def _on_prompt_failed(self, message: str) -> None:
         self._render_after_prompt = False
@@ -2955,6 +3216,8 @@ class MainWindow(QMainWindow):
                               "clothing": data.get("clothing", ""),
                               "characters": data.get("characters", ""),
                               "character_states": data.get("character_states") or {},
+                              "clothing_details": data.get("clothing_details") or {},
+                              "prompt_groups": data.get("prompt_groups") or [],
                               "scene": data.get("scene", ""),
                               "locked": data["locked"]})
                 continue
@@ -2974,6 +3237,8 @@ class MainWindow(QMainWindow):
                           "clothing": data.get("clothing", ""),
                           "characters": data.get("characters", ""),
                           "character_states": data.get("character_states") or {},
+                          "clothing_details": data.get("clothing_details") or {},
+                          "prompt_groups": data.get("prompt_groups") or [],
                           "scene": data.get("scene", ""),
                           "locked": data["locked"]})
         if pending:
@@ -3042,26 +3307,96 @@ class MainWindow(QMainWindow):
             self.append_log("本次生成携带角色标签 %d 个：%s" % (
                 len([tag for tag in char_tags.split(",") if tag.strip()]), char_tags[:240]))
         settings = self.project["settings"]
+        img2img = settings.get("img2img") or {}
+        expansions = (int(img2img.get("expansions", 3))
+                      if img2img.get("enabled", True) else 0)
+        model = self._llm()
+        use_external = False
+        external = self.cfg.external_llm
+        external_ready = bool(
+            external.base_url and external.api_key and external.model)
+        if self.expand_external.isChecked() and external_ready:
+            model = external.model
+            use_external = True
+        elif not model and external_ready:
+            model = external.model
+            use_external = True
+        if expansions > 0 and model:
+            self._pending_render = (self.project, shots, expansions)
+            worker = ExpansionWorker(
+                self.cfg, shots, expansions, model=model,
+                use_external=use_external)
+            worker.done.connect(self._on_expansions_ready)
+            worker.failed.connect(self._on_expansions_failed)
+            worker.canceled.connect(self._on_expansions_canceled)
+            worker.log.connect(self.append_log)
+            worker.finished.connect(lambda: setattr(self, "expansion_worker", None))
+            self.expansion_worker = worker
+            self._set_generation_enabled(False)
+            self.btn_cancel.setEnabled(True)
+            self.statusBar().showMessage("AI expanding prompts...")
+            self.append_log("AI expansion: %s, %d prompts per shot" % (
+                model, expansions))
+            worker.start()
+            return
+        if expansions > 0:
+            self.append_log("No AI model available; skipping expansion.")
+        self._start_render_tasks(self.project, shots, None)
+
+    def _on_expansions_ready(self, expansions: dict[str, list[str]]) -> None:
+        pending = self._pending_render
+        self._pending_render = None
+        if not pending:
+            return
+        project, shots, count = pending
+        self.append_log("AI expansion finished: %d shots" % len(expansions))
+        self._start_render_tasks(project, shots, expansions)
+
+    def _on_expansions_failed(self, message: str) -> None:
+        pending = self._pending_render
+        self._pending_render = None
+        self.append_log("AI expansion failed; rendering keyframes only: %s" % message)
+        if pending:
+            project, shots, _count = pending
+            self._start_render_tasks(project, shots, None)
+        else:
+            self._set_generation_enabled(True)
+
+    def _on_expansions_canceled(self, message: str) -> None:
+        self._pending_render = None
+        self.append_log(message or "AI expansion canceled")
+        self._set_generation_enabled(True)
+        self.btn_cancel.setEnabled(False)
+
+    def _start_render_tasks(self, project: dict[str, Any],
+                            shots: list[dict[str, Any]],
+                            expansions: dict[str, list[str]] | None) -> None:
+        settings = project["settings"]
         seed_mode = settings.get("seed_mode", "increment")
         base_seed = int(settings.get("base_seed", 1))
-        img2img = settings.get("img2img") or {}
-        tasks = build_tasks(self.project, shots, int(self.project["variants"]),
-                            seed_mode, base_seed, auto_bridges=bool(img2img.get("enabled")))
+        count = 0
+        if expansions:
+            for shot in shots:
+                prompts = expansions.get(str(shot.get("id") or ""), [])
+                shot["ai_expansions"] = prompts
+                count = max(count, len(prompts))
+        tasks = build_tasks(project, shots, int(project["variants"]),
+                            seed_mode, base_seed, expansions=count)
         if seed_mode == "increment" and tasks:
             next_seed = (base_seed + len(tasks)) % (2 ** 31)
             self.seed_spin.setValue(next_seed)
-            self.append_log("抽卡：本轮种子 %d..%d，下次从 %d 开始" % (
+            self.append_log("Seeds: %d..%d, next %d" % (
                 tasks[0].seed, tasks[-1].seed, next_seed))
         self.tasks_by_id = {task.id: task for task in tasks}
         self.previews.clear()
         self.final_bytes.clear()
         self._reset_queue(tasks)
         self.progress.setValue(0)
-        self.preview_info.setText("准备生成…")
+        self.preview_info.setText("Preparing...")
         self.current_task_id = tasks[0].id if tasks else None
 
         hires = bool(settings.get("hires", {}).get("enabled", True))
-        worker = RenderWorker(self.cfg, self.project, tasks, hires)
+        worker = RenderWorker(self.cfg, project, tasks, hires)
         worker.task_updated.connect(self._on_task_update)
         worker.preview.connect(self._on_preview)
         worker.log.connect(self.append_log)
@@ -3071,7 +3406,7 @@ class MainWindow(QMainWindow):
         self.render_worker = worker
         self._set_generation_enabled(False)
         self.btn_cancel.setEnabled(True)
-        self.statusBar().showMessage("正在生成 %d 张图…" % len(tasks))
+        self.statusBar().showMessage("Rendering %d images" % len(tasks))
         worker.start()
 
     def _reset_queue(self, tasks: list[Any]) -> None:
@@ -3456,6 +3791,17 @@ class MainWindow(QMainWindow):
         img2img = s.get("img2img") or {}
         self.img2img_check.setChecked(bool(img2img.get("enabled", True)))
         self.img2img_denoise.setValue(float(img2img.get("denoise", 0.35)))
+        self.expand_spin.setValue(int(img2img.get("expansions", 3)))
+        self.expand_external.setChecked(bool(img2img.get(
+            "external_ai", bool(self.cfg.external_llm.base_url
+                               and self.cfg.external_llm.api_key
+                               and self.cfg.external_llm.model))))
+        split = s.get("split") or {}
+        self.split_check.setChecked(bool(split.get(
+            "enabled", getattr(self.cfg.generation, "split_enabled", True))))
+        self.split_region.selectValue(str(split.get(
+            "region", getattr(self.cfg.generation, "split_region", "auto"))))
+        self._set_pose_settings(s.get("pose") or {})
         self.clip_skip.setValue(int(project.get("clip_skip", -2)))
 
         hires = s.get("hires") or {}
@@ -3721,6 +4067,7 @@ class MainWindow(QMainWindow):
         self._rewrite_row = row
         worker.rewritten.connect(self._on_rewritten)
         worker.failed.connect(self._on_prompt_failed)
+        worker.canceled.connect(self._on_prompt_canceled)
         worker.log.connect(self.append_log)
         worker.finished.connect(self._on_prompt_worker_finished)
         self.prompt_worker = worker
@@ -3741,6 +4088,7 @@ class MainWindow(QMainWindow):
                     item.setText(translation or prompt)
                     item.setData(PROMPT_EN_ROLE, prompt)
                     item.setData(PROMPT_ZH_ROLE, translation or prompt)
+                    item.setData(PROMPT_GROUPS_ROLE, "[]")
                 finally:
                     self._syncing_shots = False
         self._update_shot_stats()
@@ -3784,6 +4132,22 @@ class MainWindow(QMainWindow):
             self.append_log("已请求取消…")
             self.statusBar().showMessage("正在取消…")
 
+    def interrupt_generation(self) -> None:
+        requested = False
+        if self.expansion_worker and self.expansion_worker.isRunning():
+            self.expansion_worker.cancel()
+            requested = True
+        if self.render_worker and self.render_worker.isRunning():
+            self.render_worker.cancel()
+            requested = True
+        if self.prompt_worker and self.prompt_worker.isRunning():
+            self.prompt_worker.cancel()
+            requested = True
+        if requested:
+            self.btn_interrupt.setEnabled(False)
+            self.append_log("已请求打断生成…")
+            self.statusBar().showMessage("已请求打断，正在停止…")
+
     # ---------------------------------------------------------------- misc
 
     def _switch_mode(self, index: int) -> None:
@@ -3801,11 +4165,30 @@ class MainWindow(QMainWindow):
             widget.setEnabled(enabled)
         self.btn_single_render.setEnabled(enabled)
         self.btn_story_render.setEnabled(enabled)
+        self.btn_interrupt.setEnabled(not enabled)
         self.btn_expand.setEnabled(enabled and bool(self.single_prompt.toPlainText().strip()))
 
     def append_log(self, message: str) -> None:
         stamp = time.strftime("%H:%M:%S")
         self.log_view.appendPlainText("[%s] %s" % (stamp, message))
+
+    def open_pose_editor(self) -> None:
+        from comfyui_generator.ui.pose_dialog import PoseEditorDialog
+
+        dialog = PoseEditorDialog(self._pose_custom, self)
+        if not dialog.exec():
+            return
+        self._pose_custom = dialog.custom_presets()
+        save_pose_presets(self.cfg.root / "pose_presets.json", self._pose_custom)
+        self.append_log("骨架库已保存：%d 个预设" % len(self._pose_custom))
+        self.statusBar().showMessage("骨架库已保存")
+
+    def _pick_pose_ref(self, field: QLineEdit) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择 OpenPose 骨架图", field.text().strip(),
+            "图片 (*.png *.jpg *.jpeg *.webp)")
+        if path:
+            field.setText(path)
 
     def pick_char_ref(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "选择角色参考图", "", "图片 (*.png *.jpg *.jpeg *.webp)")
@@ -3952,6 +4335,11 @@ class MainWindow(QMainWindow):
                 "wildcard_dir": self.wildcard_dir.text(),
                 "img2img_enabled": self.img2img_check.isChecked(),
                 "img2img_denoise": self.img2img_denoise.value(),
+                "expand_count": self.expand_spin.value(),
+                "expand_external": self.expand_external.isChecked(),
+                "split_enabled": self.split_check.isChecked(),
+                "split_region": self.split_region.currentValue(),
+                "pose": self._pose_settings(),
                 "follow_preview": self.chk_follow.isChecked(),
             },
         }
@@ -4124,6 +4512,24 @@ class MainWindow(QMainWindow):
         self.wildcard_dir.setText(str(options.get("wildcard_dir") or ""))
         self.img2img_check.setChecked(bool(options.get("img2img_enabled", True)))
         self.img2img_denoise.setValue(float(options.get("img2img_denoise", 0.35)))
+        self.expand_spin.setValue(int(options.get("expand_count", 3)))
+        self.expand_external.setChecked(bool(options.get(
+            "expand_external", bool(self.cfg.external_llm.base_url
+                                   and self.cfg.external_llm.api_key
+                                   and self.cfg.external_llm.model))))
+        self.split_check.setChecked(bool(options.get(
+            "split_enabled", getattr(self.cfg.generation, "split_enabled", True))))
+        self.split_region.selectValue(str(options.get(
+            "split_region", getattr(self.cfg.generation, "split_region", "auto"))))
+        pose = options.get("pose")
+        if not isinstance(pose, dict):
+            pose = {
+                "enabled": options.get("pose_enabled"),
+                "controlnet": options.get("pose_controlnet"),
+                "preset": options.get("pose_preset"),
+                "strength": options.get("pose_strength"),
+            }
+        self._set_pose_settings(pose)
         self.chk_follow.setChecked(bool(options.get("follow_preview", True)))
 
         mode = state.get("mode", "single")

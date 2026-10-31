@@ -191,6 +191,12 @@ class GenerationDefaults:
     hires_denoise: float = 0.4
     hires_steps: int = 20
     upscaler: str = ""
+    split_enabled: bool = True
+    split_region: str = "auto"
+    pose_enabled: bool = True
+    pose_controlnet: str = ""
+    pose_preset: str = "auto"
+    pose_strength: float = 0.7
     detailers: list[dict[str, Any]] = field(default_factory=list)
     wildcards: dict[str, Any] = field(default_factory=lambda: {"enabled": False, "dir": ""})
 

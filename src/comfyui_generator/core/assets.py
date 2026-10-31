@@ -30,6 +30,7 @@ class Assets:
         self.checkpoints: list[str] = []
         self.loras: list[str] = []
         self.upscalers: list[str] = []
+        self.controlnets: list[str] = []
         self.detectors: list[str] = []
         self.samplers: list[str] = []
         self.schedulers: list[str] = []
@@ -52,6 +53,7 @@ class Assets:
         self.checkpoints = _options(info, "CheckpointLoaderSimple", "ckpt_name")
         self.loras = _options(info, "LoraLoaderModelOnly", "lora_name")
         self.upscalers = _options(info, "UpscaleModelLoader", "model_name")
+        self.controlnets = _options(info, "ControlNetLoader", "control_net_name")
         self.detectors = _options(info, "UltralyticsDetectorProvider", "model_name")
         self.samplers = _options(info, "KSampler", "sampler_name")
         self.schedulers = _options(info, "KSampler", "scheduler")
@@ -68,6 +70,7 @@ class Assets:
             "checkpoints": len(self.checkpoints),
             "loras": len(self.loras),
             "upscalers": len(self.upscalers),
+            "controlnets": len(self.controlnets),
             "detectors": len(self.detectors),
             "missing_nodes": list(self.missing_nodes),
             "error": self.error,

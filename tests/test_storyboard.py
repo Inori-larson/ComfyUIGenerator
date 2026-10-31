@@ -9,6 +9,7 @@ from comfyui_generator.core.storyboard import (
     apply_character_state,
     apply_story_state,
     build_outline_messages,
+    character_prompt_groups,
     build_script_messages,
     build_tag_messages,
     character_states_for_beats,
@@ -17,6 +18,7 @@ from comfyui_generator.core.storyboard import (
     filter_locked_appearance,
     normalize_character_profiles,
     parse_character_profiles,
+    update_clothing_details,
     present_character_profiles,
     normalize_scripts,
     normalize_tagged,
@@ -490,6 +492,33 @@ def test_per_character_appearance_section():
     assert profiles[1].appearance_locked is True
 
 
+def test_partial_clothing_state_is_carried_to_next_shot():
+    profile = parse_character_profiles(
+        "角色：男主：black hair\n初始服装：男主：white shirt, black trousers")[0]
+    states = {profile.key: {"white shirt", "black trousers"}}
+    details = update_clothing_details(
+        [profile], states, [profile], "open_shirt, shirt_pull, smile", {})
+    assert "open_shirt" in details[profile.key]
+    assert "shirt_pull" in details[profile.key]
+    prompt = apply_character_state(
+        "1boy, standing", [profile], states, [profile], details)
+    assert "open_shirt" in prompt
+    assert "shirt_pull" in prompt
+
+
+def test_shared_clothing_details_do_not_leak_to_male():
+    profiles = parse_character_profiles(
+        "角色：女主：red hair；男主：black hair\n"
+        "初始服装：女主：white shirt；男主：white shirt")
+    girl, boy = profiles
+    states = {girl.key: {"white shirt"}, boy.key: {"white shirt"}}
+    details = update_clothing_details(
+        profiles, states, [girl, boy], "open_shirt, smile",
+        {boy.key: {"open_shirt"}})
+    assert "open_shirt" in details[girl.key]
+    assert "open_shirt" not in details[boy.key]
+
+
 def test_generic_character_states_keep_male_and_female_independent():
     premise = (
         "角色：女主：silver hair；男主：black hair\n"
@@ -597,6 +626,52 @@ def test_generic_character_prompt_locks_appearance_and_present_clothing():
     assert "blue eyes" not in prompt
     assert "black hair" in prompt
     assert "golden eyes" in prompt
+
+
+def test_character_prompt_groups_isolate_gender_tags():
+    profiles = parse_character_profiles(
+        "角色：女主：red hair, long hair, red eyes；"
+        "男主：short black hair, black eyes, average build\n"
+        "初始服装：女主：white shirt, black pantyhose；男主：blue jeans")
+    girl, boy = profiles
+    states = {
+        girl.key: {"white shirt", "black pantyhose"},
+        boy.key: {"blue jeans"},
+    }
+    details = {girl.key: {"torn pantyhose", "bra pull"}, boy.key: set()}
+    groups = character_prompt_groups(
+        profiles, states, details,
+        "1girl, 1boy, red hair, long hair, short black hair, white shirt, "
+        "torn pantyhose, blue jeans, cowgirl, bedroom",
+        [girl, boy])
+    female = next(group for group in groups if group["gender"] == "girl")
+    male = next(group for group in groups if group["gender"] == "boy")
+    assert "red hair" in female["prompt"]
+    assert "torn pantyhose" in female["prompt"]
+    assert "white shirt" in female["prompt"]
+    assert "short black hair" not in female["prompt"]
+    assert "blue jeans" not in female["prompt"]
+    assert "short black hair" in male["prompt"]
+    assert "blue jeans" in male["prompt"]
+    assert "red hair" not in male["prompt"]
+    assert "long hair" not in male["prompt"]
+    assert "white shirt" not in male["prompt"]
+    assert "torn pantyhose" not in male["prompt"]
+
+
+def test_character_prompt_groups_keep_shared_clothing_on_both():
+    profiles = parse_character_profiles(
+        "角色：女主：red hair；男主：black hair\n"
+        "初始服装：女主：white shirt；男主：white shirt")
+    girl, boy = profiles
+    states = {girl.key: {"white shirt"}, boy.key: {"white shirt"}}
+    groups = character_prompt_groups(
+        profiles, states, {girl.key: set(), boy.key: set()},
+        "1girl, 1boy, red hair, black hair, white shirt", [girl, boy])
+    female = next(group for group in groups if group["gender"] == "girl")
+    male = next(group for group in groups if group["gender"] == "boy")
+    assert "white shirt" in female["prompt"]
+    assert "white shirt" in male["prompt"]
 
 
 def test_unknown_clothing_is_removed_on_nude_but_accessories_survive():

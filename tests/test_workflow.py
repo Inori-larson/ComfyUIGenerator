@@ -2,9 +2,13 @@ import pytest
 
 from comfyui_generator.core.workflow import (
     build_workflow,
+    compose_pass_prompts,
     compose_prompts,
     expand_wildcards,
+    is_double_shot,
     lora_chain,
+    split_mask_region,
+    split_prompt_groups,
     stage_for_node,
 )
 
@@ -140,6 +144,14 @@ def test_body_loras_are_selected_per_shot(cfg):
     assert "pussy" in [tag.strip() for tag in compose_prompts(cfg, euphemism)[0].split(",")]
 
 
+def test_second_pass_can_skip_character_lora(cfg):
+    cfg = dict(cfg)
+    shot = {"prompt": "1boy, jeans", "skip_character_loras": True}
+    names = [item["name"] for item in lora_chain(cfg, shot)]
+    assert not any("角色" in name for name in names)
+    assert any("anime_screencap" in name for name in names)
+
+
 def test_action_loras_are_selected_per_shot(cfg):
     cfg = dict(cfg)
     cfg["loras"] = cfg["loras"] + [
@@ -266,6 +278,30 @@ def test_workflow_structure(cfg):
     assert wf["64"]["inputs"]["filename_prefix"] == "anime_story/01_test"
 
 
+def test_workflow_applies_openpose_controlnet(cfg):
+    shot = {
+        "prompt": "1boy, jeans",
+        "pose_image": "anime_story_pose/pose.png",
+        "pose_controlnet": "openpose_sdxl.safetensors",
+        "pose_strength": 0.65,
+        "pose_start": 0.0,
+        "pose_end": 0.8,
+    }
+    positive, negative = compose_prompts(cfg, shot)
+    wf = build_workflow(cfg, shot, positive, negative, 1, False, "pref")
+    assert wf["100"]["class_type"] == "ControlNetLoader"
+    assert wf["100"]["inputs"]["control_net_name"] == "openpose_sdxl.safetensors"
+    assert wf["101"]["class_type"] == "LoadImage"
+    assert wf["101"]["inputs"]["image"] == "anime_story_pose/pose.png"
+    assert wf["102"]["class_type"] == "ControlNetApplyAdvanced"
+    assert wf["102"]["inputs"]["positive"] == ["6", 0]
+    assert wf["102"]["inputs"]["negative"] == ["7", 0]
+    assert wf["102"]["inputs"]["strength"] == 0.65
+    assert wf["102"]["inputs"]["end_percent"] == 0.8
+    assert wf["9"]["inputs"]["positive"] == ["102", 0]
+    assert wf["9"]["inputs"]["negative"] == ["102", 1]
+
+
 def test_workflow_uses_previous_image_for_img2img(cfg):
     shot = {"prompt": "standing", "init_image": "anime_story_chain/prev.png",
             "init_denoise": 0.55}
@@ -312,5 +348,149 @@ def test_stage_mapping():
     assert stage_for_node("9") == "base"
     assert stage_for_node(13) == "hires"
     assert stage_for_node("61") == "detail"
+    assert stage_for_node(90) == "inpaint"
     assert stage_for_node(None) == ""
     assert stage_for_node("64") == ""
+
+
+def test_split_prompt_groups_keep_clothes_and_hair_apart():
+    shot = {
+        "cast": "1girl 1boy",
+        "prompt": (
+            "1girl, 1boy, red_hair, long_hair, white_shirt, torn_pantyhose, "
+            "black_lace_bra, short_black_hair, black_eyes, blue_jeans, "
+            "cowgirl_position, bedroom"),
+        "character_states": {
+            "char_01": "white_shirt, black_pantyhose",
+            "char_02": "blue_jeans",
+        },
+        "clothing_details": {
+            "char_01": "torn_pantyhose, bra_pull",
+            "char_02": "",
+        },
+    }
+    groups = split_prompt_groups(shot)
+    girl = next(group for group in groups if group["gender"] == "girl")
+    boy = next(group for group in groups if group["gender"] == "boy")
+    assert is_double_shot(shot)
+    assert "torn_pantyhose" in girl["prompt"]
+    assert "white_shirt" in girl["prompt"]
+    assert "red_hair" in girl["prompt"]
+    assert "blue_jeans" not in girl["prompt"]
+    assert "blue_jeans" in boy["prompt"]
+    assert "short_black_hair" in boy["prompt"]
+    assert "torn_pantyhose" not in boy["prompt"]
+    assert "white_shirt" not in boy["prompt"]
+    assert "red_hair" not in boy["prompt"]
+    assert "long_hair" not in boy["prompt"]
+
+
+def test_split_prompt_groups_detect_female_key_when_order_is_reversed():
+    shot = {
+        "cast": "1girl 1boy",
+        "prompt": "1girl, 1boy, black dress, red_hair, blue_jeans, "
+                  "short_black_hair",
+        "character_states": {
+            "char_02": "blue_jeans",
+            "char_01": "black dress",
+        },
+    }
+    groups = split_prompt_groups(shot)
+    girl = next(group for group in groups if group["gender"] == "girl")
+    boy = next(group for group in groups if group["gender"] == "boy")
+    assert "black dress" in girl["prompt"]
+    assert "red_hair" in girl["prompt"]
+    assert "blue_jeans" in boy["prompt"]
+    assert "short_black_hair" in boy["prompt"]
+    assert "black dress" not in boy["prompt"]
+
+
+def test_split_mask_region_auto_follows_script_position():
+    assert split_mask_region({"script": "男主在左侧抱着她"})["region"] == "left"
+    assert split_mask_region({"script": "男主在右侧站着"})["region"] == "right"
+    assert split_mask_region({"script": "她骑在男主身上"})["region"] == "bottom"
+    assert split_mask_region({"script": "她跨坐到我腿上"})["region"] == "bottom"
+    assert split_mask_region({"script": "男主从后面抱起她"})["region"] == "center"
+    assert split_mask_region({"script": "男主压在她身上"})["region"] == "center"
+    assert split_mask_region({"script": "男主在她上方"})["region"] == "top"
+    top = split_mask_region({"script": "两人上下叠在一起"})
+    assert top["region"] == "center"
+    assert top["width"] == 0.76
+    assert top["height"] == 0.84
+
+
+def test_split_mask_region_manual_override():
+    shot = {"script": "男主在左侧"}
+    mask = split_mask_region(shot, "top")
+    assert mask["region"] == "top"
+    assert mask["x"] == 0.0
+    assert mask["y"] == 0.0
+    assert mask["width"] == 1.0
+    assert mask["height"] == 0.55
+
+
+def test_compose_prompts_adds_double_negative(cfg):
+    positive, negative = compose_prompts(cfg, {
+        "prompt": "1girl, 1boy, bed", "cast": "1girl 1boy"})
+    assert "1girl" in positive
+    assert "merged bodies" in negative
+
+
+def test_compose_pass_prompts_use_gender_negatives(cfg):
+    girl = {"gender": "girl", "prompt": "1girl, dress"}
+    boy = {"gender": "boy", "prompt": "1boy, jeans"}
+    girl_positive, girl_negative = compose_pass_prompts(
+        cfg, {"cast": "1girl 1boy"}, girl)
+    boy_positive, boy_negative = compose_pass_prompts(
+        cfg, {"cast": "1girl 1boy"}, boy)
+    assert "dress" in girl_positive
+    assert "pantyhose" not in girl_negative
+    assert "jeans" in boy_positive
+    assert "pantyhose" in boy_negative
+    assert "pussy" in boy_negative
+
+
+def test_compose_pass_prompts_keep_character_and_scope_tags(cfg):
+    cfg = dict(cfg)
+    cfg["loras"] = cfg["loras"] + [
+        {"name": "actions\\MissionaryV1.safetensors", "strength": 0.8,
+         "scope": "action", "triggers": ["missionary"]},
+    ]
+    girl = {"gender": "girl",
+            "prompt": "1girl, lying on back, legs up, red hair"}
+    boy = {"gender": "boy", "prompt": "1boy, short black hair, jeans"}
+    girl_positive, _ = compose_pass_prompts(
+        cfg, {"cast": "1girl 1boy", "prompt": "1girl, 1boy"}, girl)
+    boy_positive, _ = compose_pass_prompts(
+        cfg, {"cast": "1girl 1boy", "prompt": "1girl, 1boy"}, boy)
+    assert "yixuan" in girl_positive
+    assert "missionary" in girl_positive
+    assert "yixuan" not in boy_positive
+
+
+def test_compose_pass_prompts_do_not_negate_male_long_hair(cfg):
+    boy = {"gender": "boy", "prompt": "1boy, long hair, jeans"}
+    _, negative = compose_pass_prompts(
+        cfg, {"cast": "1girl 1boy"}, boy)
+    assert "long hair" not in negative
+
+
+def test_workflow_inpaints_second_character_in_masked_region(cfg):
+    shot = {
+        "prompt": "1boy",
+        "init_image": "anime_story_chain/split.png",
+        "init_denoise": 1.0,
+        "inpaint_mask": {"x": 0.48, "y": 0.0, "width": 0.52,
+                         "height": 1.0, "grow": 8},
+    }
+    wf = build_workflow(cfg, shot, "p", "n", 1, False, "pref")
+    assert wf["90"]["class_type"] == "SolidMask"
+    assert wf["90"]["inputs"]["value"] == 0.0
+    assert wf["91"]["class_type"] == "SolidMask"
+    assert wf["91"]["inputs"]["value"] == 1.0
+    assert wf["92"]["class_type"] == "MaskComposite"
+    assert wf["92"]["inputs"]["operation"] == "add"
+    assert wf["71"]["class_type"] == "VAEEncodeForInpaint"
+    assert wf["71"]["inputs"]["mask"] == ["92", 0]
+    assert wf["9"]["inputs"]["latent_image"] == ["71", 0]
+    assert wf["9"]["inputs"]["denoise"] == 1.0

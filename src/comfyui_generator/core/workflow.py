@@ -336,6 +336,13 @@ def _lora_scope(lora: dict[str, Any]) -> str:
     return ""
 
 
+def _is_character_lora(lora: dict[str, Any]) -> bool:
+    if lora.get("character") is True:
+        return True
+    name = "\\" + str(lora.get("name") or "").replace("/", "\\").lower() + "\\"
+    return "\\角色\\" in name or "\\characters\\" in name or "\\character\\" in name
+
+
 def _is_body_lora(lora: dict[str, Any]) -> bool:
     return _lora_scope(lora) == "body"
 
@@ -391,6 +398,263 @@ def _body_trigger_tags(cfg: dict[str, Any], shot: dict[str, Any]) -> str:
     return _scope_trigger_tags(cfg, shot, "body")
 
 
+_DOUBLE_NEGATIVE = (
+    "merged bodies, fused, conjoined, extra arms, extra limbs, extra hands"
+)
+_FEMALE_ONLY_NEGATIVE = (
+    "1boy, male, man, penis, testicles, masculine, broad shoulders"
+)
+_MALE_ONLY_NEGATIVE = (
+    "1girl, female, woman, breasts, pussy, vagina, long hair, dress, skirt, "
+    "bra, panties, pantyhose, stockings, high heels"
+)
+
+
+def _cast_counts(shot: dict[str, Any]) -> tuple[int, int]:
+    text = " ".join((str(shot.get("cast") or ""), str(shot.get("prompt") or "")))
+    girls = sum(int(value) for value in
+                re.findall(r"(\d+)\s*(?:girl|woman|female)s?", text, re.I))
+    boys = sum(int(value) for value in
+               re.findall(r"(\d+)\s*(?:boy|man|male)s?", text, re.I))
+    return girls, boys
+
+
+def is_double_shot(shot: dict[str, Any]) -> bool:
+    girls, boys = _cast_counts(shot)
+    return girls > 0 and boys > 0
+
+
+def _group_key(tag: str) -> str:
+    return re.sub(r"[\s_\-]+", " ", str(tag or "").lower()).strip()
+
+
+_GIRL_TAG_RE = re.compile(
+    r"\b(?:1girl|girl|female|woman|breasts?|nipples?|pussy|vagina|labia|"
+    r"clitoris|uterus|womb|pantyhose|stockings?|thighhighs?|skirt|dress|"
+    r"bra|panties|lingerie|high heels?|makeup|mature female|long hair|"
+    r"(?:red|pink|blonde|white|silver|blue|purple|orange|green|"
+    r"multicolored) hair)\b"
+)
+_BOY_TAG_RE = re.compile(
+    r"\b(?:1boy|boy|male|man|penis|cock|testicles|phallus|beard|muscular|"
+    r"abs|pectorals|short(?:\s+\w+){0,2}\s+hair|adam's apple|sperm|jeans|"
+    r"trousers)\b"
+)
+
+
+def _tag_owner(tag: str, girl_owned: set[str], boy_owned: set[str]) -> str:
+    key = _group_key(tag)
+    if not key:
+        return ""
+    in_girl, in_boy = key in girl_owned, key in boy_owned
+    if in_girl and not in_boy:
+        return "girl"
+    if in_boy and not in_girl:
+        return "boy"
+    if in_girl and in_boy:
+        return "shared"
+    text = " " + key.replace("_", " ").replace("-", " ") + " "
+    if _GIRL_TAG_RE.search(text):
+        return "girl"
+    if _BOY_TAG_RE.search(text):
+        return "boy"
+    return "shared"
+
+
+def _owned_tags(value: Any) -> set[str]:
+    if isinstance(value, (list, tuple, set)):
+        tags = [str(item) for item in value]
+    else:
+        tags = str(value or "").split(",")
+    return {_group_key(tag) for tag in tags if _group_key(tag)}
+
+
+def _character_owned(shot: dict[str, Any]) -> tuple[set[str], set[str]]:
+    states = shot.get("character_states")
+    details = shot.get("clothing_details")
+    states = states if isinstance(states, dict) else {}
+    details = details if isinstance(details, dict) else {}
+    keys = list(states) or list(details)
+    if len(keys) < 2:
+        return set(), set()
+    values = {
+        key: (_owned_tags(states.get(key)) if key in states
+              else _owned_tags(details.get(key)))
+        for key in keys
+    }
+    scores: dict[str, tuple[int, int]] = {}
+    for key, tags in values.items():
+        text = " " + " ".join(sorted(tags)).replace("-", " ") + " "
+        scores[key] = (len(_GIRL_TAG_RE.findall(text)),
+                       len(_BOY_TAG_RE.findall(text)))
+    girl_key = max(keys, key=lambda key: (scores[key][0] - scores[key][1],
+                                          scores[key][0]))
+    if scores[girl_key][0] == 0:
+        girl_key = keys[0]
+    remaining = [key for key in keys if key != girl_key]
+    boy_key = max(remaining, key=lambda key: (scores[key][1] - scores[key][0],
+                                              scores[key][1]))
+    if scores[boy_key][1] == 0 and keys[1] in remaining:
+        boy_key = keys[1]
+    return values[girl_key], values[boy_key]
+
+
+def split_prompt_groups(shot: dict[str, Any]) -> list[dict[str, str]]:
+    """Fallback split for old projects without generated per-character prompts."""
+    girls, boys = _cast_counts(shot)
+    if not (girls and boys):
+        return []
+    tags = [tag.strip() for tag in str(shot.get("prompt") or "").split(",")
+            if tag.strip() and not _cast_tag(tag)]
+    girl_owned, boy_owned = _character_owned(shot)
+    girl_tags: list[str] = ["1girl"]
+    boy_tags: list[str] = ["1boy"]
+    for tag in tags:
+        owner = _tag_owner(tag, girl_owned, boy_owned)
+        if owner in ("girl", "shared"):
+            girl_tags.append(tag)
+        if owner in ("boy", "shared"):
+            boy_tags.append(tag)
+    return [
+        {"gender": "girl", "name": "main", "prompt": join_tags(*girl_tags)},
+        {"gender": "boy", "name": "male", "prompt": join_tags(*boy_tags)},
+    ]
+
+
+def _cast_tag(tag: str) -> bool:
+    return bool(re.match(
+        r"^(?:\d+\s*(?:girl|boy|other)s?|1girl|1boy|solo|multiple girls|"
+        r"multiple boys)$", str(tag).strip(), re.I))
+
+
+def prompt_groups(shot: dict[str, Any]) -> list[dict[str, str]]:
+    groups = shot.get("prompt_groups")
+    if isinstance(groups, list) and groups:
+        valid = [group for group in groups
+                 if isinstance(group, dict) and str(group.get("prompt") or "").strip()]
+        if valid:
+            return valid
+    return split_prompt_groups(shot)
+
+
+def _gender_negative(gender: str, text: str) -> str:
+    if gender == "boy":
+        tags = [tag.strip() for tag in _MALE_ONLY_NEGATIVE.split(",") if tag.strip()]
+        if _contains_word(text, "long hair"):
+            tags = [tag for tag in tags if tag.lower() != "long hair"]
+    else:
+        tags = [tag.strip() for tag in _FEMALE_ONLY_NEGATIVE.split(",") if tag.strip()]
+        if _contains_word(text, "penis"):
+            tags = [tag for tag in tags if tag.lower() != "penis"]
+    return ", ".join(tags)
+
+
+_SPLIT_REGION_BOXES: dict[str, tuple[float, float, float, float]] = {
+    "right": (0.45, 0.0, 0.55, 1.0),
+    "left": (0.0, 0.0, 0.55, 1.0),
+    "top": (0.0, 0.0, 1.0, 0.55),
+    "bottom": (0.0, 0.45, 1.0, 0.55),
+    "center": (0.12, 0.08, 0.76, 0.84),
+}
+
+
+def _auto_split_region(shot: dict[str, Any]) -> str:
+    text = " ".join(str(shot.get(key) or "") for key in
+                    ("script", "outline", "prompt", "scene")).lower()
+    if re.search(
+            r"(?:boy|male|man|1boy|男主|男性|男孩|他).{0,20}"
+            r"(?:on the left|left side|左侧|左边|在左)|"
+            r"(?:左侧|左边|在左).{0,20}(?:boy|male|man|男主|男性)", text):
+        return "left"
+    if re.search(
+            r"(?:boy|male|man|1boy|男主|男性|男孩|他).{0,20}"
+            r"(?:on the right|right side|右侧|右边|在右)|"
+            r"(?:右侧|右边|在右).{0,20}(?:boy|male|man|男主|男性)", text):
+        return "right"
+    if re.search(
+            r"cowgirl|girl on top|woman on top|straddl|riding|骑乘|骑在|"
+            r"跨坐|坐在.{0,6}(?:腿|身)上|坐上来|"
+            r"女上男下|女主在上|女上位", text):
+        return "bottom"
+    if re.search(
+            r"\bstacked\b|on top of|lying on|pressing|overlap|\b69\b|"
+            r"from behind|from the back|贴身|叠在|叠在一起|上下叠|叠着|"
+            r"压着|压在|趴在|趴着|抱在|抱着|拥抱|背后|身后|后面|"
+            r"抱起|抱起来|抱起双腿|抱着腿|悬空|托起|站立抱起|"
+            r"在.{0,4}身上|"
+            r"hugging|cuddling|embrace|spooning", text):
+        return "center"
+    if re.search(
+            r"boy on top|male on top|man on top|on top of|lying on top|"
+            r"上方|上面|上边|男上女下|男上位|男主在上|男性在上", text):
+        return "top"
+    if re.search(
+            r"underneath|under (?:her|him)|boy under|male under|"
+            r"下方|下面|下边|底下|男下女上|男主在下|男性在下", text):
+        return "bottom"
+    return "right"
+
+
+def split_mask_region(shot: dict[str, Any], region: str = "auto") -> dict[str, Any]:
+    region = str(region or "auto").strip().lower()
+    if region not in _SPLIT_REGION_BOXES:
+        region = _auto_split_region(shot)
+    x, y, width, height = _SPLIT_REGION_BOXES[region]
+    return {
+        "region": region,
+        "x": x, "y": y, "width": width, "height": height, "grow": 8,
+    }
+
+
+def compose_pass_prompts(cfg: dict[str, Any], shot: dict[str, Any],
+                         group: dict[str, str]) -> tuple[str, str]:
+    style = cfg.get("style") or {}
+    character = cfg.get("character") or {}
+    body = cfg.get("body") or {}
+    action = cfg.get("action") or {}
+    clothing = cfg.get("clothing") or {}
+    text = str(group.get("prompt") or "").strip()
+    gender = str(group.get("gender") or "")
+    pass_shot = dict(shot)
+    pass_shot["prompt"] = text
+    chain = lora_chain(cfg, pass_shot)
+    action_tags = ""
+    clothing_tags = ""
+    body_tags = ""
+    if any(_is_action_lora(lora) for lora in chain):
+        action_tags = _scope_trigger_tags(cfg, pass_shot, "action")
+    elif gender == "girl":
+        action_tags = shot.get("action_tags", action.get("tags", ""))
+    if any(_is_clothing_lora(lora) for lora in chain):
+        clothing_tags = _scope_trigger_tags(cfg, pass_shot, "clothing")
+    elif gender == "girl":
+        clothing_tags = shot.get("clothing_tags", clothing.get("tags", ""))
+    if any(_is_body_lora(lora) for lora in chain):
+        body_tags = _body_trigger_tags(cfg, pass_shot)
+    elif gender == "girl":
+        body_tags = shot.get("body_tags", body.get("tags", ""))
+    character_tags = ""
+    if gender == "girl":
+        character_tags = shot.get("character_tags", character.get("tags", ""))
+    positive = join_tags(
+        shot.get("style_positive", style.get("positive", "")),
+        shot.get("style_lora_tags", style.get("lora_tags", "")),
+        character_tags,
+        action_tags,
+        clothing_tags,
+        body_tags,
+        text,
+        shot.get("style_suffix", style.get("suffix", "")),
+    )
+    negative = join_tags(
+        shot.get("style_negative", style.get("negative", "")),
+        shot.get("negative", ""),
+        _DOUBLE_NEGATIVE,
+        _gender_negative(gender, text),
+    )
+    return positive, negative
+
+
 def compose_prompts(cfg: dict[str, Any], shot: dict[str, Any]) -> tuple[str, str]:
     style = cfg.get("style") or {}
     character = cfg.get("character") or {}
@@ -400,6 +664,8 @@ def compose_prompts(cfg: dict[str, Any], shot: dict[str, Any]) -> tuple[str, str
     prompt = shot.get("prompt", "")
     negative = join_tags(shot.get("style_negative", style.get("negative", "")),
                          shot.get("negative", ""))
+    if is_double_shot(shot):
+        negative = join_tags(negative, _DOUBLE_NEGATIVE)
     chain = lora_chain(cfg)
     if any(_is_action_lora(lora) for lora in chain):
         action_source = _scope_trigger_tags(cfg, shot, "action")
@@ -437,6 +703,8 @@ def lora_chain(cfg: dict[str, Any], shot: dict[str, Any] | None = None) -> list[
     prompt = shot.get("prompt", "")
     filtered: list[dict[str, Any]] = []
     for lora in result:
+        if shot.get("skip_character_loras") and _is_character_lora(lora):
+            continue
         scope = _lora_scope(lora)
         if scope and not _lora_relevant(lora, prompt, scope):
             continue
@@ -504,17 +772,59 @@ def build_workflow(cfg: dict[str, Any], shot: dict[str, Any], positive: str, neg
     negative = expand_wildcards(negative, seed, wildcards)
     wf["6"] = {"class_type": "CLIPTextEncode", "inputs": {"clip": clip, "text": positive}}
     wf["7"] = {"class_type": "CLIPTextEncode", "inputs": {"clip": clip, "text": negative}}
+    positive_ref = ["6", 0]
+    negative_ref = ["7", 0]
+    pose_image = str(shot.get("pose_image") or "").strip()
+    pose_controlnet = str(shot.get("pose_controlnet") or "").strip()
+    if pose_image and pose_controlnet:
+        wf["100"] = {"class_type": "ControlNetLoader",
+                     "inputs": {"control_net_name": pose_controlnet}}
+        wf["101"] = {"class_type": "LoadImage", "inputs": {"image": pose_image}}
+        wf["102"] = {"class_type": "ControlNetApplyAdvanced", "inputs": {
+            "positive": positive_ref, "negative": negative_ref,
+            "control_net": ["100", 0], "image": ["101", 0],
+            "strength": float(shot.get("pose_strength", 0.7)),
+            "start_percent": float(shot.get("pose_start", 0.0)),
+            "end_percent": float(shot.get("pose_end", 0.9)),
+        }}
+        positive_ref = ["102", 0]
+        negative_ref = ["102", 1]
     init_image = str(shot.get("init_image") or "").strip()
+    inpaint_mask = shot.get("inpaint_mask")
     if init_image:
+        width = int(settings.get("width", 1024))
+        height = int(settings.get("height", 1344))
         wf["70"] = {"class_type": "LoadImage", "inputs": {"image": init_image}}
         wf["72"] = {"class_type": "ImageScale", "inputs": {
             "image": ["70", 0],
             "upscale_method": "lanczos",
-            "width": int(settings.get("width", 1024)),
-            "height": int(settings.get("height", 1344)),
+            "width": width,
+            "height": height,
             "crop": "disabled"}}
-        wf["71"] = {"class_type": "VAEEncode", "inputs": {
-            "pixels": ["72", 0], "vae": vae}}
+        if isinstance(inpaint_mask, dict):
+            x_ratio = max(0.0, min(1.0, float(inpaint_mask.get("x", 0.5))))
+            y_ratio = max(0.0, min(1.0, float(inpaint_mask.get("y", 0.0))))
+            w_ratio = max(0.01, min(1.0 - x_ratio,
+                                     float(inpaint_mask.get("width", 0.5))))
+            h_ratio = max(0.01, min(1.0 - y_ratio,
+                                     float(inpaint_mask.get("height", 1.0))))
+            mask_x = int(round(width * x_ratio))
+            mask_y = int(round(height * y_ratio))
+            mask_w = max(1, int(round(width * w_ratio)))
+            mask_h = max(1, int(round(height * h_ratio)))
+            wf["90"] = {"class_type": "SolidMask", "inputs": {
+                "value": 0.0, "width": width, "height": height}}
+            wf["91"] = {"class_type": "SolidMask", "inputs": {
+                "value": 1.0, "width": mask_w, "height": mask_h}}
+            wf["92"] = {"class_type": "MaskComposite", "inputs": {
+                "destination": ["90", 0], "source": ["91", 0],
+                "x": mask_x, "y": mask_y, "operation": "add"}}
+            wf["71"] = {"class_type": "VAEEncodeForInpaint", "inputs": {
+                "pixels": ["72", 0], "vae": vae, "mask": ["92", 0],
+                "grow_mask_by": int(inpaint_mask.get("grow", 8))}}
+        else:
+            wf["71"] = {"class_type": "VAEEncode", "inputs": {
+                "pixels": ["72", 0], "vae": vae}}
         latent = ["71", 0]
     else:
         wf["8"] = {"class_type": "EmptyLatentImage", "inputs": {
@@ -522,9 +832,10 @@ def build_workflow(cfg: dict[str, Any], shot: dict[str, Any], positive: str, neg
             "height": settings.get("height", 1344),
             "batch_size": 1}}
         latent = ["8", 0]
-    add_sampler(wf, cfg, "9", model, ["6", 0], ["7", 0], latent, seed)
+    add_sampler(wf, cfg, "9", model, positive_ref, negative_ref, latent, seed)
     if init_image:
-        wf["9"]["inputs"]["denoise"] = float(shot.get("init_denoise", 0.45))
+        default_denoise = 1.0 if isinstance(inpaint_mask, dict) else 0.45
+        wf["9"]["inputs"]["denoise"] = float(shot.get("init_denoise", default_denoise))
     wf["10"] = {"class_type": "VAEDecode", "inputs": {"samples": ["9", 0], "vae": vae}}
 
     final = ["10", 0]
@@ -543,11 +854,11 @@ def build_workflow(cfg: dict[str, Any], shot: dict[str, Any], positive: str, neg
                 "image": ["10", 0], "upscale_method": "lanczos",
                 "scale_by": hires_cfg.get("scale", 1.5)}}
         wf["12"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["11", 0], "vae": vae}}
-        add_sampler(wf, cfg, "13", model, ["6", 0], ["7", 0], ["12", 0], seed, True)
+        add_sampler(wf, cfg, "13", model, positive_ref, negative_ref, ["12", 0], seed, True)
         wf["14"] = {"class_type": "VAEDecode", "inputs": {"samples": ["13", 0], "vae": vae}}
         final = ["14", 0]
 
-    final = add_detailers(wf, cfg, final, model, clip, vae, ["6", 0], ["7", 0], seed)
+    final = add_detailers(wf, cfg, final, model, clip, vae, positive_ref, negative_ref, seed)
     wf["64"] = {"class_type": "SaveImage", "inputs": {"images": final, "filename_prefix": prefix}}
     return wf
 
@@ -561,6 +872,10 @@ def stage_for_node(node_id: str | int | None) -> str:
         return ""
     if nid == 9:
         return "base"
+    if nid in (90, 91, 92):
+        return "inpaint"
+    if nid in (100, 101, 102):
+        return "pose"
     if nid == 13:
         return "hires"
     if 60 <= nid < 64:
