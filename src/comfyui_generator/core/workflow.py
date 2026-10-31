@@ -11,6 +11,10 @@ import random
 import re
 from typing import Any
 
+from comfyui_generator.core.continuity import (
+    continuity_negative, continuity_positive, strip_shot_grammar,
+)
+from comfyui_generator.core.style_profile import apply_style_profile
 
 
 _BODY_TRIGGER_GROUPS = (
@@ -608,13 +612,21 @@ def split_mask_region(shot: dict[str, Any], region: str = "auto") -> dict[str, A
 
 def compose_pass_prompts(cfg: dict[str, Any], shot: dict[str, Any],
                          group: dict[str, str]) -> tuple[str, str]:
-    style = cfg.get("style") or {}
+    style = apply_style_profile(cfg.get("style") or {},
+                                cfg.get("style_profile") or {})
     character = cfg.get("character") or {}
     body = cfg.get("body") or {}
     action = cfg.get("action") or {}
     clothing = cfg.get("clothing") or {}
     text = str(group.get("prompt") or "").strip()
+    render_text = (strip_shot_grammar(text)
+                   if shot.get("shot_size") or shot.get("camera_angle") else text)
     gender = str(group.get("gender") or "")
+    pass_continuity = cfg.get("continuity") or {}
+    if gender == "boy":
+        pass_continuity = dict(pass_continuity)
+        pass_continuity["character"] = ""
+        pass_continuity["state"] = ""
     pass_shot = dict(shot)
     pass_shot["prompt"] = text
     chain = lora_chain(cfg, pass_shot)
@@ -643,7 +655,8 @@ def compose_pass_prompts(cfg: dict[str, Any], shot: dict[str, Any],
         action_tags,
         clothing_tags,
         body_tags,
-        text,
+        continuity_positive(pass_continuity, shot),
+        render_text,
         shot.get("style_suffix", style.get("suffix", "")),
     )
     negative = join_tags(
@@ -651,19 +664,24 @@ def compose_pass_prompts(cfg: dict[str, Any], shot: dict[str, Any],
         shot.get("negative", ""),
         _DOUBLE_NEGATIVE,
         _gender_negative(gender, text),
+        continuity_negative(cfg.get("continuity")),
     )
     return positive, negative
 
 
 def compose_prompts(cfg: dict[str, Any], shot: dict[str, Any]) -> tuple[str, str]:
-    style = cfg.get("style") or {}
+    style = apply_style_profile(cfg.get("style") or {},
+                                cfg.get("style_profile") or {})
     character = cfg.get("character") or {}
     body = cfg.get("body") or {}
     action = cfg.get("action") or {}
     clothing = cfg.get("clothing") or {}
     prompt = shot.get("prompt", "")
+    render_prompt = (strip_shot_grammar(prompt)
+                     if shot.get("shot_size") or shot.get("camera_angle") else prompt)
     negative = join_tags(shot.get("style_negative", style.get("negative", "")),
-                         shot.get("negative", ""))
+                         shot.get("negative", ""),
+                         continuity_negative(cfg.get("continuity")))
     if is_double_shot(shot):
         negative = join_tags(negative, _DOUBLE_NEGATIVE)
     chain = lora_chain(cfg)
@@ -686,7 +704,8 @@ def compose_prompts(cfg: dict[str, Any], shot: dict[str, Any]) -> tuple[str, str
         action_source,
         clothing_source,
         body_source,
-        prompt,
+        continuity_positive(cfg.get("continuity"), shot),
+        render_prompt,
         shot.get("style_suffix", style.get("suffix", "")),
     )
     return positive, negative

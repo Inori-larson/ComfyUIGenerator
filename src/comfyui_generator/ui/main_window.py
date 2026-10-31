@@ -28,6 +28,10 @@ from comfyui_generator.core.comfy import ComfyClient
 from comfyui_generator.core.config import (
     AppConfig, load_config, load_template, resolve_template, save_config,
 )
+from comfyui_generator.core.continuity import (
+    GRAMMAR_STYLE_CHOICES, auto_shot_grammar, character_sheet_prompt,
+    normalize_continuity,
+)
 from comfyui_generator.core.detailers import build_detailer_choices, filter_detector_models, local_detectors
 from comfyui_generator.core.jobs import Task, build_tasks
 from comfyui_generator.core.lora_info import is_style_lora, lora_tag_info
@@ -44,6 +48,10 @@ from comfyui_generator.core.project import (
 )
 from comfyui_generator.core.services import ComfyService
 from comfyui_generator.core.single import FRAMING_TAGS, SingleOptions
+from comfyui_generator.core.style_profile import (
+    STYLE_PROFILE_CHOICES, apply_style_profile, get_style_profile,
+    normalize_style_profile, style_profile_apply_settings,
+)
 from comfyui_generator.core.storyboard import (
     StoryboardOptions, extract_premise_beats, filter_locked_appearance,
     premise_from_json, shots_from_json, slugify,
@@ -156,6 +164,7 @@ class MainWindow(QMainWindow):
         self.assets_worker: AssetsWorker | None = None
         self.prompt_worker: PromptWorker | None = None
         self.render_worker: RenderWorker | None = None
+        self.reference_sheet_worker: RenderWorker | None = None
         self.expansion_worker: ExpansionWorker | None = None
         self._pending_render: tuple[dict[str, Any], list[dict[str, Any]], int] | None = None
         self.tasks_by_id: dict[str, Any] = {}
@@ -226,6 +235,7 @@ class MainWindow(QMainWindow):
         self._single_prompt_en = ""
         self._single_prompt_zh = ""
         self._restoring_state = False
+        self._loading_style_profile = True
         self._pose_custom = load_pose_presets(
             self.cfg.root / "pose_presets.json")
 
@@ -234,6 +244,7 @@ class MainWindow(QMainWindow):
         self._init_defaults()
         self._setup_auto_translate()
         self._restore_ui_state()
+        self._loading_style_profile = False
         self._update_partial_button()
         self._state_timer = QTimer(self)
         self._state_timer.setInterval(15000)
@@ -509,12 +520,16 @@ class MainWindow(QMainWindow):
         self.btn_continue_partial.clicked.connect(self.continue_partial_story)
         form_layout.addWidget(self.btn_continue_partial)
 
-        self.shot_table = QTableWidget(0, 4)
-        self.shot_table.setHorizontalHeaderLabels(["锁", "镜号", "名称", "画面提示词（中文，可编辑）"])
+        self.shot_table = QTableWidget(0, 6)
+        self.shot_table.setHorizontalHeaderLabels([
+            "锁", "镜号", "名称", "画面提示词（中文，可编辑）", "景别", "机位",
+        ])
         self.shot_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.shot_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.shot_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.shot_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.shot_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.shot_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
         self.shot_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.shot_table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked
                                         | QAbstractItemView.EditTrigger.EditKeyPressed)
@@ -625,6 +640,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._build_hires_tab(), "高清")
         self.tabs.addTab(self._build_detailer_tab(), "重绘")
         self.tabs.addTab(self._build_prompt_tab(), "提示词")
+        self.tabs.addTab(self._build_continuity_tab(), "连贯")
         self.tabs.addTab(self._build_style_ref_tab(), "参考图")
         layout.addWidget(self.tabs)
         layout.addStretch(1)
@@ -708,10 +724,10 @@ class MainWindow(QMainWindow):
         row_tags.addWidget(self.btn_reference)
         row_tags.addWidget(self.btn_clear_tags)
         layout.addLayout(row_tags)
-        layout.addWidget(_label("角色参考图（IPAdapter，可选）"))
+        layout.addWidget(_label("角色参考图 / 参考表（IPAdapter，可选）"))
         row = QHBoxLayout()
         self.char_ref = QLineEdit()
-        self.char_ref.setPlaceholderText("本地图片路径")
+        self.char_ref.setPlaceholderText("单张角色图，或正面/侧面/背面多视图参考表")
         row.addWidget(self.char_ref, 1)
         btn = QPushButton("浏览")
         btn.clicked.connect(self.pick_char_ref)
@@ -726,6 +742,17 @@ class MainWindow(QMainWindow):
         row2.addWidget(self.char_ref_weight)
         row2.addStretch(1)
         layout.addLayout(row2)
+        ref_hint = _label(
+            "可放单张角色图，也可放多视图参考表；填写后自动用于所有镜头。"
+            "参考表建议固定服装、中性背景、正面/侧面/背面。", "Hint")
+        ref_hint.setWordWrap(True)
+        layout.addWidget(ref_hint)
+        self.btn_character_sheet = QPushButton("生成多视图角色参考表")
+        self.btn_character_sheet.setToolTip(
+            "按当前角色标签、外貌和初始服装生成正面/侧面/背面参考表，"
+            "完成后自动填入参考图")
+        self.btn_character_sheet.clicked.connect(self.generate_character_sheet)
+        layout.addWidget(self.btn_character_sheet)
         layout.addStretch(1)
         return page
 
@@ -733,6 +760,31 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setSpacing(8)
+        layout.addWidget(_label("视觉风格方案（可选）"))
+        self.style_profile_combo = SearchComboBox()
+        self.style_profile_combo.setItems(STYLE_PROFILE_CHOICES)
+        layout.addWidget(self.style_profile_combo)
+        self.style_profile_hint = _label("", "Hint")
+        self.style_profile_hint.setWordWrap(True)
+        layout.addWidget(self.style_profile_hint)
+        row_profile = QHBoxLayout()
+        self.style_profile_prompt = QCheckBox("提示词")
+        self.style_profile_prompt.setChecked(True)
+        self.style_profile_prompt.setToolTip("把风格方案的正向风格词加入出图")
+        self.style_profile_negative = QCheckBox("负面词")
+        self.style_profile_negative.setChecked(True)
+        self.style_profile_negative.setToolTip("把风格方案的冲突词加入负面提示词")
+        self.style_profile_suffix = QCheckBox("后缀")
+        self.style_profile_suffix.setChecked(True)
+        self.style_profile_suffix.setToolTip("把风格方案的构图/质量后缀加入正向提示词")
+        for box in (self.style_profile_prompt, self.style_profile_negative,
+                    self.style_profile_suffix):
+            row_profile.addWidget(box)
+        row_profile.addStretch(1)
+        layout.addLayout(row_profile)
+        self.style_profile_combo.currentIndexChanged.connect(
+            self._on_style_profile_changed)
+        self._on_style_profile_changed()
         layout.addWidget(_label("风格 LoRA（可多选）"))
         self.style_lora_table = self._make_lora_table()
         self.style_lora_table.itemChanged.connect(self._on_lora_item_changed)
@@ -1092,6 +1144,56 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
         return page
 
+    def _build_continuity_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setSpacing(8)
+        layout.addWidget(_label("角色锚点（补充，英文标签）"))
+        self.continuity_character = QPlainTextEdit()
+        self.continuity_character.setFixedHeight(72)
+        self.continuity_character.setPlaceholderText(
+            "silver hair, red eyes, tall, large breasts, tattoo；每镜追加，不替代角色标签")
+        layout.addWidget(self.continuity_character)
+        layout.addWidget(_label("场景锚点（补充，英文标签）"))
+        self.continuity_scene = QPlainTextEdit()
+        self.continuity_scene.setFixedHeight(58)
+        self.continuity_scene.setPlaceholderText(
+            "bedroom, night, warm lamp, rain outside；换场景前请手动更新")
+        layout.addWidget(self.continuity_scene)
+        layout.addWidget(_label("连续性台账（英文标签）"))
+        self.continuity_state = QPlainTextEdit()
+        self.continuity_state.setFixedHeight(86)
+        self.continuity_state.setPlaceholderText(
+            "torn stockings, sweat, cum on thigh, exhausted；这些会追加到每镜")
+        layout.addWidget(self.continuity_state)
+        layout.addWidget(_label("禁止变化 / 额外负面词（英文标签）"))
+        self.continuity_negative = QPlainTextEdit()
+        self.continuity_negative.setFixedHeight(58)
+        self.continuity_negative.setPlaceholderText(
+            "different hairstyle, different location, extra characters")
+        layout.addWidget(self.continuity_negative)
+        layout.addWidget(_label("镜头语法", "Section"))
+        self.continuity_auto = QCheckBox("新分镜自动分配景别和机位")
+        self.continuity_auto.setChecked(True)
+        layout.addWidget(self.continuity_auto)
+        row = QHBoxLayout()
+        row.addWidget(_label("语法风格", "Hint"))
+        self.continuity_style = SearchComboBox()
+        self.continuity_style.setItems(GRAMMAR_STYLE_CHOICES)
+        row.addWidget(self.continuity_style, 1)
+        layout.addLayout(row)
+        self.btn_regenerate_grammar = QPushButton("按当前分镜重新分配镜头语法")
+        self.btn_regenerate_grammar.clicked.connect(self.regenerate_shot_grammar)
+        layout.addWidget(self.btn_regenerate_grammar)
+        hint = _label(
+            "连续性标签会追加到每镜和双人分步，不会覆盖角色/动作/服装状态机。"
+            "分镜表新增“景别 / 机位”两列，可直接编辑；角色参考表在“角色”页设置。",
+            "Hint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        layout.addStretch(1)
+        return page
+
     def _build_style_ref_tab(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -1198,6 +1300,8 @@ class MainWindow(QMainWindow):
         self.split_region.selectValue(str(split.get(
             "region", getattr(self.cfg.generation, "split_region", "auto"))))
         self._set_pose_settings(settings.get("pose") or {})
+        self._set_style_profile_settings(template.get("style_profile") or {})
+        self._set_continuity_settings(template.get("continuity") or {})
         wildcard_dir = (self.cfg.generation.wildcards or {}).get("dir", "")
         if not wildcard_dir and self.cfg.comfy.base_dir:
             wildcard_dir = str(Path(self.cfg.comfy.base_dir) / "user" / "default" / "wildcards")
@@ -2208,8 +2312,184 @@ class MainWindow(QMainWindow):
         self.story_premise.setPlainText(str(fields.get("plot", "")))
         self.story_extra.setPlainText(str(fields.get("extra", "")))
 
+    def _style_profile_settings(self) -> dict[str, Any]:
+        return normalize_style_profile({
+            "id": self.style_profile_combo.currentValue(),
+            "use_prompt": self.style_profile_prompt.isChecked(),
+            "use_negative": self.style_profile_negative.isChecked(),
+            "use_suffix": self.style_profile_suffix.isChecked(),
+        })
+
+    def _set_style_profile_settings(self, value: Any) -> None:
+        profile = normalize_style_profile(value)
+        previous = self._loading_style_profile
+        self._loading_style_profile = True
+        try:
+            self.style_profile_combo.selectValue(profile["id"])
+            self.style_profile_prompt.setChecked(profile["use_prompt"])
+            self.style_profile_negative.setChecked(profile["use_negative"])
+            self.style_profile_suffix.setChecked(profile["use_suffix"])
+            self._on_style_profile_changed()
+        finally:
+            self._loading_style_profile = previous
+
+    def _on_style_profile_changed(self, _index: int | None = None) -> None:
+        profile_id = str(self.style_profile_combo.currentValue())
+        profile = get_style_profile(profile_id)
+        active = profile_id != "none"
+        for box in (self.style_profile_prompt, self.style_profile_negative,
+                    self.style_profile_suffix):
+            box.setEnabled(active)
+        hint = str(profile.get("description") or "")
+        if profile.get("recommended"):
+            hint += "\n推荐：%s" % profile["recommended"]
+        self.style_profile_hint.setText(hint)
+        if not self._loading_style_profile and not self._restoring_state:
+            self._apply_style_profile_preset(profile_id)
+
+    @staticmethod
+    def _match_combo_value(combo: SearchComboBox, hints: list[str]) -> str:
+        values: list[str] = []
+        for index in range(combo.count()):
+            data = combo.itemData(index)
+            values.append(str(data if data is not None else combo.itemText(index)))
+        for hint in hints:
+            needle = str(hint).strip().lower()
+            if not needle:
+                continue
+            for value in values:
+                if needle in value.lower():
+                    combo.selectValue(value)
+                    return value
+        return ""
+
+    def _match_style_lora(self, hints: list[str]) -> str:
+        candidates: list[str] = []
+        for row in range(self.style_lora_table.rowCount()):
+            item = self.style_lora_table.item(row, 0)
+            if item:
+                candidates.append(str(item.data(Qt.ItemDataRole.UserRole) or ""))
+        candidates.extend(str(name) for name in self.assets.loras)
+        base = self.cfg.comfy.base_dir.strip()
+        if base:
+            candidates.extend(self._scan_model_dir(
+                str(Path(base) / "models" / "loras"),
+                {".safetensors", ".ckpt", ".pt"}))
+        seen: set[str] = set()
+        unique: list[str] = []
+        for name in candidates:
+            key = self._lora_key(name)
+            if name and key not in seen:
+                seen.add(key)
+                unique.append(name)
+        for hint in hints:
+            needle = str(hint).strip().lower()
+            if not needle:
+                continue
+            for name in unique:
+                if needle in name.lower():
+                    return name
+        return ""
+
+    def _apply_style_profile_preset(self, profile_id: str) -> None:
+        settings = style_profile_apply_settings({"id": profile_id})
+        label = str(get_style_profile(profile_id).get("label") or profile_id)
+        applied: list[str] = []
+        missing: list[str] = []
+        for box in (self.style_profile_prompt, self.style_profile_negative,
+                    self.style_profile_suffix):
+            if profile_id != "none":
+                box.setChecked(True)
+
+        checkpoint = self._match_combo_value(
+            self.ckpt_combo, list(settings.get("checkpoint_hints") or []))
+        if checkpoint:
+            applied.append("底模 %s" % checkpoint)
+        elif settings.get("checkpoint_hints"):
+            missing.append("底模")
+
+        upscaler = self._match_combo_value(
+            self.upscaler_combo, list(settings.get("upscaler_hints") or []))
+        if upscaler:
+            applied.append("放大 %s" % upscaler)
+        elif settings.get("upscaler_hints"):
+            missing.append("放大模型")
+
+        if "width" in settings and "height" in settings:
+            self.width_spin.setValue(int(settings["width"]))
+            self.height_spin.setValue(int(settings["height"]))
+            index = self.res_combo.findData(
+                (self.width_spin.value(), self.height_spin.value()))
+            if index >= 0:
+                self.res_combo.setCurrentIndex(index)
+        for key, spin in (("steps", self.steps_spin), ("cfg", self.cfg_spin)):
+            if key in settings:
+                spin.setValue(float(settings[key]) if key == "cfg"
+                              else int(settings[key]))
+        if settings.get("sampler"):
+            self._ensure_combo_value(self.sampler_combo, str(settings["sampler"]))
+        if settings.get("scheduler"):
+            self._ensure_combo_value(self.scheduler_combo, str(settings["scheduler"]))
+
+        hires = settings.get("hires") or {}
+        if hires:
+            self.hires_check.setChecked(bool(hires.get("enabled", True)))
+            if "scale" in hires:
+                self.hires_scale.setValue(float(hires["scale"]))
+            if "denoise" in hires:
+                self.hires_denoise.setValue(float(hires["denoise"]))
+            if "steps" in hires:
+                self.hires_steps.setValue(int(hires["steps"]))
+
+        hints = list(settings.get("style_lora_hints") or [])
+        style_lora = self._match_style_lora(hints)
+        strength = float(settings.get("style_lora_strength", 0.5))
+        self._apply_table_loras(
+            self.style_lora_table, {style_lora: strength} if style_lora else {})
+        if style_lora:
+            applied.append("风格 LoRA %s (%.2f)" % (style_lora, strength))
+        elif hints:
+            missing.append("风格 LoRA")
+
+        summary = "已自动应用：%s" % (" / ".join(applied) or "无可用推荐项")
+        if missing:
+            summary += "\n缺失，已保留当前设置：%s" % " / ".join(missing)
+        self.style_profile_hint.setText(
+            self.style_profile_hint.text() + "\n" + summary)
+        self.append_log("已切换风格方案「%s」：%s" % (label, summary.replace("\n", "；")))
+        self.statusBar().showMessage("已应用风格方案：%s" % label)
+
+    def _continuity_settings(self) -> dict[str, Any]:
+        return normalize_continuity({
+            "character": self.continuity_character.toPlainText(),
+            "scene": self.continuity_scene.toPlainText(),
+            "state": self.continuity_state.toPlainText(),
+            "negative": self.continuity_negative.toPlainText(),
+            "grammar": {
+                "auto": self.continuity_auto.isChecked(),
+                "style": self.continuity_style.currentValue(),
+            },
+        })
+
+    def _set_continuity_settings(self, value: Any) -> None:
+        data = normalize_continuity(value)
+        for field, text in (
+                (self.continuity_character, data["character"]),
+                (self.continuity_scene, data["scene"]),
+                (self.continuity_state, data["state"]),
+                (self.continuity_negative, data["negative"])):
+            field.blockSignals(True)
+            try:
+                field.setPlainText(text)
+            finally:
+                field.blockSignals(False)
+        self.continuity_auto.setChecked(data["grammar"]["auto"])
+        self.continuity_style.selectValue(data["grammar"]["style"])
+
     def _style_positive(self) -> str:
-        return (self.template.get("style") or {}).get("positive", "")
+        style = apply_style_profile(
+            self.template.get("style") or {}, self._style_profile_settings())
+        return str(style.get("positive", ""))
 
     def _character_tags(self) -> str:
         text = self.tags_edit.toPlainText().strip()
@@ -2556,6 +2836,8 @@ class MainWindow(QMainWindow):
             data["character"].pop("ipadapter", None)
         data["style"] = self._build_style()
         data["style"]["lora_tags"] = ", ".join(self._style_activation_tags())
+        data["style_profile"] = self._style_profile_settings()
+        data["continuity"] = self._continuity_settings()
         data["body"] = {"tags": ", ".join(self._body_activation_tags())}
         data["action"] = {"tags": ", ".join(self._action_activation_tags())}
         data["clothing"] = {"tags": ", ".join(self._clothing_activation_tags())}
@@ -2818,6 +3100,10 @@ class MainWindow(QMainWindow):
             prompt_item.setData(PROMPT_GROUPS_ROLE, json.dumps(
                 shot.get("prompt_groups") or [], ensure_ascii=False))
             self.shot_table.setItem(row, 3, prompt_item)
+            self.shot_table.setItem(row, 4, QTableWidgetItem(
+                str(shot.get("shot_size") or "")))
+            self.shot_table.setItem(row, 5, QTableWidgetItem(
+                str(shot.get("camera_angle") or "")))
         finally:
             self._syncing_shots = False
 
@@ -2827,9 +3113,44 @@ class MainWindow(QMainWindow):
             row = self.shot_table.rowCount()
             self.shot_table.insertRow(row)
             self._set_shot_row(row, shot)
+        self._autofill_shot_grammar()
         if self.shot_table.rowCount():
             self.shot_table.setCurrentCell(0, 3)
         self._update_shot_stats()
+
+    def _autofill_shot_grammar(self, overwrite: bool = False) -> None:
+        if not hasattr(self, "continuity_auto"):
+            return
+        settings = self._continuity_settings()
+        if not settings["grammar"]["auto"] and not overwrite:
+            return
+        total = self.shot_table.rowCount()
+        self.shot_table.blockSignals(True)
+        try:
+            for row in range(total):
+                size_item = self.shot_table.item(row, 4)
+                angle_item = self.shot_table.item(row, 5)
+                if (not overwrite and size_item and angle_item
+                        and size_item.text().strip() and angle_item.text().strip()):
+                    continue
+                grammar = auto_shot_grammar(row, total, settings)
+                if not size_item:
+                    size_item = QTableWidgetItem()
+                    self.shot_table.setItem(row, 4, size_item)
+                if not angle_item:
+                    angle_item = QTableWidgetItem()
+                    self.shot_table.setItem(row, 5, angle_item)
+                size_item.setText(grammar["shot_size"])
+                angle_item.setText(grammar["camera_angle"])
+        finally:
+            self.shot_table.blockSignals(False)
+
+    def regenerate_shot_grammar(self) -> None:
+        if not self.shot_table.rowCount():
+            QMessageBox.information(self, "提示", "还没有分镜。")
+            return
+        self._autofill_shot_grammar(overwrite=True)
+        self.append_log("已按当前镜头语法重新分配景别和机位。")
 
     def _row_data(self, row: int) -> dict[str, Any]:
         lock_item = self.shot_table.item(row, 0)
@@ -2876,6 +3197,10 @@ class MainWindow(QMainWindow):
             "clothing_details": details,
             "prompt_groups": prompt_groups,
             "scene": (prompt_item.data(SCENE_ROLE) or "") if prompt_item else "",
+            "shot_size": (self.shot_table.item(row, 4).text()
+                          if self.shot_table.item(row, 4) else ""),
+            "camera_angle": (self.shot_table.item(row, 5).text()
+                             if self.shot_table.item(row, 5) else ""),
         }
 
     def _on_shot_item_changed(self, item: QTableWidgetItem) -> None:
@@ -2983,6 +3308,8 @@ class MainWindow(QMainWindow):
                 "prompt_zh": item["prompt_zh"] or item["prompt"] or "",
                 "outline": item.get("outline", ""),
                 "cast": item.get("cast", ""),
+                "shot_size": item.get("shot_size", ""),
+                "camera_angle": item.get("camera_angle", ""),
             })
         premise = self._story_premise_text() or self._single_input_text()
         payload = {"version": 1, "premise": premise, "shots": shots}
@@ -3087,6 +3414,7 @@ class MainWindow(QMainWindow):
         row = self.shot_table.rowCount()
         self.shot_table.insertRow(row)
         self._set_shot_row(row, {"id": "%02d" % (row + 1), "name": "shot_%02d" % (row + 1), "prompt": ""})
+        self._autofill_shot_grammar()
         self.shot_table.selectRow(row)
         self.shot_table.editItem(self.shot_table.item(row, 3))
         self._update_shot_stats()
@@ -3219,6 +3547,8 @@ class MainWindow(QMainWindow):
                               "clothing_details": data.get("clothing_details") or {},
                               "prompt_groups": data.get("prompt_groups") or [],
                               "scene": data.get("scene", ""),
+                              "shot_size": data.get("shot_size", ""),
+                              "camera_angle": data.get("camera_angle", ""),
                               "locked": data["locked"]})
                 continue
             prompt_en = data.get("prompt_en", "").strip()
@@ -3240,6 +3570,8 @@ class MainWindow(QMainWindow):
                           "clothing_details": data.get("clothing_details") or {},
                           "prompt_groups": data.get("prompt_groups") or [],
                           "scene": data.get("scene", ""),
+                          "shot_size": data.get("shot_size", ""),
+                          "camera_angle": data.get("camera_angle", ""),
                           "locked": data["locked"]})
         if pending:
             translations = self._resolve_chinese_texts([item[2] for item in pending])
@@ -3631,6 +3963,7 @@ class MainWindow(QMainWindow):
         self.story_premise.clear()
         self.story_extra.clear()
         self.output_name.clear()
+        self._set_continuity_settings({})
         self.shot_table.setRowCount(0)
         self._update_shot_stats()
         self.queue_table.setRowCount(0)
@@ -3761,6 +4094,7 @@ class MainWindow(QMainWindow):
         else:
             self._set_story_fields(
                 project.get("story_fields") or self._parse_story_text(premise))
+        self._set_continuity_settings(project.get("continuity") or {})
         shots = project.get("shots") or []
         self._fill_shot_table(shots)
         if mode == "single" and shots:
@@ -3814,6 +4148,7 @@ class MainWindow(QMainWindow):
         self._ensure_combo_value(self.ckpt_combo, project.get("model", ""))
         loras = project.get("loras") or ([project["lora"]] if project.get("lora") else [])
         self._apply_loras(loras)
+        self._set_style_profile_settings(project.get("style_profile") or {})
 
         character = project.get("character") or {}
         tags = character.get("tags", "")
@@ -4190,6 +4525,106 @@ class MainWindow(QMainWindow):
         if path:
             field.setText(path)
 
+    def generate_character_sheet(self) -> None:
+        if self.reference_sheet_worker and self.reference_sheet_worker.isRunning():
+            return
+        if self.render_worker and self.render_worker.isRunning():
+            QMessageBox.information(self, "提示", "正在生成图片，请稍后再生成参考表。")
+            return
+        if not self.connected:
+            QMessageBox.information(self, "提示", "请先连接 ComfyUI。")
+            return
+        character_tags = (self._combined_character_tags("story")
+                          or self._combined_character_tags("single"))
+        clothing = (self.story_clothing.toPlainText().strip()
+                    or self.single_clothing.toPlainText().strip())
+        if not character_tags and not clothing:
+            QMessageBox.information(
+                self, "提示", "请先填写角色标签、外貌或初始服装。")
+            return
+        prompt = character_sheet_prompt(
+            character_tags, clothing, self._style_positive())
+        shot = {
+            "id": "ref",
+            "name": "character_sheet",
+            "prompt": prompt,
+            "prompt_zh": prompt,
+            "shot_size": "full body",
+            "camera_angle": "eye level",
+        }
+        project = self._build_project("single", [shot], "character reference sheet")
+        project["prefix"] = "anime_story/ref_%s" % time.strftime("%Y%m%d_%H%M%S")
+        project["continuity"] = {}
+        project["character"]["use_ipadapter"] = False
+        project["character"].pop("ipadapter", None)
+        settings = project.setdefault("settings", {})
+        settings["img2img"] = {"enabled": False, "expansions": 0}
+        settings["split"] = {"enabled": False, "region": "auto"}
+        pose = settings.setdefault("pose", {})
+        pose["enabled"] = False
+        tasks = build_tasks(
+            project, [shot], 1, "fixed", int(self.seed_spin.value()),
+            expansions=0)
+        hires = bool(settings.get("hires", {}).get("enabled", True))
+        worker = RenderWorker(self.cfg, project, tasks, hires)
+        worker.task_updated.connect(self._on_reference_sheet_task)
+        worker.log.connect(self.append_log)
+        worker.finished_ok.connect(self._on_reference_sheet_finished)
+        worker.failed.connect(self._on_reference_sheet_failed)
+        worker.finished.connect(self._on_reference_sheet_worker_finished)
+        self.reference_sheet_worker = worker
+        self.btn_character_sheet.setEnabled(False)
+        self._set_generation_enabled(False)
+        self.statusBar().showMessage("正在生成角色参考表...")
+        self.append_log("开始生成多视图角色参考表：%s" % prompt[:220])
+        worker.start()
+
+    def _on_reference_sheet_task(self, summary: dict[str, Any]) -> None:
+        if summary.get("state") in ("running", "submitted"):
+            stage = summary.get("stage") or ""
+            self.statusBar().showMessage(
+                "角色参考表生成中%s..." % ((" · " + stage) if stage else ""))
+
+    def _on_reference_sheet_finished(self, results: list[dict[str, Any]]) -> None:
+        image = next((str(item.get("image")) for item in results
+                      if item.get("state") == "done" and item.get("image")), "")
+        if not image:
+            self._on_reference_sheet_failed("ComfyUI 没有返回参考表图片")
+            return
+        try:
+            path = self._save_reference_sheet(image)
+        except Exception as exc:
+            self._on_reference_sheet_failed("保存参考表失败：%s" % exc)
+            return
+        self.char_ref.setText(str(path))
+        self.append_log("角色参考表已生成并自动填入：%s" % path)
+        self.statusBar().showMessage("角色参考表已生成并自动填入")
+
+    def _save_reference_sheet(self, image: str) -> Path:
+        folder = self.cfg.root / "references"
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / ("character_sheet_%s_%s.png" % (
+            time.strftime("%Y%m%d_%H%M%S"), uuid.uuid4().hex[:4]))
+        source = Path(self.cfg.comfy.output_dir) / Path(str(image).replace("\\", "/"))
+        if source.is_file():
+            target.write_bytes(source.read_bytes())
+            return target
+        posix = Path(str(image).replace("\\", "/"))
+        client = ComfyClient(self.cfg.comfy.base_url)
+        data = client.view(posix.name,
+                           str(posix.parent) if str(posix.parent) != "." else "")
+        target.write_bytes(data)
+        return target
+
+    def _on_reference_sheet_failed(self, message: str) -> None:
+        self.append_log("角色参考表生成失败：%s" % message)
+        self.statusBar().showMessage("角色参考表生成失败")
+
+    def _on_reference_sheet_worker_finished(self) -> None:
+        self.reference_sheet_worker = None
+        self.btn_character_sheet.setEnabled(True)
+        self._set_generation_enabled(True)
+
     def pick_char_ref(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "选择角色参考图", "", "图片 (*.png *.jpg *.jpeg *.webp)")
         if path:
@@ -4299,6 +4734,7 @@ class MainWindow(QMainWindow):
                 "en": self._negative_extra_en,
                 "zh": self._negative_extra_zh,
             },
+            "continuity": self._continuity_settings(),
             "loras": {
                 "character": self._lora_table_state(self.lora_table),
                 "style": self._lora_table_state(self.style_lora_table),
@@ -4340,6 +4776,7 @@ class MainWindow(QMainWindow):
                 "split_enabled": self.split_check.isChecked(),
                 "split_region": self.split_region.currentValue(),
                 "pose": self._pose_settings(),
+                "style_profile": self._style_profile_settings(),
                 "follow_preview": self.chk_follow.isChecked(),
             },
         }
@@ -4431,6 +4868,8 @@ class MainWindow(QMainWindow):
             finally:
                 attr.blockSignals(False)
 
+        self._set_continuity_settings(state.get("continuity") or {})
+
         single = state.get("single") or {}
         self._set_single_fields(single)
         self._single_prompt_en = str(single.get("prompt_en") or "")
@@ -4462,6 +4901,8 @@ class MainWindow(QMainWindow):
             "cast": shot.get("cast", ""),
             "script": shot.get("script", ""),
             "phase": shot.get("phase", ""),
+            "shot_size": shot.get("shot_size", ""),
+            "camera_angle": shot.get("camera_angle", ""),
             "locked": bool(shot.get("locked")),
         } for shot in saved_shots if isinstance(shot, dict)]
         self._fill_shot_table(restored_shots)
@@ -4530,6 +4971,7 @@ class MainWindow(QMainWindow):
                 "strength": options.get("pose_strength"),
             }
         self._set_pose_settings(pose)
+        self._set_style_profile_settings(options.get("style_profile") or {})
         self.chk_follow.setChecked(bool(options.get("follow_preview", True)))
 
         mode = state.get("mode", "single")
@@ -4588,6 +5030,15 @@ class MainWindow(QMainWindow):
                 return
             self.render_worker.cancel()
             self.render_worker.wait(8000)
+        if self.reference_sheet_worker and self.reference_sheet_worker.isRunning():
+            answer = QMessageBox.question(
+                self, "正在生成参考表", "角色参考表还在生成，确定退出并取消吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+            self.reference_sheet_worker.cancel()
+            self.reference_sheet_worker.wait(8000)
         if self.prompt_worker and self.prompt_worker.isRunning():
             self.prompt_worker.wait(3000)
         if self.connect_worker and self.connect_worker.isRunning():
