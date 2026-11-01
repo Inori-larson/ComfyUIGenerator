@@ -5,6 +5,7 @@ from comfyui_generator.core.single import (
     SingleOptions,
     build_single_messages,
     generate_single_prompt,
+    sanitize_single_prompt,
 )
 
 
@@ -87,3 +88,24 @@ def test_empty_prompt_raises():
 def test_framing_table():
     assert FRAMING_TAGS["auto"] == ""
     assert FRAMING_TAGS["close_up"] == "close-up"
+
+
+def test_sanitize_single_prompt_removes_multiple_males_and_solo_conflict():
+    prompt = sanitize_single_prompt(
+        "1girl, solo, male, 2boys, couple, penis in pussy, standing")
+    tags = [tag.strip() for tag in prompt.split(",")]
+    assert "2boys" not in tags
+    assert "solo" not in tags
+    assert "male" not in tags
+    assert "1boy" in tags
+    assert "nude male" in tags
+    assert "penis in pussy" in tags
+
+
+def test_sanitize_single_prompt_keeps_true_solo_female_fluid_scene():
+    prompt = sanitize_single_prompt(
+        "1girl, solo, cum on body, wet pussy, masturbation")
+    tags = [tag.strip() for tag in prompt.split(",")]
+    assert "solo" in tags
+    assert "1boy" not in tags
+    assert "cum on body" in tags

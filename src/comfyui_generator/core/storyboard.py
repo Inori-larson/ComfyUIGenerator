@@ -865,6 +865,27 @@ def _clothing_key(tag: str) -> str:
     return ""
 
 
+_LOWER_BODY_CLOTHING = {
+    "fishnet", "pantyhose", "legwear", "stockings", "thighhigh", "leggings",
+    "socks", "panties", "underwear", "thong", "bikini", "skirt", "pants",
+    "jeans", "shorts", "heels", "boots", "shoes", "sandals", "slippers",
+    "garter",
+}
+_UPPER_BODY_CLOTHING = {
+    "bra", "shirt", "vest", "blazer", "jacket", "coat", "cardigan",
+    "blouse", "sweater", "hoodie", "tank top", "camisole", "crop top",
+    "top", "corset", "bustier", "necktie", "scarf", "collar",
+}
+
+
+def _only_scope(text: str) -> str:
+    if re.search(r"上半身|上身|upper body", str(text or ""), re.I):
+        return "upper"
+    if re.search(r"下半身|下身|lower body", str(text or ""), re.I):
+        return "lower"
+    return ""
+
+
 def _is_full_nude(beat: str) -> bool:
     if (re.search(r"上半身|上身|胸部|腰以上|upper body", beat, re.I)
             and re.search(r"裸露|赤裸|全裸|裸体|脱光|\bnude\b|\bnaked\b", beat, re.I)):
@@ -946,10 +967,21 @@ def clothing_states_for_beats(premise: str, beats: list[str],
                         and any(re.search(p, only_text, re.I) for p in patterns)):
                     chosen.add(tag)
             if chosen != accessories:
+                scope = _only_scope(beat)
+                kept = set(chosen)
                 for tag in list(worn):
-                    if _clothing_key(tag) and tag not in chosen:
+                    clothing_key = _clothing_key(tag)
+                    if tag in chosen:
+                        continue
+                    if (scope == "upper"
+                            and clothing_key in _LOWER_BODY_CLOTHING):
+                        kept.add(tag)
+                    elif (scope == "lower"
+                          and clothing_key in _UPPER_BODY_CLOTHING):
+                        kept.add(tag)
+                    elif clothing_key:
                         removed.add(tag)
-                worn = chosen
+                worn = kept
         else:
             one_side = bool(re.search(r"一边|单边|一只|另一只|另一脚|半脱", beat))
             for key, tag in known.items():
@@ -1401,10 +1433,21 @@ def character_states_for_beats(profiles: list[CharacterProfile], beats: list[str
                             and any(re.search(pattern, only_text, re.I)
                                     for pattern in dict(_CLOTHING_KEYS).get(clothing_key, ()))):
                         chosen.add(tag)
-                for tag in list(current[key]):
-                    if not _is_accessory(tag) and tag not in chosen:
+                scope = _only_scope(beat)
+                kept = set(chosen)
+                for tag in current[key]:
+                    clothing_key = _clothing_key(tag)
+                    if tag in chosen:
+                        continue
+                    if (scope == "upper"
+                            and clothing_key in _LOWER_BODY_CLOTHING):
+                        kept.add(tag)
+                    elif (scope == "lower"
+                          and clothing_key in _UPPER_BODY_CLOTHING):
+                        kept.add(tag)
+                    elif not _is_accessory(tag):
                         removed[key].add(tag)
-                current[key] = chosen
+                current[key] = kept
             else:
                 one_side = bool(re.search(
                     r"一半|单边|一只|另一边|另一只|一侧|one side|one of", beat, re.I))

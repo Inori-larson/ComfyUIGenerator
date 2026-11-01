@@ -607,12 +607,12 @@ _EXPLICIT_TAGS = (
     "cum", "semen", "ejaculat", "creampie",
 )
 _UNCENSORED_POSITIVE = (
-    "uncensored, mosaic removal, no mosaic, no pixelation, "
-    "detailed genitals, detailed penis, detailed pussy"
+    "uncensored, detailed genitals, detailed penis, detailed pussy"
 )
 _UNCENSORED_NEGATIVE = (
-    "mosaic, pixelated, pixelation, censor bar, censored penis, "
-    "censored pussy, blurred penis, blurred pussy, mosaic censoring"
+    "mosaic, pixelated, pixelation, censor bar, censorship, mosaic blur, "
+    "censored penis, censored pussy, pixelated penis, pixelated pussy, "
+    "blurred penis, blurred pussy, mosaic censoring"
 )
 
 

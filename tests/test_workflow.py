@@ -656,6 +656,8 @@ def test_explicit_prompts_get_uncensored_reinforcement(cfg):
         cfg, {"prompt": "1girl, hetero, penis_in_pussy"})
     assert "uncensored" in positive
     assert "detailed penis" in positive
+    assert "mosaic" not in positive
+    assert "pixelation" not in positive
     assert "mosaic" in negative
     assert "pixelated" in negative
 

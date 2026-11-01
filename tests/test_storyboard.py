@@ -977,6 +977,20 @@ def test_parenthesized_weight_is_not_parsed_as_character_entries():
         "(black bra:1.2)", "(lace:1.1)"]
 
 
+def test_upper_body_only_removal_keeps_lower_body_clothing():
+    profile = parse_character_profiles(
+        "角色：女主：yixuan\n"
+        "初始服装：black bra, black panties, black pantyhose, "
+        "purple skirt, red vest")[0]
+    state = character_states_for_beats(
+        [profile], ["上半身只剩黑色蕾丝胸罩"])[0][profile.key]
+    assert "black bra" in state
+    assert "black panties" in state
+    assert "black pantyhose" in state
+    assert "purple skirt" in state
+    assert "red vest" not in state
+
+
 def test_partial_clothing_removal_keeps_item_but_full_removal_drops_it():
     profile = parse_character_profiles(
         "角色：女主：yixuan\n"
