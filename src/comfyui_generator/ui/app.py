@@ -13,6 +13,7 @@ from comfyui_generator.core.config import app_data_dir
 from comfyui_generator.ui.branding import app_icon
 from comfyui_generator.ui.main_window import MainWindow
 from comfyui_generator.ui.style import APP_QSS
+from comfyui_generator.ui.wheel_guard import install_wheel_guard
 
 
 def _open_crash_log():
@@ -48,6 +49,7 @@ def main() -> None:
     app.setWindowIcon(app_icon())
     app.setStyle("Fusion")
     app.setStyleSheet(APP_QSS)
+    install_wheel_guard(app)
     try:
         window = MainWindow()
         window.show()

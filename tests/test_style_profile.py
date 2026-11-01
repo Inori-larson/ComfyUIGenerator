@@ -66,7 +66,8 @@ def test_workflow_profile_can_be_disabled():
     positive, negative = compose_prompts(cfg, {"prompt": "standing"})
     assert positive.startswith("masterpiece")
     assert "cinematic film still" not in positive
-    assert negative == "bad quality"
+    assert negative.startswith("bad quality")
+    assert "multiple boys" in negative
 
 
 def test_second_pass_includes_profile():

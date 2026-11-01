@@ -145,7 +145,7 @@ def _scope_reference_terms(lora: dict[str, Any], scope: str) -> set[str]:
 
 def _tag_key(tag: str) -> str:
     text = tag.lower().replace("\\", "")
-    text = re.sub(r"\([^)]*\)", "", text)
+    text = re.sub(r"\((?!.*:\d)[^)]*\)", "", text)
     return re.sub(r"\s+", " ", text).strip()
 
 
@@ -173,6 +173,18 @@ def join_tags(*parts: Any) -> str:
                 seen.add(key)
                 values.append(tag)
     return ", ".join(values)
+
+
+
+def _boost_clothing_tags(text: str, weight: float = 1.15) -> str:
+    tags = [tag.strip() for tag in str(text or "").split(",") if tag.strip()]
+    boosted: list[str] = []
+    for tag in tags:
+        if re.search(r":\d+(?:\.\d+)?\)\s*$", tag):
+            boosted.append(tag)
+        else:
+            boosted.append("(%s:%s)" % (tag, weight))
+    return ", ".join(boosted)
 
 
 def merge(base: dict[str, Any] | None, extra: dict[str, Any] | None) -> dict[str, Any]:
@@ -233,6 +245,14 @@ def base_loader(cfg: dict[str, Any]) -> tuple[dict[str, Any], list[Any], list[An
     return wf, ["1", 0], ["2", 0], ["1", 2]
 
 
+def _upscale_model_scale(name: str) -> int:
+    match = re.search(
+        r"(?<!\d)([248])\s*x|x\s*([248])(?!\d)", str(name or ""), re.I)
+    if not match:
+        return 4
+    return int(match.group(1) or match.group(2))
+
+
 def sampler_inputs(cfg: dict[str, Any], seed: int, hires_part: bool = False) -> dict[str, Any]:
     settings = cfg["settings"]
     hires = settings.get("hires", {})
@@ -265,8 +285,11 @@ def add_detailers(wf: dict[str, Any], cfg: dict[str, Any], image: list[Any], mod
                   clip: list[Any], vae: list[Any], positive: list[Any], negative: list[Any],
                   seed: int) -> list[Any]:
     for i, detailer in enumerate(cfg.get("detailers") or []):
-        det_id = str(60 + i * 2)
-        fd_id = str(61 + i * 2)
+        detector = str(detailer.get("model") or "").replace("\\", "/")
+        if detector.lower().startswith("segm/"):
+            continue
+        det_id = str(300 + i * 2)
+        fd_id = str(301 + i * 2)
         pos_ref, neg_ref = positive, negative
         if detailer.get("prompt"):
             wf[str(200 + i)] = {"class_type": "CLIPTextEncode",
@@ -402,11 +425,178 @@ def _body_trigger_tags(cfg: dict[str, Any], shot: dict[str, Any]) -> str:
     return _scope_trigger_tags(cfg, shot, "body")
 
 
-_DOUBLE_NEGATIVE = (
-    "merged bodies, fused, conjoined, extra arms, extra limbs, extra hands"
+_BODY_EXPOSURE_WORDS = (
+    "nude", "naked", "bottomless", "topless", "breasts out", "breast out",
+    "one breast out", "nipples", "pussy", "vagina", "labia", "clitoris",
+    "sex", "penetration", "intercourse", "spread legs", "panties aside",
+    "panties pulled aside", "panties off", "crotchless", "torn pantyhose",
+    "pantyhose pulled down", "crotch", "cum", "semen", "creampie",
 )
+_EXPLICIT_BODY_TAGS = (
+    "pussy", "vagina", "labia", "clitoris", "uterus", "womb", "anus",
+    "anal", "nipple", "breast", "penis", "cock", "testicle", "cum",
+    "semen", "creampie", "pussy juice",
+)
+_FLUID_BODY_TAGS = (
+    "pussy juice", "cum", "semen", "creampie", "ejaculat", "fluid", "wet",
+)
+_FLUID_CONTEXT = (
+    "pussy juice", "wet", "dripping", "orgasm", "cum", "semen", "creampie",
+    "ejaculat", "sex", "penetration", "masturbation", "fingering",
+)
+
+
+def _filter_body_tags(tags: Any, text: str) -> str:
+    value = str(tags or "").strip()
+    if not value:
+        return ""
+    exposed = _contains_any(text, _BODY_EXPOSURE_WORDS)
+    fluid = _contains_any(text, _FLUID_CONTEXT)
+    kept: list[str] = []
+    for tag in value.split(","):
+        tag = tag.strip()
+        if not tag:
+            continue
+        if _contains_any(tag, _FLUID_BODY_TAGS) and not fluid:
+            continue
+        if not exposed and _contains_any(tag, _EXPLICIT_BODY_TAGS):
+            continue
+        kept.append(tag)
+    return ", ".join(kept)
+
+
+_MULTI_HEAD_NEGATIVE = (
+    "two heads, multiple heads, extra head, duplicate head, extra face, "
+    "duplicate face, cloned face, conjoined twins, fused bodies, merged bodies"
+)
+_DOUBLE_NEGATIVE = (
+    "merged bodies, fused, conjoined, extra arms, extra limbs, extra hands, "
+    + _MULTI_HEAD_NEGATIVE
+)
+_SOLO_NEGATIVE = (
+    "2girls, multiple girls, multiple boys, extra person, second person, "
+    "duplicate body, extra body, " + _MULTI_HEAD_NEGATIVE
+)
+_EXTRA_GIRL_NEGATIVE = (
+    "2girls, multiple girls, extra girl, duplicate girl, cloned girl, "
+    "two female heads, extra female head, duplicate female head, "
+    "second female head"
+)
+_EXTRA_BOY_NEGATIVE = (
+    "2boys, multiple boys, extra boy, duplicate boy, cloned boy"
+)
+_NO_MULTI_MALE = (
+    "2boys, multiple boys, extra boy, duplicate boy, cloned boy, "
+    "two male heads, extra male head, second male head"
+)
+_NO_EXTRA_FEMALE = (
+    "2girls, multiple girls, extra girl, duplicate girl, cloned girl, "
+    "two female heads, extra female head, duplicate female head, "
+    "second female head"
+)
+_MULTI_MALE_WORDS = (
+    "2boys", "multiple boys", "extra boy", "duplicate boy", "cloned boy",
+    "two male heads", "extra male head", "second male head",
+)
+_MULTI_FEMALE_WORDS = (
+    "2girls", "multiple girls", "extra girl", "duplicate girl", "cloned girl",
+    "two female heads", "extra female head", "duplicate female head",
+    "second female head",
+)
+_MALE_DUPLICATE_NEGATIVE = (
+    "two penises, extra penis, duplicate penis, disembodied penis, "
+    "floating penis, second male, two male bodies, extra male body, "
+    "duplicate male body"
+)
+_ORPHAN_MALE_TAGS = {"penis", "cock", "pov", "male pov"}
+
+
+def _without_orphan_male_parts(text: str) -> str:
+    tags = [tag.strip() for tag in str(text or "").split(",") if tag.strip()]
+    has_male_body = any(
+        tag.lower() in ("nude male", "male body", "male torso")
+        for tag in tags)
+    if not has_male_body:
+        return text
+    return ", ".join(
+        tag for tag in tags
+        if tag.lower() not in _ORPHAN_MALE_TAGS)
+
+
+def _allows_two_females(shot: dict[str, Any]) -> bool:
+    cast = str(shot.get("cast") or "").lower()
+    return bool(re.search(
+        r"(?:\b2\s*girls\b|\btwo\s+girls\b|\bmultiple\s+girls\b)", cast))
+
+
+def _without_multi_people(text: str, allow_two_females: bool) -> str:
+    tags = [tag.strip() for tag in str(text or "").split(",") if tag.strip()]
+    kept = []
+    for tag in tags:
+        low = tag.lower()
+        if any(word in low for word in _MULTI_MALE_WORDS):
+            continue
+        if not allow_two_females and any(
+                word in low for word in _MULTI_FEMALE_WORDS):
+            continue
+        kept.append(tag)
+    return ", ".join(kept)
+_FUTA_WORDS = (
+    "futanari", "dickgirl", "shemale", "newhalf", "intersex",
+    "hermaphrodite", "extra penis", "penis on female", "female with penis",
+)
+_MALE_CONTACT_WORDS = (
+    "penetration", "insertion", "intercourse", "thrusting", "sex",
+    "penis", "penis in pussy", "vaginal", "creampie", "cum in pussy",
+    "fellatio", "blowjob", "handjob", "paizuri", "titjob",
+    "riding", "cowgirl", "straddling", "mating press",
+)
+_MALE_HEAD_NEGATIVE = (
+    "male face, male head, man's face, masculine face, full male body, "
+    "second person, extra person"
+)
+_MALE_NUDE_POLICY = (
+    "1boy, nude male, faceless male, male head out of frame, "
+    "male face out of frame, male body"
+)
+_MALE_FACE_NEGATIVE = (
+    "detailed male face, sharp male face, male face focus, handsome male, "
+    "male facial features, beard, necktie"
+)
+_MALE_CLOTHING_NEGATIVE = (
+    "male clothes, male shirt, male pants, male jeans, male underwear, "
+    "male uniform"
+)
+_MALE_FEMININE_NEGATIVE = (
+    "female head on male, female face on male, male with female head, "
+    "male with female face, female hair on male, female hairstyle on male, "
+    "feminine male, androgynous male, long-haired male, male with long hair, "
+    "breasts on male, male with breasts, female eyes on male"
+)
+_MALE_CLOTHING_REMOVE = (
+    "clothed male", "male clothing", "male outfit", "male uniform",
+    "male suit", "casual clothes", "male casual clothes", "male clothes",
+    "school uniform", "casual shirt", "shirt", "pants", "jeans", "trousers",
+    "boxers", "briefs", "necktie", "male underwear", "male shirt",
+    "male pants", "open fly", "unzipped pants", "zipper", "belt buckle",
+)
+
+
+def _strip_male_clothing(text: str, keep: str = "") -> str:
+    tags = [tag.strip() for tag in str(text or "").split(",") if tag.strip()]
+    kept: list[str] = []
+    for tag in tags:
+        if (_contains_any(tag, _MALE_CLOTHING_REMOVE)
+                and not _contains_any(keep, (tag,))):
+            continue
+        kept.append(tag)
+    return ", ".join(kept)
+
+
+_FUTA_NEGATIVE = ", ".join(_FUTA_WORDS)
 _FEMALE_ONLY_NEGATIVE = (
-    "1boy, male, man, penis, testicles, masculine, broad shoulders"
+    "1boy, male, man, penis, testicles, masculine, broad shoulders, "
+    + ", ".join(_FUTA_WORDS)
 )
 _MALE_ONLY_NEGATIVE = (
     "1girl, female, woman, breasts, pussy, vagina, long hair, dress, skirt, "
@@ -429,8 +619,8 @@ _UNCENSORED_NEGATIVE = (
 def _apply_uncensored(positive: str, negative: str) -> tuple[str, str]:
     if not _contains_any(positive, _EXPLICIT_TAGS):
         return positive, negative
-    return (join_tags(positive, _UNCENSORED_POSITIVE),
-            join_tags(negative, _UNCENSORED_NEGATIVE))
+    positive = join_tags(positive, _UNCENSORED_POSITIVE)
+    return positive, join_tags(negative, _UNCENSORED_NEGATIVE)
 
 
 def _cast_counts(shot: dict[str, Any]) -> tuple[int, int]:
@@ -455,13 +645,14 @@ _GIRL_TAG_RE = re.compile(
     r"\b(?:1girl|girl|female|woman|breasts?|nipples?|pussy|vagina|labia|"
     r"clitoris|uterus|womb|pantyhose|stockings?|thighhighs?|skirt|dress|"
     r"bra|panties|lingerie|high heels?|makeup|mature female|long hair|"
+    r"blunt bangs|hair ornament|"
     r"(?:red|pink|blonde|white|silver|blue|purple|orange|green|"
     r"multicolored) hair)\b"
 )
 _BOY_TAG_RE = re.compile(
     r"\b(?:1boy|boy|male|man|penis|cock|testicles|phallus|beard|muscular|"
     r"abs|pectorals|short(?:\s+\w+){0,2}\s+hair|adam's apple|sperm|jeans|"
-    r"trousers)\b"
+    r"trousers|casual shirt|pants|boxers|briefs|necktie)\b"
 )
 
 
@@ -538,6 +729,14 @@ def split_prompt_groups(shot: dict[str, Any]) -> list[dict[str, str]]:
             girl_tags.append(tag)
         if owner in ("boy", "shared"):
             boy_tags.append(tag)
+    boy_casual = any(_contains_any(tag, (
+        "casual shirt", "pants", "jeans", "trousers")) for tag in boy_tags)
+    girl_outfit = any(_contains_any(tag, (
+        "uniform", "pantyhose", "skirt", "dress")) for tag in girl_tags)
+    if boy_casual and girl_outfit:
+        boy_tags = [tag for tag in boy_tags
+                    if not _contains_any(tag, (
+                        "uniform", "epaulettes", "pantyhose", "skirt", "dress"))]
     return [
         {"gender": "girl", "name": "main", "prompt": join_tags(*girl_tags)},
         {"gender": "boy", "name": "male", "prompt": join_tags(*boy_tags)},
@@ -550,14 +749,28 @@ def _cast_tag(tag: str) -> bool:
         r"multiple boys)$", str(tag).strip(), re.I))
 
 
-def prompt_groups(shot: dict[str, Any]) -> list[dict[str, str]]:
+def prompt_groups(shot: dict[str, Any],
+                  allow_fallback: bool = True) -> list[dict[str, str]]:
     groups = shot.get("prompt_groups")
     if isinstance(groups, list) and groups:
         valid = [group for group in groups
                  if isinstance(group, dict) and str(group.get("prompt") or "").strip()]
         if valid:
             return valid
+    if not allow_fallback:
+        return []
     return split_prompt_groups(shot)
+
+
+def _is_solo_shot(text: str) -> bool:
+    if _contains_word(text, "solo"):
+        return True
+    if not _contains_word(text, "1girl") and not _contains_word(text, "1boy"):
+        return False
+    return not _contains_any(text, (
+        "1boy", "2girls", "2boys", "multiple girls", "multiple boys",
+        "multiple people", "group",
+    ))
 
 
 def _gender_negative(gender: str, text: str) -> str:
@@ -569,64 +782,9 @@ def _gender_negative(gender: str, text: str) -> str:
         tags = [tag.strip() for tag in _FEMALE_ONLY_NEGATIVE.split(",") if tag.strip()]
         if _contains_word(text, "penis"):
             tags = [tag for tag in tags if tag.lower() != "penis"]
+        if _contains_any(text, _FUTA_WORDS):
+            tags = [tag for tag in tags if tag.lower() not in _FUTA_WORDS]
     return ", ".join(tags)
-
-
-_SPLIT_REGION_BOXES: dict[str, tuple[float, float, float, float]] = {
-    "right": (0.45, 0.0, 0.55, 1.0),
-    "left": (0.0, 0.0, 0.55, 1.0),
-    "top": (0.0, 0.0, 1.0, 0.55),
-    "bottom": (0.0, 0.45, 1.0, 0.55),
-    "center": (0.12, 0.08, 0.76, 0.84),
-}
-
-
-def _auto_split_region(shot: dict[str, Any]) -> str:
-    text = " ".join(str(shot.get(key) or "") for key in
-                    ("script", "outline", "prompt", "scene")).lower()
-    if re.search(
-            r"(?:boy|male|man|1boy|男主|男性|男孩|他).{0,20}"
-            r"(?:on the left|left side|左侧|左边|在左)|"
-            r"(?:左侧|左边|在左).{0,20}(?:boy|male|man|男主|男性)", text):
-        return "left"
-    if re.search(
-            r"(?:boy|male|man|1boy|男主|男性|男孩|他).{0,20}"
-            r"(?:on the right|right side|右侧|右边|在右)|"
-            r"(?:右侧|右边|在右).{0,20}(?:boy|male|man|男主|男性)", text):
-        return "right"
-    if re.search(
-            r"cowgirl|girl on top|woman on top|straddl|riding|骑乘|骑在|"
-            r"跨坐|坐在.{0,6}(?:腿|身)上|坐上来|"
-            r"女上男下|女主在上|女上位", text):
-        return "bottom"
-    if re.search(
-            r"\bstacked\b|on top of|lying on|pressing|overlap|\b69\b|"
-            r"from behind|from the back|贴身|叠在|叠在一起|上下叠|叠着|"
-            r"压着|压在|趴在|趴着|抱在|抱着|拥抱|背后|身后|后面|"
-            r"抱起|抱起来|抱起双腿|抱着腿|悬空|托起|站立抱起|"
-            r"在.{0,4}身上|"
-            r"hugging|cuddling|embrace|spooning", text):
-        return "center"
-    if re.search(
-            r"boy on top|male on top|man on top|on top of|lying on top|"
-            r"上方|上面|上边|男上女下|男上位|男主在上|男性在上", text):
-        return "top"
-    if re.search(
-            r"underneath|under (?:her|him)|boy under|male under|"
-            r"下方|下面|下边|底下|男下女上|男主在下|男性在下", text):
-        return "bottom"
-    return "right"
-
-
-def split_mask_region(shot: dict[str, Any], region: str = "auto") -> dict[str, Any]:
-    region = str(region or "auto").strip().lower()
-    if region not in _SPLIT_REGION_BOXES:
-        region = _auto_split_region(shot)
-    x, y, width, height = _SPLIT_REGION_BOXES[region]
-    return {
-        "region": region,
-        "x": x, "y": y, "width": width, "height": height, "grow": 8,
-    }
 
 
 def compose_pass_prompts(cfg: dict[str, Any], shot: dict[str, Any],
@@ -668,6 +826,7 @@ def compose_pass_prompts(cfg: dict[str, Any], shot: dict[str, Any],
         body_tags = _body_trigger_tags(cfg, pass_shot)
     elif gender == "girl":
         body_tags = shot.get("body_tags", body.get("tags", ""))
+    body_tags = _filter_body_tags(body_tags, text)
     character_tags = ""
     if gender == "girl":
         character_tags = shot.get("character_tags", character.get("tags", ""))
@@ -686,6 +845,7 @@ def compose_pass_prompts(cfg: dict[str, Any], shot: dict[str, Any],
         shot.get("style_negative", style.get("negative", "")),
         shot.get("negative", ""),
         _DOUBLE_NEGATIVE,
+        _EXTRA_GIRL_NEGATIVE if gender == "girl" else _EXTRA_BOY_NEGATIVE,
         _gender_negative(gender, text),
         continuity_negative(cfg.get("continuity")),
     )
@@ -706,8 +866,25 @@ def compose_prompts(cfg: dict[str, Any], shot: dict[str, Any]) -> tuple[str, str
                          shot.get("negative", ""),
                          continuity_negative(cfg.get("continuity")))
     if is_double_shot(shot):
+        girls, boys = _cast_counts(shot)
         negative = join_tags(negative, _DOUBLE_NEGATIVE)
-    chain = lora_chain(cfg)
+        if girls == 1:
+            negative = join_tags(negative, _EXTRA_GIRL_NEGATIVE)
+        if boys == 1:
+            negative = join_tags(negative, _EXTRA_BOY_NEGATIVE)
+    elif _is_solo_shot(str(prompt or "")):
+        gender = "boy" if _contains_word(prompt, "1boy") else "girl"
+        text = str(prompt or "")
+        if (gender == "girl"
+                and _contains_any(text, _MALE_CONTACT_WORDS)
+                and not _contains_any(text, _FUTA_WORDS)):
+            negative = join_tags(
+                negative, _SOLO_NEGATIVE, _MALE_HEAD_NEGATIVE,
+                _FUTA_NEGATIVE)
+        else:
+            negative = join_tags(
+                negative, _SOLO_NEGATIVE, _gender_negative(gender, text))
+    chain = lora_chain(cfg, shot)
     if any(_is_action_lora(lora) for lora in chain):
         action_source = _scope_trigger_tags(cfg, shot, "action")
     else:
@@ -715,22 +892,39 @@ def compose_prompts(cfg: dict[str, Any], shot: dict[str, Any]) -> tuple[str, str
     if any(_is_clothing_lora(lora) for lora in chain):
         clothing_source = _scope_trigger_tags(cfg, shot, "clothing")
     else:
-        clothing_source = shot.get("clothing_tags", clothing.get("tags", ""))
+        clothing_source = (shot.get("clothing_tags")
+                           or shot.get("clothing")
+                           or clothing.get("tags", ""))
+    clothing_source = _boost_clothing_tags(clothing_source)
     if any(_is_body_lora(lora) for lora in chain):
         body_source = _body_trigger_tags(cfg, shot)
     else:
         body_source = shot.get("body_tags", body.get("tags", ""))
+    body_source = _filter_body_tags(body_source, str(prompt or ""))
+    style_tags = shot.get("style_positive", style.get("positive", ""))
+    style_lora = shot.get("style_lora_tags", style.get("lora_tags", ""))
+    style_suffix = shot.get("style_suffix", style.get("suffix", ""))
+    character_tags = shot.get("character_tags", character.get("tags", ""))
+    continuity_tags = continuity_positive(cfg.get("continuity"), shot)
     positive = join_tags(
-        shot.get("style_positive", style.get("positive", "")),
-        shot.get("style_lora_tags", style.get("lora_tags", "")),
-        shot.get("character_tags", character.get("tags", "")),
-        action_source,
-        clothing_source,
-        body_source,
-        continuity_positive(cfg.get("continuity"), shot),
-        render_prompt,
-        shot.get("style_suffix", style.get("suffix", "")),
+        style_tags, style_lora, character_tags, action_source,
+        clothing_source, body_source, continuity_tags, render_prompt,
+        style_suffix,
     )
+    allow_two_females = _allows_two_females(shot)
+    positive = _without_multi_people(positive, allow_two_females)
+    negative = join_tags(negative, _NO_MULTI_MALE)
+    if not allow_two_females:
+        negative = join_tags(negative, _NO_EXTRA_FEMALE)
+    if is_double_shot(shot):
+        positive = join_tags(
+            _MALE_NUDE_POLICY,
+            _strip_male_clothing(positive, str(shot.get("clothing") or "")))
+        positive = _without_orphan_male_parts(positive)
+        negative = join_tags(
+            negative, _FUTA_NEGATIVE, _MALE_FACE_NEGATIVE,
+            _MALE_CLOTHING_NEGATIVE, _MALE_FEMININE_NEGATIVE,
+            _MALE_DUPLICATE_NEGATIVE)
     return _apply_uncensored(positive, negative)
 
 
@@ -888,9 +1082,16 @@ def build_workflow(cfg: dict[str, Any], shot: dict[str, Any], positive: str, neg
             wf["16"] = {"class_type": "UpscaleModelLoader", "inputs": {"model_name": upscaler}}
             wf["17"] = {"class_type": "ImageUpscaleWithModel", "inputs": {
                 "upscale_model": ["16", 0], "image": ["10", 0]}}
+            configured_scale = float(hires_cfg.get("model_scale", 0) or 0)
+            detected_scale = float(_upscale_model_scale(upscaler))
+            if configured_scale <= 0 or (
+                    configured_scale == 4.0 and detected_scale != 4.0):
+                model_scale = detected_scale
+            else:
+                model_scale = configured_scale
             wf["11"] = {"class_type": "ImageScaleBy", "inputs": {
                 "image": ["17", 0], "upscale_method": "lanczos",
-                "scale_by": hires_cfg.get("scale", 1.5) / hires_cfg.get("model_scale", 4.0)}}
+                "scale_by": hires_cfg.get("scale", 1.5) / max(1.0, model_scale)}}
         else:
             wf["11"] = {"class_type": "ImageScaleBy", "inputs": {
                 "image": ["10", 0], "upscale_method": "lanczos",
@@ -901,7 +1102,7 @@ def build_workflow(cfg: dict[str, Any], shot: dict[str, Any], positive: str, neg
         final = ["14", 0]
 
     final = add_detailers(wf, cfg, final, model, clip, vae, positive_ref, negative_ref, seed)
-    wf["64"] = {"class_type": "SaveImage", "inputs": {"images": final, "filename_prefix": prefix}}
+    wf["999"] = {"class_type": "SaveImage", "inputs": {"images": final, "filename_prefix": prefix}}
     return wf
 
 
@@ -920,6 +1121,6 @@ def stage_for_node(node_id: str | int | None) -> str:
         return "pose"
     if nid == 13:
         return "hires"
-    if 60 <= nid < 64:
+    if 300 <= nid < 400:
         return "detail"
     return ""

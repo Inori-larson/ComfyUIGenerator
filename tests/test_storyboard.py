@@ -26,6 +26,7 @@ from comfyui_generator.core.storyboard import (
     scene_states_for_beats,
     shots_from_json,
     slugify,
+    strip_male_profile_details,
     StoryboardOptions,
 )
 
@@ -38,6 +39,13 @@ def test_tagged_shots_use_the_generated_script_as_outline():
     tagged = normalize_tagged({"shots": [
         {"id": "01", "prompt": "1girl, standing"}]}, scripts)
     assert tagged[0]["outline"] == script
+
+
+def test_tag_prompt_requires_fluid_interactions():
+    assert "pussy juice" in TAG_SYSTEM
+    assert "cum in mouth" in TAG_SYSTEM
+    assert "cum swallowing" in TAG_SYSTEM
+    assert "squirt" in TAG_SYSTEM
 
 
 def test_prompts_do_not_depend_on_reference_tags():
@@ -534,7 +542,7 @@ def test_generic_character_states_keep_male_and_female_independent():
     assert "white shirt" not in states[0][boy.key]
     assert "black trousers" in states[0][boy.key]
     assert "black dress" in states[0][girl.key]
-    assert states[1][girl.key] == set()
+    assert states[1][girl.key] == {"black dress", "black panties"}
     assert "black trousers" in states[1][boy.key]
     assert states[2][boy.key] == set()
     assert states[3][boy.key] == set()
@@ -771,12 +779,14 @@ def test_full_story_pipeline_uses_locked_male_character_state():
     assert len(shots) == 3
     for shot in shots:
         assert "silver hair" in shot["prompt"]
-        assert "black hair" in shot["prompt"]
-    assert "white shirt" in shots[0]["prompt"]
-    assert "white shirt" in shots[1]["prompt"]
+        assert "black hair" not in shot["prompt"]
+    assert "white shirt" not in shots[0]["prompt"]
+    assert "white shirt" not in shots[1]["prompt"]
     assert "white shirt" not in shots[2]["prompt"]
+    assert "nude male" in shots[0]["prompt"]
+    assert "nude male" in shots[1]["prompt"]
     assert "black dress" not in shots[1]["prompt"]
-    assert "completely nude" not in shots[1]["prompt"]
+    assert "completely nude" in shots[1]["prompt"]
     assert "completely nude" in shots[2]["prompt"]
 
 
@@ -908,3 +918,72 @@ def test_generate_with_initial_and_no_extra_shots_does_not_call_model():
                                 initial_shots=initial)
     assert shots == initial
     assert client.calls == []
+
+
+def test_only_moonlight_does_not_strip_clothing():
+    profile = parse_character_profiles(
+        "角色：女主：yixuan\n"
+        "初始服装：uniform, black pantyhose")[0]
+    state = character_states_for_beats([profile], ["只剩月光"])[0][profile.key]
+    assert state == {"uniform", "black pantyhose"}
+
+
+def test_full_nude_only_clears_clothing_near_the_end():
+    profile = parse_character_profiles(
+        "角色：女主：yixuan\n初始服装：uniform, black pantyhose")[0]
+    early = character_states_for_beats(
+        [profile], ["继续", "全裸", "继续", "继续"])[1][profile.key]
+    late = character_states_for_beats(
+        [profile], ["继续", "继续", "全裸", "继续"])[2][profile.key]
+    assert early == {"uniform", "black pantyhose"}
+    assert late == set()
+
+
+def test_male_profile_details_are_stripped():
+    profiles = parse_character_profiles(
+        "角色：女主：silver hair；男主：black hair\n"
+        "初始服装：女主：black dress；男主：white shirt, black pants")
+    strip_male_profile_details(profiles)
+    girl, boy = profiles
+    assert girl.initial_clothing == ["black dress"]
+    assert girl.appearance == ["silver hair"]
+    assert boy.appearance == []
+    assert boy.initial_clothing == []
+
+
+def test_clothing_weight_suffix_is_normalized():
+    profile = parse_character_profiles(
+        "角色：女主：yixuan\n"
+        "初始服装：black pantyhose(1.2), bra(1.2)")[0]
+    assert profile.initial_clothing == [
+        "(black pantyhose:1.2)", "(bra:1.2)"]
+
+
+def test_clothing_weight_colon_is_not_parsed_as_character_entries():
+    profiles = parse_character_profiles(
+        "初始服装：black pantyhose:1.2,black panties:1.2, black bra:1.2")
+    assert len(profiles) == 1
+    assert profiles[0].initial_clothing == [
+        "(black pantyhose:1.2)", "(black panties:1.2)", "(black bra:1.2)"]
+
+
+def test_parenthesized_weight_is_not_parsed_as_character_entries():
+    profiles = parse_character_profiles(
+        "初始服装：(black pantyhose:1.2),(black panties:1.2), "
+        "(black bra:1.2),(lace:1.1)")
+    assert len(profiles) == 1
+    assert profiles[0].initial_clothing == [
+        "(black pantyhose:1.2)", "(black panties:1.2)",
+        "(black bra:1.2)", "(lace:1.1)"]
+
+
+def test_partial_clothing_removal_keeps_item_but_full_removal_drops_it():
+    profile = parse_character_profiles(
+        "角色：女主：yixuan\n"
+        "初始服装：black lace bra, black pantyhose")[0]
+    partial = character_states_for_beats(
+        [profile], ["解开胸罩背扣，肩带滑落"])[0][profile.key]
+    assert "black lace bra" in partial
+    full = character_states_for_beats(
+        [profile], ["脱下胸罩"])[0][profile.key]
+    assert "black lace bra" not in full

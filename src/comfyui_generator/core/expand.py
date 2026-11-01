@@ -22,8 +22,49 @@ _BOTTOM_WORDS = (
     "长筒袜", "打底裤",
 )
 _TORN = ("torn", "ripped", "tear", "hole in clothes", "wet clothes",
-         "撕破", "撕裂", "破洞", "破损", "湿透")
+         "撕破", "撕裂", "破洞", "破损", "湿衣")
 _FLUIDS = ("cum", "semen", "creampie", "ejaculat", "pussy juice")
+_SEX_ACTS = (
+    "penetration", "insertion", "intercourse", "thrusting", "sex",
+    "penis in pussy", "vaginal", "riding", "cowgirl", "missionary",
+    "doggystyle", "doggy style", "mating press", "straddling",
+)
+_ORAL_ACTS = (
+    "fellatio", "blowjob", "oral", "cunnilingus", "licking penis",
+    "deepthroat", "deep throat",
+)
+_ANAL_ACTS = ("anal", "anal sex", "anal penetration", "anus")
+_PULLOUT = (
+    "pullout", "pull out", "penis out", "withdrawal", "after sex",
+    "afterglow", "post sex", "post-coital",
+)
+_AFTER_SEX = ("after sex", "afterglow", "post sex", "post-coital")
+_DEPTH_RANK = (
+    (3, ("deep penetration", "deeper penetration", "deep insertion")),
+    (2, ("moderate penetration", "moderate insertion")),
+    (1, ("shallow penetration", "shallow insertion")),
+)
+_SOLO_PARTNER_WORDS = (
+    "legs wrapped around waist", "legs wrapped around partner",
+    "arms around neck", "arms around partner", "hand on partner",
+    "hands on partner", "holding partner", "hugging", "embracing",
+    "kissing", "against partner", "with partner", "another person",
+    "second person", "multiple people", "wrapped around", "legs around",
+    "arms around", "around waist", "around neck", "cowgirl", "missionary",
+    "doggystyle", "doggy style", "mating press", "straddling", "riding",
+)
+_FUTURE_STATE_WORDS = (
+    "blood", "bleed", "wound", "injured", "injury", "bruise",
+    "dead", "corpse", "unconscious", "killed", "strangled", "stabbed",
+    "gun", "pistol", "rifle", "sword", "knife", "blade", "weapon",
+    "spear", "arrow", "shield", "armor",
+    "fire", "burning", "burned", "smoke", "explosion", "exploded",
+    "destroyed", "broken", "cracked", "collapsed", "ruins",
+    "tied", "bound", "handcuffed", "restrained", "rope", "chain", "cage",
+    "transformed", "transformation", "tentacle", "magic", "spell",
+    "food", "cake", "meal", "drink", "bottle", "cup", "plate",
+    "phone", "book", "umbrella", "bag", "box", "key", "door",
+)
 _IRREVERSIBLE = _FLUIDS + _TORN + ("crotchless",)
 _STATE_WORDS = (
     "deep penetration", "shallow penetration", "deeper penetration",
@@ -160,6 +201,8 @@ def guard_next(next_shot: dict[str, Any] | None) -> set[str]:
                            "胸罩松开", "胸罩滑落", "胸罩拉下", "露胸",
                            "胸部露出"))
     torn = _has(text, _TORN)
+    next_after = _has(text, _AFTER_SEX)
+    next_sex = _has(text, _SEX_ACTS) and not next_after
     banned: set[str] = set()
     if not nude:
         banned.update(_NUDE)
@@ -181,6 +224,23 @@ def guard_next(next_shot: dict[str, Any] | None) -> set[str]:
         banned.update(_TORN)
     if not _has(text, _FLUIDS):
         banned.update(_FLUIDS)
+    if not next_sex:
+        banned.update(_SEX_ACTS)
+    else:
+        max_depth = 3
+        for rank, words in _DEPTH_RANK:
+            if _has(text, words):
+                max_depth = rank
+                break
+        for rank, words in _DEPTH_RANK:
+            if rank > max_depth:
+                banned.update(words)
+    if not next_after and not _has(text, _PULLOUT):
+        banned.update(_PULLOUT)
+    if not _has(text, _ORAL_ACTS):
+        banned.update(_ORAL_ACTS)
+    if not _has(text, _ANAL_ACTS):
+        banned.update(_ANAL_ACTS)
     return banned
 
 
@@ -227,6 +287,33 @@ def _filtered(tags: list[str], banned: set[str]) -> list[str]:
     return result
 
 
+def _future_blocked(tag: str, next_text: str) -> bool:
+    low = _norm(tag)
+    matched = [word for word in _FUTURE_STATE_WORDS if _has(low, (word,))]
+    if not matched:
+        return False
+    return not any(_has(next_text, (word,)) for word in matched)
+
+
+def _solo_blocked(shot: dict[str, Any]) -> set[str]:
+    text = _text(shot)
+    if not _has(text, ("solo",)):
+        return set()
+    has_girl = _has(text, ("1girl",))
+    has_boy = _has(text, ("1boy",))
+    if _has(text, ("2girls", "2boys", "multiple girls", "multiple boys",
+                   "multiple people", "group")):
+        return set()
+    if has_girl and has_boy:
+        return set()
+    blocked = set(_SOLO_PARTNER_WORDS)
+    if has_girl:
+        blocked.update(("1boy", "2boys", "multiple boys"))
+    elif has_boy:
+        blocked.update(("1girl", "2girls", "multiple girls"))
+    return blocked
+
+
 def _anchor_tags(shot: dict[str, Any],
                  next_shot: dict[str, Any] | None) -> list[str]:
     base = [tag.strip() for tag in str(shot.get("prompt") or "").split(",")
@@ -255,6 +342,12 @@ def sanitize_expansion_prompt(prompt: str, shot: dict[str, Any],
     tags = _clothing_gate(tags, shot)
     tags = _damage_gate(tags, shot)
     tags = _filtered(tags, guard_next(next_shot))
+    next_text = _text(next_shot)
+    if next_text:
+        tags = [tag for tag in tags if not _future_blocked(tag, next_text)]
+    solo_blocked = _solo_blocked(shot)
+    if solo_blocked:
+        tags = _filtered(tags, solo_blocked)
     seen: set[str] = set()
     result: list[str] = []
     for tag in tags:

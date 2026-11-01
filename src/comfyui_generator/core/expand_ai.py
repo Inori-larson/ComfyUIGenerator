@@ -70,18 +70,32 @@ SYSTEM = (
     "- remove：从当前标签里删掉的状态/细节标签；\n"
     "- add：新增的状态/细节标签。\n"
     "硬规则：\n"
-    "1. 不要删除 cast、角色身份、发色瞳色、场景、家具、光线、镜头、构图和主要动作/姿势。\n"
-    "2. 每步至少改动 4 个标签（remove + add 总数），并形成明显递进；"
+    "1. 必须保留 cast、角色身份、发色瞳色、场景、家具、光线、机位、景别、构图、"
+    "画面内人数和主要姿势大类（躺/坐/站/跪/趴）；"
+    "在这些大框架内，允许并必须改变四肢位置、身体朝向、臀胯角度、腿部开合、"
+    "手部支撑、身体弓起程度、插入角度和深度。\n"
+    "2. 每步至少改动 6 个标签（remove + add 总数），并形成明显递进；"
     "第一步偏前段，最后一步偏后段或余韵。\n"
     "3. 每步至少覆盖两个不同维度，不要只改表情：表情/视线、动作幅度/深度、"
     "手和身体位置、环境互动、衣物半脱/破损、体液/余韵。"
-    "每一步都必须改动至少一个动作/四肢/身体标签（手、手臂、腿、大腿、臀、脚、"
-    "插入深度、姿势），不能只换眼神和嘴。\n"
+    "每一步至少加入 2 个动作/四肢/身体标签（手、手臂、腿、大腿、臀、脚、"
+    "插入深度、姿势），并且至少改变 1 个姿势/身体朝向（前倾、后仰、侧身、"
+    "抬臀、跨坐、跪趴、抱腿、腿缠腰等），不能只换眼神、嘴或微小手指动作。\n"
     "4. 当前 prompt 已有后段状态（深插、高潮、体液、余韵）时，前几步应先移除这些状态，"
     "后几步再恢复或继续推进；不要每一步都保留同一个深度和同一个表情。\n"
-    "5. 下一镜只作为上限约束：下一镜还穿着的衣服不能提前脱；下一镜没有的裸露、插入、体液、"
-    "撕衣不能提前出现；下一镜已经允许的才可以出现。下一镜为 null 时没有该限制。\n"
-    "6. 不要换场景、不要换人、不要换主要动作。\n"
+    "5. 下一镜只作为上限约束，且对所有题材通用（性爱、战斗、日常、运动、奇幻、"
+    "料理、洗浴等）：下一镜还穿着的衣服不能提前脱；下一镜没有的裸露、性行为、"
+    "深插、拔出、射精、体液、伤害、血迹、武器/道具使用、场景破坏、变身/技能、"
+    "死亡、新体位，都不能提前出现；下一镜已经允许的才可以出现。不要把下一镜"
+    "没发生的动作、事件或状态提前塞进当前镜。下一镜为 null 时没有该限制。\n"
+    "6. 不要换场景、不要换人、不要换机位/景别/构图，也不要改变主要姿势大类。"
+    "原镜头是躺姿就保持躺姿，只改变腿抬起/张开/缠腰、侧身角度、抬臀、手部支撑、"
+    "身体弓起和插入深度/角度；不要变成站立、走动、换房间或切镜头。"
+    "仍要大胆改变四肢和身体细节，禁止五步都保持完全相同的姿势。\n"
+    "6b. 如果当前镜头是 solo/单人，禁止添加需要第二个可见人物才能完成的标签："
+    "拥抱、接吻、腿缠腰、手臂缠脖、手扶对方、1boy/2girls/2boys 等；"
+    "否则模型容易画出第二个头或第二个人。单人动作只改变自己的四肢、重心、"
+    "身体朝向、手撑位置和表情。\n"
     "7. 一旦当前 prompt 已有 cum/semen/体液或 torn/ripped 破损衣物，后续步骤不能删除，"
     "只能增加、累积或加重。\n"
     "8. 每步必须替换旧的手/手臂动作和表情：add 新手势时同时 remove 冲突的旧手势，"
@@ -95,8 +109,13 @@ USER_HEADER = (
     "为每镜生成指定数量的增量步骤。输出格式："
     "{\"expansions\":[{\"id\":\"01\",\"steps\":[{\"remove\":[\"...\"],\"add\":[\"...\"]}]}]}。"
     "每个 id 的 steps 数量必须等于 state_count；"
-    "每个 step 的 remove+add 至少 4 个标签，步骤之间不能重复；"
-    "不要只替换表情，动作、四肢小动作、深度、体液和衣物状态也要形成递进；"
+    "每个 step 的 remove+add 至少 6 个标签，其中至少 2 个动作/四肢/姿势变化，"
+    "并且至少 1 个姿势或身体朝向变化；步骤之间不能重复；"
+    "动作变化不能超出原镜头的机位、景别、构图、场景和主要姿势大类；"
+    "所有题材都要遵守下一镜上限：下一镜没有发生的动作、事件、伤害、道具、"
+    "性行为、脱衣、场景变化和新体位不要提前出现；"
+    "solo/单人镜头禁止添加拥抱、接吻、腿缠腰、手扶对方或第二个人的标签；"
+    "不要只替换表情，动作、四肢大幅度变化、深度、体液和衣物状态也要形成递进；"
     "体液和破损衣物只能增加，不能删除。\n"
 )
 
@@ -186,6 +205,13 @@ def _expression_tags(keys: set[str]) -> set[str]:
     return {key for key in keys if _expression_slots(key)}
 
 
+def _body_action_tags(keys: set[str]) -> set[str]:
+    return {
+        key for key in keys
+        if _is_pose_tag(key) or _limb_slots(key) or _state_slots(key)
+    }
+
+
 def _penetration_tags(keys: set[str]) -> set[str]:
     return {
         key for key in keys
@@ -256,6 +282,7 @@ def _cleaned_batch(raw: Any, batch: list[dict[str, Any]],
             reset = sequence and step_index == 0 and can_reset
             if reset:
                 remove += _sequence_reset_tags(current)
+                add = [tag for tag in add if not _sequence_reset_tags(tag)]
             elif sequence and step_index == 0:
                 add = _sequence_reset_tags(current) + add
             current = apply_expansion_delta(
@@ -277,11 +304,14 @@ def _needs_retry(cleaned: dict[str, list[str]], batch: list[dict[str, Any]],
         base = {tag.strip().lower() for tag in
                 str(shot.get("prompt") or "").split(",") if tag.strip()}
         seen: set[str] = set()
+        previous_keys = base
         previous_pose = _pose_tags(base)
         previous_penetration = _penetration_tags(base)
         for index, prompt in enumerate(prompts):
             keys = {tag.strip().lower() for tag in prompt.split(",") if tag.strip()}
-            if len(keys ^ base) < 4 or prompt.lower() in seen:
+            if len(keys ^ base) < 6 or prompt.lower() in seen:
+                return True
+            if len(_body_action_tags(keys) ^ _body_action_tags(previous_keys)) < 2:
                 return True
             changed_categories = _categories(keys ^ base)
             base_categories = _categories(base)
@@ -307,6 +337,7 @@ def _needs_retry(cleaned: dict[str, list[str]], batch: list[dict[str, Any]],
                     return True
                 if any(word in base and word in keys for word in _FLUID_WORDS):
                     return True
+            previous_keys = keys
             seen.add(prompt.lower())
     return False
 
@@ -351,15 +382,23 @@ def generate_expansions(client: Any, model: str, shots: list[dict[str, Any]],
                     raw, ensure_ascii=False)},
                 {"role": "user", "content": (
                     "The previous deltas were too small or repeated. Rewrite "
-                    "the whole JSON. Each step must contain at least 4 total "
-                    "remove+add tags, must not remove scene/character/main "
-                    "action anchors, and must form a clear progression. "
-                    "Every step must change at least one action/limb/body "
-                    "tag, not only expression. In sequence mode the first "
-                    "state may reset final cum/penetration tags to create "
-                    "the starting state; from the second state onward never "
-                    "remove cum/semen/fluid or torn/ripped clothing. Return "
-                    "JSON only.")},
+                    "the whole JSON. Each step must contain at least 6 total "
+                    "remove+add tags, including at least 2 action/limb/pose "
+                    "changes and at least 1 clear body-orientation or "
+                    "intercourse-position change (leaning, arching, hip "
+                    "angle, leg wrap, legs raised, hand support, depth). "
+                    "Do not keep the same pose across all steps, but do not "
+                    "change the camera angle, framing, shot size, location, "
+                    "character count, or main pose category. Never add an "
+                    "action, event, injury, weapon/prop use, scene change, "
+                    "penetration depth, pullout, cum, undressing, or new "
+                    "position that the next shot does not contain. This "
+                    "applies to every genre, not only sex scenes. Keep "
+                    "scene and character anchors, and form a clear "
+                    "progression. In sequence mode the first state may reset "
+                    "final cum/penetration tags to create the starting state; "
+                    "from the second state onward never remove cum/semen/fluid "
+                    "or torn/ripped clothing. Return JSON only.")},
             ]
         result.update(cleaned)
     return result

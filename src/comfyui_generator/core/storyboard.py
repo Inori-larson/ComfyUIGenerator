@@ -126,6 +126,9 @@ SCRIPT_SYSTEM = (
     "性交中默认至少保留一件情趣服装、内衣或丝袜，除非用户明确要求全裸；"
     "优先半脱、拨开、撕破、挂腿，禁止无铺垫直接全裸。"
     + INTIMATE_CLOTHING_EVENTS +
+    "性行为、前戏、口交、插入、高潮、射精和余韵必须写清体液与交互："
+    "唾液、湿润、阴道汁、潮吹、射精、精液、吞咽、射在身体/脸上等；"
+    "不能只写动作，不能整段没有体液反馈。"
     "3. 每镜 script 必须覆盖：角色/cast、服装/裸露状态、可见身体部位、姿势动作、表情、"
     "地点、景别、机位/角度、构图、光线时间、NSFW 状态。\n"
     "4. 因果连续：下一镜必须能从上镜动作自然接上，禁止无故重启动作或换场景。\n"
@@ -149,21 +152,44 @@ TAG_SYSTEM = (
     "不要漏固定场景词，不要只写身份或服装清单。若 script 有撕破、破损、拨开衣物，"
     "必须输出对应状态标签，不能改成普通完整服装。\n"
     "4. 必须按 script 的 cast 写清人数与性别：单人 1girl, solo；女主+我 1girl, 1boy；"
-    "禁止出现 cast 之外的 second person、people、multiple boys、multiple girls。"
-    "角色锁定表里 appearance 非空时必须逐字保留该角色的发色、瞳色、发型、脸、身材、"
-    "身体和标志物特征，每一镜都要写，不能改变、减少或省略；appearance 为空的角色不要自行补充。"
-    "禁止添加 script 或锁定表之外的内衣、内裤、丝袜、胸罩或蕾丝。"
-    "男女同框时，男主只能使用锁定表里男主的服装，不能出现女主的裙子、丝袜、高跟鞋或内衣；"
-    "女主服装也不能写到男主身上。性交中默认保留至少一件情趣服装或丝袜。\n"
+    "每个镜头最多一个男性，永远禁止 2boys、multiple boys、extra boy、second male。"
+    "女性默认 1girl, solo；只有用户明确输入两个女性角色时才允许 2girls 或 multiple girls，"
+    "否则禁止出现第二个女性、2girls、multiple girls。"
+    "禁止出现 cast 之外的 second person、people。"
+    "女主 appearance 非空时必须逐字保留发色、瞳色、发型、脸、身材、身体和标志物特征，"
+    "每一镜都要写，不能改变、减少或省略；appearance 为空的角色不要自行补充。"
+    "男主不写外貌、发型、瞳色、脸、身材、服装或内衣；男主统一写 "
+    "nude male, faceless male, male head out of frame, male face out of frame, "
+    "只保留 1boy、男性身体和阴茎。禁止把女主的裙子、丝袜、高跟鞋或内衣写到男主身上。"
+    "有男主身体在画面内时，不要单独写 penis、cock、POV 或 male pov；"
+    "只写关系动作：penis in pussy、penis in mouth、hand on penis、penis at entrance；"
+    "单写 penis/POV 只用于男主身体完全不可见的镜头。"
+    "禁止 two penises、extra penis、second male、two male bodies。"
+    "初始服装和情趣衣物默认保留；需要暴露时，用同一件衣物的半脱/破损/拨开标签推进，不要整件删除。"
+    "可用通用标签：torn clothes、clothes pull、half-off clothes、clothing damage、panties aside、"
+    "one breast out、open clothes；同时保留原始服装 tag。"
+    "不要写死具体衣物种类；任何被保留的服装都用它自己的半脱/破损状态来露，而不是换成另一种衣服。"
+    "已经脱掉的衣物后续不能重新穿上；服装状态只能从完整→半脱/破损→更少，不能倒退。"
+    "除非剧情明确进入最后全裸阶段，否则不要写 completely nude。"
+    "性行为、前戏、口交、插入、高潮、射精、余韵镜头不能只写动作，必须写出对应体液和交互："
+    "口交写 saliva、drool、cum in mouth、cum swallowing；插入写 wet pussy、pussy juice、creampie；"
+    "高潮写 squirt、orgasm、female ejaculation；射精写 cum、semen、cum on body、cum on face；"
+    "每个性相关镜头至少包含一个与当前行为匹配的体液/湿润/吞咽/喷射标签。"
+    "不要使用分组括号或权重，直接输出普通英文标签串。\n"
     "5. 标签用标准 Danbooru 词，不写整句英文。\n"
     "6. 每条 prompt 建议 25-45 个标签，复杂场景 50-70，最多 100；英文逗号分隔、去重，不要为凑数堆标签。\n"
     "7. 镜头只用 full body、upper body、close-up、medium shot、wide shot、from above/below/side、"
     "dutch angle、POV、depth of field 等抽象词；禁止 camera、holding camera、lens、tripod、photographer。\n"
     "8. 看向镜头写 looking at viewer，不写 looking at camera。本阶段不接收任何角色标签。\n"
     "9. 不生成质量/画质标签（masterpiece, best quality, absurdres、ultra-detailed、highres、sharp focus 等）。\n"
-    "内容示例（只学组织顺序，不要照抄）：坐在床边，双腿分开，手指插入，半闭眼，卧室台灯，夜晚。"
+    "单人示例（只学组织顺序，不要照抄）：坐在床边，双腿分开，手指插入，半闭眼，卧室台灯，夜晚。"
     "→ 1girl, solo, completely nude, pussy, sitting on bed, legs spread, fingering, finger in pussy, "
     "half-closed eyes, bedroom, bed, lamp, night, soft lighting, medium shot。"
+    "双人示例（只学组织顺序，不要照抄）：男主裸体站在左侧，女主穿黑丝和制服坐在右侧。"
+    "→ 1girl, 1boy, nude male, faceless male, male head out of frame, "
+    "male face out of frame, yixuan, long hair, hairclip, black blazer, "
+    "frilled leotard, black pantyhose, bedroom, lamp, night, from side, "
+    "1boy on the left, 1girl on the right。"
 )
 
 STORY_SCHEMA: dict[str, Any] = {
@@ -202,16 +228,16 @@ STORY_SYSTEM = (
     "70–90% 才进入插入和性交，性交中也优先保留内衣、丝袜、吊带或半脱衣物；"
     "90–100% 高潮余韵。禁止没铺垫就脱光、直接插入或跳过前戏。\n"
     "3. 先建立角色锁定表 characters，覆盖剧情中所有实际出场角色：女主、男主、我/男性、配角、"
-    "以及多人场景中的每个人。每个角色必须有唯一 name、gender、固定 appearance、initial_clothing。"
-    "appearance 写英文 Booru 外貌标签（发色、发型、瞳色、体型、身材、标志物、服装以外的固定特征）；"
-    "男性和女性都适用。若角色使用角色 LoRA 且用户没有提供外貌，appearance 可以留空。"
-    "用户填写的“外貌身材”是硬锁定：必须逐字复制到该角色 appearance，"
-    "每一镜都要保留，不能增删改、不能省略、不能被其他角色或服装覆盖。"
-    "用户给出某角色初始服装时必须逐字使用，不能添加该角色初始服装之外的单品；"
-    "用户没有给出某角色服装时，可以在 characters 中为该角色一次性建立固定初始服装，"
-    "必须用英文 Booru 标签，之后全片不得更换。男主/男性/我如果实际出现在画面中，"
-    "也必须在 characters 中建立固定外貌和初始服装。"
-    "characters 建立后，全片不得改变角色外貌、发色、瞳色、体型或初始服装归属。\n"
+    "以及多人场景中的每个人。每个角色必须有唯一 name、gender、appearance、initial_clothing。"
+    "女主 appearance 写英文 Booru 外貌标签（发色、发型、瞳色、体型、身材、标志物、服装以外的固定特征）；"
+    "用户填写的女主“外貌身材”是硬锁定，必须逐字复制，每一镜都要保留。"
+    "女主初始服装必须逐字使用，不能添加初始服装之外的单品；"
+    "用户没有给出女主服装时，可以一次性建立固定初始服装，之后全片不得更换或发明。"
+    "男主/男性/我如果实际出现在画面中，characters 中只写 name 和 gender，"
+    "appearance 和 initial_clothing 必须留空字符串；"
+    "禁止为男主生成任何外貌、发型、瞳色、脸、身材、服装或内衣。"
+    "男主的视觉表现统一由渲染阶段处理为裸体、无脸/头出框。"
+    "characters 建立后，全片不得改变女主外貌或女主初始服装归属。\n"
     "4. 服装只从每个角色自己的初始服装单向变化；慢脱、慢调情，不要一开场就全裸；"
     "禁止发明初始服装之外的内衣、内裤、丝袜、胸罩、蕾丝、连体衣或其他衣物；"
     "需要脱掉时只能脱该角色初始服装中明确存在的单品，脱掉的不得再穿回；"
@@ -220,7 +246,8 @@ STORY_SYSTEM = (
     "每个角色的裸露状态必须独立连续，"
     "不能男主脱了又穿、女主裸了男主也跟着跳变。\n"
     "5. 固定场景、人物关系和人物数量必须前后一致；只有剧情明确移动才换场景。\n"
-    "6. 性行为、前戏、脱衣、高潮等必须写清楚，不要用模糊词或跳过。"
+    "6. 性行为、前戏、脱衣、高潮等必须写清楚，不要用模糊词或跳过；"
+    "性行为必须写唾液、湿润、阴道汁、潮吹、射精、精液、吞咽或射在身体上等体液交互，不能只有动作。"
     + INTIMATE_CLOTHING_EVENTS +
     "要与挑逗、爱抚、自慰、性行为等场景自然组合，写清哪件衣物破损、位置、当前遮挡或暴露状态。\n"
     "7. 只输出 JSON：{\"story\": \"完整中文剧情\", \"characters\": [{\"name\":\"...\","
@@ -850,11 +877,9 @@ def _is_full_nude(beat: str) -> bool:
 
 
 _CLOTHING_REMOVE_RE = (
-    r"(?:脱掉|脱去|脱下|褪下|褪去|解除|摘下|取下|滑落|脱落|掉下|"
-    r"完全脱下|完全褪到|全部脱去|全部脱下|"
-    r"takes? off|took off|pulls? off|pulls? down|slips? off|slides? off|"
-    r"slid off|slipped? down|steps? out of|removes?|unbuttons?|unzips?|"
-    r"peels? off|rips? off|tears? off|falls? off|fell off)"
+    r"(?:脱掉|脱去|脱下|褪下|褪去|完全脱下|完全褪到|全部脱去|全部脱下|"
+    r"takes? off|took off|pulls? off|steps? out of|removes?|"
+    r"peels? off|rips? off|tears? off)"
 )
 
 
@@ -899,11 +924,19 @@ def clothing_states_for_beats(premise: str, beats: list[str],
     worn = set(initial)
     removed: set[str] = set()
     states: list[set[str]] = []
-    for beat in beats:
+    for beat_index, beat in enumerate(beats):
         only = re.search(r"(?:只剩|只穿)(.*)", beat)
         if _is_full_nude(beat):
-            worn = set(accessories)
-            removed.update(known.values())
+            near_end = beat_index >= max(0, len(beats) - 2)
+            if near_end:
+                worn = set(accessories)
+                removed.update(known.values())
+            else:
+                for key, tag in list(known.items()):
+                    if (_removes_item(beat, key)
+                            or _removes_tag(beat, tag)):
+                        worn.discard(tag)
+                        removed.add(tag)
         elif only:
             chosen = set(accessories)
             only_text = only.group(1)
@@ -1005,6 +1038,9 @@ def _split_tags(text: str) -> list[str]:
     seen: set[str] = set()
     for tag in re.split(r"[,，、;；|\n]+", str(text or "")):
         tag = tag.strip(" .")
+        weighted = re.fullmatch(r"(.+?)\((\d+(?:\.\d+)?)\)", tag)
+        if weighted:
+            tag = "(%s:%s)" % (weighted.group(1).strip(), weighted.group(2))
         key = tag.lower()
         if not tag or key in seen:
             continue
@@ -1017,11 +1053,16 @@ def _infer_gender(*parts: str) -> str:
     text = " ".join(str(part or "") for part in parts).lower()
     if re.search(r"男主|男性|男孩|男人|少年|青年|1boy|\bboy\b|\bmale\b|"
                  r"\bman\b|\bmen\b|(^|[^其])他|"
-                 r"(?:^|[\s,，;；])男(?:$|[\s,，;；])", text):
+                 r"(?:^|[\s,，;；])男(?:$|[\s,，;；])|"
+                 r"\b(?:penis|cock|testicles|phallus|beard|muscular|abs|"
+                 r"pectorals|adam's apple)\b", text):
         return "boy"
     if re.search(r"女主|女性|女孩|女人|少女|1girl|\bgirl\b|\bfemale\b|"
                  r"\bwoman\b|\bwomen\b|她|"
-                 r"(?:^|[\s,，;；])女(?:$|[\s,，;；])", text):
+                 r"(?:^|[\s,，;；])女(?:$|[\s,，;；])|"
+                 r"\b(?:breasts?|boobs?|pussy|vagina|labia|clitoris|uterus|"
+                 r"womb|pantyhose|stockings?|thighhighs?|skirt|dress|bra|"
+                 r"panties|lingerie|high heels?|makeup)\b", text):
         return "girl"
     return "other"
 
@@ -1050,15 +1091,26 @@ def _clean_appearance(tags: list[str]) -> list[str]:
             and not _clothing_key(tag) and not _is_accessory(tag)]
 
 
+def _normalize_weight_colons(text: str) -> str:
+    value = str(text or "")
+    value = re.sub(
+        r"\(([^()]+?)\s*[:：]\s*(\d+(?:\.\d+)?)\)",
+        r"\1(\2)", value)
+    return re.sub(
+        r"(?<![(\w])([A-Za-z][A-Za-z0-9 _\-]*?)\s*[:：]\s*(\d+(?:\.\d+)?)",
+        r"\1(\2)", value)
+
+
 def parse_character_profiles(premise: str) -> list[CharacterProfile]:
     role_text = _section_text(premise, ("角色设定：", "角色设定:", "角色标签：",
                                          "角色标签:", "角色：", "角色:",
                                          "人物设定：", "人物设定:", "人物：", "人物:"))
-    clothing_text = _section_text(premise, ("初始服装：", "初始服装:", "初始装扮：",
-                                             "初始装扮:", "服装：", "服装:"))
-    appearance_text = _section_text(
+    clothing_text = _normalize_weight_colons(_section_text(
+        premise, ("初始服装：", "初始服装:", "初始装扮：",
+                  "初始装扮:", "服装：", "服装:")))
+    appearance_text = _normalize_weight_colons(_section_text(
         premise, ("外貌身材：", "外貌身材:", "角色外貌：", "角色外貌:",
-                  "人物外貌：", "人物外貌:", "外貌：", "外貌:", "外形：", "外形:"))
+                  "人物外貌：", "人物外貌:", "外貌：", "外貌:", "外形：", "外形:")))
     body_text = _section_text(premise, ("身材：", "身材:", "体型：", "体型:"))
     if body_text:
         appearance_text = "\n".join(part for part in (appearance_text, body_text)
@@ -1177,6 +1229,15 @@ def normalize_character_profiles(raw: Any, premise: str,
     return profiles
 
 
+def strip_male_profile_details(profiles: list[CharacterProfile]
+                               ) -> list[CharacterProfile]:
+    for profile in profiles:
+        if profile.gender == "boy":
+            profile.appearance = []
+            profile.initial_clothing = []
+    return profiles
+
+
 def character_bible_text(profiles: list[CharacterProfile]) -> str:
     lines = ["角色锁定表（全片硬约束，任何一镜都不得改变）："]
     for profile in profiles:
@@ -1270,6 +1331,15 @@ def _only_targets(beat: str, profiles: list[CharacterProfile],
     return assignments
 
 
+def _only_mentions_clothing(text: str) -> bool:
+    value = str(text or "")
+    if any(re.search(pattern, value, re.I)
+           for _key, patterns in _CLOTHING_KEYS for pattern in patterns):
+        return True
+    return any(re.search(pattern, value, re.I)
+               for pattern in _ACCESSORY_PATTERNS)
+
+
 def character_states_for_beats(profiles: list[CharacterProfile], beats: list[str],
                                initial_states: dict[str, set[str]] | None = None,
                                presence: list[list[CharacterProfile]] | None = None
@@ -1301,12 +1371,24 @@ def character_states_for_beats(profiles: list[CharacterProfile], beats: list[str
         for profile in targets:
             key = profile.key
             if profile in nude_targets:
-                accessories = {tag for tag in profile.initial_clothing
-                               if _is_accessory(tag) and tag not in removed[key]}
-                current[key] = set(accessories)
-                removed[key].update(tag for tag in profile.initial_clothing
-                                    if not _is_accessory(tag))
-            elif key in only_targets:
+                near_end = beat_index >= max(0, len(beats) - 2)
+                if near_end:
+                    accessories = {
+                        tag for tag in profile.initial_clothing
+                        if _is_accessory(tag) and tag not in removed[key]}
+                    current[key] = set(accessories)
+                    removed[key].update(
+                        tag for tag in profile.initial_clothing
+                        if not _is_accessory(tag))
+                else:
+                    for tag in list(current[key]):
+                        clothing_key = _clothing_key(tag)
+                        if (_removes_item(beat, clothing_key)
+                                or _removes_tag(beat, tag)):
+                            current[key].discard(tag)
+                            removed[key].add(tag)
+            elif (key in only_targets
+                  and _only_mentions_clothing(only_targets[key])):
                 chosen = {tag for tag in profile.initial_clothing
                           if _is_accessory(tag) and tag not in removed[key]}
                 only_text = only_targets[key]
@@ -1584,6 +1666,92 @@ def update_clothing_details(profiles: list[CharacterProfile],
                 if owner(profile, key):
                     result[profile.key].add(tag)
     return result
+
+
+_MALE_PROMPT_CLOTHING = (
+    "clothed male", "male clothing", "male outfit", "male uniform",
+    "male suit", "casual clothes", "male casual clothes", "school uniform",
+    "open fly", "unzipped pants", "zipper", "male clothes", "boxers",
+    "briefs", "necktie", "belt buckle",
+)
+_MALE_NUDE_TAGS = (
+    "nude male", "faceless male", "male head out of frame",
+    "male face out of frame", "male body",
+)
+_GENERIC_CLOTHING_DAMAGE = (
+    "torn clothes", "clothes pull", "half-off clothes",
+    "clothing damage",
+)
+_MULTI_MALE_TAGS = (
+    "2boys", "multiple boys", "extra boy", "duplicate boy", "cloned boy",
+    "two male heads", "extra male head", "second male head",
+)
+_MULTI_FEMALE_TAGS = (
+    "2girls", "multiple girls", "extra girl", "duplicate girl", "cloned girl",
+    "two female heads", "extra female head", "duplicate female head",
+    "second female head",
+)
+
+
+def _finalize_shot_prompt(shot: dict[str, Any],
+                          female_clothing: str | None = None) -> None:
+    tags = [tag.strip() for tag in str(shot.get("prompt") or "").split(",")
+            if tag.strip()]
+    text = " ".join(tags).lower()
+    double = "1girl" in text and "1boy" in text
+    if female_clothing is None:
+        female_clothing = str(shot.get("clothing") or "")
+    female_clothing = female_clothing.lower()
+    female_exact = {
+        item.strip().lower() for item in female_clothing.split(",")
+        if item.strip()}
+    female_keys = {_clothing_key(item) for item in female_exact
+                   if _clothing_key(item)}
+    cast = str(shot.get("cast") or "").lower()
+    allow_two_females = bool(re.search(
+        r"(?:\b2\s*girls\b|\btwo\s+girls\b|\bmultiple\s+girls\b)", cast))
+    cleaned: list[str] = []
+    for tag in tags:
+        low = tag.lower()
+        if low.startswith("then ") or " then " in low:
+            continue
+        if any(word in low for word in _MULTI_MALE_TAGS):
+            continue
+        if not allow_two_females and any(
+                word in low for word in _MULTI_FEMALE_TAGS):
+            continue
+        if double and low == "solo focus":
+            continue
+        if double and any(word in low for word in _MALE_PROMPT_CLOTHING):
+            continue
+        if double and _clothing_key(tag):
+            if low not in female_exact and not (
+                    _is_clothing_state_tag(tag)
+                    and _clothing_key(tag) in female_keys):
+                continue
+        if female_clothing and low in (
+                "completely nude", "fully nude", "full nude", "nude", "naked"):
+            continue
+        if not female_clothing and (
+                _clothing_key(tag) or _is_clothing_state_tag(tag)):
+            continue
+        cleaned.append(tag)
+    if double:
+        cleaned.extend(_MALE_NUDE_TAGS)
+    if not female_clothing and "1girl" in text:
+        cleaned.append("completely nude")
+    elif female_clothing and any(
+            word in text for word in (
+                "pussy", "crotch", "breasts out", "one breast out", "nipples")):
+        cleaned.extend(_GENERIC_CLOTHING_DAMAGE)
+    seen: set[str] = set()
+    result: list[str] = []
+    for tag in cleaned:
+        key = tag.lower()
+        if key and key not in seen:
+            seen.add(key)
+            result.append(tag)
+    shot["prompt"] = ", ".join(result)
 
 
 def apply_character_state(prompt: str, profiles: list[CharacterProfile],
@@ -2047,8 +2215,8 @@ def generate_full_story_pipeline(client: OllamaClient, premise: str,
     story = str(story_raw.get("story") or "").strip()
     if not story:
         raise ValueError("Model returned an empty complete story.")
-    profiles = normalize_character_profiles(
-        story_raw.get("characters"), premise, options.strip_appearance)
+    profiles = strip_male_profile_details(normalize_character_profiles(
+        story_raw.get("characters"), premise, options.strip_appearance))
     bible = character_bible_text(profiles)
     log("Character lock: " + " | ".join(
         "%s(%s): %s" % (profile.name, profile.gender,
@@ -2117,6 +2285,7 @@ def generate_full_story_pipeline(client: OllamaClient, premise: str,
             part = normalize_tagged(tag_raw, scripts)
             for index, shot in enumerate(part):
                 state_index = _shot_state_index(shot, outline, offset + index)
+                female_clothing: str | None = None
                 if state_index < len(character_states):
                     states = character_states[state_index]
                     beat = beats[state_index] if state_index < len(beats) else ""
@@ -2128,6 +2297,9 @@ def generate_full_story_pipeline(client: OllamaClient, premise: str,
                     worn = set()
                     for profile in present:
                         worn.update(states.get(profile.key) or set())
+                        if profile.gender == "girl":
+                            female_clothing = ", ".join(
+                                sorted(states.get(profile.key) or set()))
                     shot["clothing"] = ", ".join(sorted(worn))
                     shot["characters"] = ", ".join(
                         profile.name for profile in present)
@@ -2141,6 +2313,7 @@ def generate_full_story_pipeline(client: OllamaClient, premise: str,
                         shot, profiles, states, details, present)
                 if state_index < len(scene_states):
                     shot["scene"] = ", ".join(scene_states[state_index])
+                _finalize_shot_prompt(shot, female_clothing)
             result.extend(part)
             _notify_partial(options, result)
             log("Stage 4/4: Act %d +%d shots (%d/%d)" % (
@@ -2325,7 +2498,7 @@ def _generate_long_storyboard(client: OllamaClient, premise: str,
                               shots: int) -> list[dict[str, str]]:
     log = options.log
     result: list[dict[str, str]] = initial[:shots]
-    profiles = parse_character_profiles(premise)
+    profiles = strip_male_profile_details(parse_character_profiles(premise))
     bible = character_bible_text(profiles)
     spine = build_story_spine(premise, shots)
     act_total = (shots + MAX_ACT_SHOTS - 1) // MAX_ACT_SHOTS
@@ -2426,29 +2599,34 @@ def _generate_long_storyboard(client: OllamaClient, premise: str,
                 state_index = _shot_state_index(shot, outline, offset + index)
                 beat = (story_beats[state_index]
                         if state_index < len(story_beats) else "")
-            if (beat and state_index < len(character_states)
-                    and state_index < len(scene_states)):
-                states = character_states[state_index]
-                present = present_character_profiles(profiles, shot, beat)
-                details = update_clothing_details(
-                    profiles, states, present, shot["prompt"], details)
-                shot["prompt"] = apply_character_state(
-                    shot["prompt"], profiles, states, present, details)
-                worn = set()
-                for profile in present:
-                    worn.update(states.get(profile.key) or set())
-                shot["clothing"] = ", ".join(sorted(worn))
-                shot["characters"] = ", ".join(
-                    profile.name for profile in present)
-                shot["character_states"] = {
-                    profile.key: ", ".join(sorted(states.get(profile.key) or set()))
-                    for profile in profiles}
-                shot["clothing_details"] = {
-                    profile.key: ", ".join(sorted(details.get(profile.key) or set()))
-                    for profile in profiles}
-                attach_character_prompt_groups(
-                    shot, profiles, states, details, present)
-                shot["scene"] = ", ".join(scene_states[state_index])
+                female_clothing: str | None = None
+                if (beat and state_index < len(character_states)
+                        and state_index < len(scene_states)):
+                    states = character_states[state_index]
+                    present = present_character_profiles(profiles, shot, beat)
+                    details = update_clothing_details(
+                        profiles, states, present, shot["prompt"], details)
+                    shot["prompt"] = apply_character_state(
+                        shot["prompt"], profiles, states, present, details)
+                    worn = set()
+                    for profile in present:
+                        worn.update(states.get(profile.key) or set())
+                        if profile.gender == "girl":
+                            female_clothing = ", ".join(
+                                sorted(states.get(profile.key) or set()))
+                    shot["clothing"] = ", ".join(sorted(worn))
+                    shot["characters"] = ", ".join(
+                        profile.name for profile in present)
+                    shot["character_states"] = {
+                        profile.key: ", ".join(sorted(states.get(profile.key) or set()))
+                        for profile in profiles}
+                    shot["clothing_details"] = {
+                        profile.key: ", ".join(sorted(details.get(profile.key) or set()))
+                        for profile in profiles}
+                    attach_character_prompt_groups(
+                        shot, profiles, states, details, present)
+                    shot["scene"] = ", ".join(scene_states[state_index])
+                _finalize_shot_prompt(shot, female_clothing)
             result.extend(part)
             _notify_partial(options, result)
             log("Act %d: +%d shots (%d/%d)" % (act_index, len(part), len(result), shots))
@@ -2476,7 +2654,7 @@ def generate_storyboard(client: OllamaClient, premise: str,
     if shots > MAX_ACT_SHOTS:
         return _generate_long_storyboard(client, premise, options, result, shots)
 
-    profiles = parse_character_profiles(premise)
+    profiles = strip_male_profile_details(parse_character_profiles(premise))
     bible = character_bible_text(profiles)
     script_base = len(result)
     remaining = shots - script_base
@@ -2582,6 +2760,7 @@ def generate_storyboard(client: OllamaClient, premise: str,
             state_index = _shot_state_index(shot, outline, state_offset + index)
             beat = (story_beats[state_index]
                     if state_index < len(story_beats) else "")
+            female_clothing: str | None = None
             if (beat and state_index < len(character_states)
                     and state_index < len(scene_states)):
                 states = character_states[state_index]
@@ -2593,6 +2772,9 @@ def generate_storyboard(client: OllamaClient, premise: str,
                 worn = set()
                 for profile in present:
                     worn.update(states.get(profile.key) or set())
+                    if profile.gender == "girl":
+                        female_clothing = ", ".join(
+                            sorted(states.get(profile.key) or set()))
                 shot["clothing"] = ", ".join(sorted(worn))
                 shot["characters"] = ", ".join(
                     profile.name for profile in present)
@@ -2605,6 +2787,7 @@ def generate_storyboard(client: OllamaClient, premise: str,
                 attach_character_prompt_groups(
                     shot, profiles, states, details, present)
                 shot["scene"] = ", ".join(scene_states[state_index])
+            _finalize_shot_prompt(shot, female_clothing)
         result.extend(part)
         _notify_partial(options, result)
         log("Stage B: +%d shots (%d/%d)" % (len(part), len(result), shots))

@@ -132,7 +132,7 @@ def test_expansion_without_ai_prompts_stays_keyframe_only():
     assert [task.kind for task in tasks] == ["keyframe", "keyframe"]
 
 
-def test_expansion_denoise_stays_low_and_rises():
+def test_single_expansion_denoise_stays_low_and_rises():
     shot = {"id": "01", "name": "a", "prompt": "shot",
             "ai_expansions": ["a", "b", "c"]}
     tasks = build_tasks({}, [shot], 1, "increment", 100, expansions=3)
@@ -142,6 +142,20 @@ def test_expansion_denoise_stays_low_and_rises():
     values = [runner._expand_denoise(task) for task in expand]
     assert 0.65 <= values[0] <= 0.74
     assert values[-1] <= 0.85
+    assert values[0] < values[-1]
+
+
+def test_sequence_expansion_uses_stronger_denoise():
+    shot = {"id": "01", "name": "a", "prompt": "shot",
+            "ai_expansions": ["a", "b", "c"]}
+    tasks = build_tasks({}, [shot], 1, "increment", 100, expansions=3)
+    expand = [task for task in tasks if task.kind == "expand"]
+    runner = TaskRunner(
+        None, {"settings": {"img2img": {
+            "denoise": 0.35, "sequence_mode": True}}}, [], "")
+    values = [runner._expand_denoise(task) for task in expand]
+    assert 0.82 <= values[0] <= 0.86
+    assert values[-1] <= 0.92
     assert values[0] < values[-1]
 
 
@@ -209,14 +223,122 @@ def test_sanitize_expansion_blocks_future_clothing_and_penetration():
     assert "completely nude" not in prompt
 
 
-def test_sanitize_expansion_allows_nudity_when_next_shot_is_nude():
+def test_sanitize_expansion_allows_nudity_and_sex_already_in_next_shot():
     shot = {"id": "01", "name": "a", "prompt": "1girl, 1boy, cowgirl_position"}
-    next_shot = {"id": "02", "name": "b", "prompt": "1girl, 1boy, completely nude"}
+    next_shot = {
+        "id": "02", "name": "b",
+        "prompt": "1girl, 1boy, completely nude, penetration, thrusting",
+    }
     prompt = sanitize_expansion_prompt(
         "1girl, 1boy, completely nude, penetration, thrusting", shot, next_shot)
     assert "completely nude" in prompt
     assert "penetration" in prompt
     assert "thrusting" in prompt
+
+
+def test_sanitize_expansion_blocks_actions_missing_from_next_shot():
+    shot = {"id": "01", "name": "a", "prompt": "1girl, 1boy, lying"}
+    next_shot = {"id": "02", "name": "b", "prompt": "1girl, 1boy, lying, smile"}
+    prompt = sanitize_expansion_prompt(
+        "1girl, 1boy, lying, deep penetration, cum, penis pullout, "
+        "completely nude, tears", shot, next_shot)
+    assert "deep penetration" not in prompt
+    assert "cum" not in prompt
+    assert "penis pullout" not in prompt
+    assert "completely nude" not in prompt
+    assert "smile" not in prompt
+
+
+def test_sanitize_expansion_blocks_non_sex_future_states():
+    shot = {
+        "id": "01", "name": "a",
+        "prompt": "1girl, warrior, standing, sword_sheathed",
+    }
+    next_shot = {
+        "id": "02", "name": "b",
+        "prompt": "1girl, warrior, standing, sword_sheathed, smile",
+    }
+    prompt = sanitize_expansion_prompt(
+        "1girl, warrior, standing, sword_sheathed, blood_on_face, "
+        "holding_gun, broken_window, hand_on_cheek",
+        shot, next_shot)
+    assert "blood_on_face" not in prompt
+    assert "holding_gun" not in prompt
+    assert "broken_window" not in prompt
+    assert "sword_sheathed" in prompt
+    assert "hand_on_cheek" in prompt
+
+
+def test_sanitize_expansion_allows_future_states_present_in_next_shot():
+    shot = {
+        "id": "01", "name": "a",
+        "prompt": "1girl, warrior, standing, sword_sheathed",
+    }
+    next_shot = {
+        "id": "02", "name": "b",
+        "prompt": "1girl, warrior, standing, sword_sheathed, "
+                  "blood_on_face, broken_window",
+    }
+    prompt = sanitize_expansion_prompt(
+        "1girl, warrior, standing, blood_on_face, broken_window, "
+        "sword_sheathed", shot, next_shot)
+    assert "blood_on_face" in prompt
+    assert "broken_window" in prompt
+    assert "sword_sheathed" in prompt
+
+
+def test_sanitize_expansion_keeps_solo_scene_to_one_person():
+    shot = {"id": "01", "name": "a", "prompt": "1girl, solo, lying, on table"}
+    prompt = sanitize_expansion_prompt(
+        "1girl, solo, lying, on table, legs wrapped around waist, "
+        "legs wrapped around thighs, arms around neck, kissing, 1boy, "
+        "hand_on_table, pussy",
+        shot, None)
+    assert "legs wrapped around waist" not in prompt
+    assert "legs wrapped around thighs" not in prompt
+    assert "arms around neck" not in prompt
+    assert "kissing" not in prompt
+    assert "1boy" not in prompt
+    assert "hand_on_table" in prompt
+    assert "pussy" in prompt
+
+
+def test_sanitize_expansion_allows_partner_actions_for_double_shot():
+    shot = {
+        "id": "01", "name": "a",
+        "prompt": "1girl, 1boy, lying, legs wrapped around waist, kissing",
+    }
+    prompt = sanitize_expansion_prompt(
+        "1girl, 1boy, lying, legs wrapped around waist, kissing",
+        shot, None)
+    assert "legs wrapped around waist" in prompt
+    assert "kissing" in prompt
+
+
+def test_sanitize_expansion_does_not_exceed_next_shot_depth_or_pullout():
+    shot = {"id": "01", "name": "a", "prompt": "1girl, 1boy, lying"}
+    next_shot = {
+        "id": "02", "name": "b",
+        "prompt": "1girl, 1boy, lying, shallow penetration",
+    }
+    prompt = sanitize_expansion_prompt(
+        "1girl, 1boy, lying, shallow penetration, deep penetration, "
+        "penis pullout", shot, next_shot)
+    assert "shallow penetration" in prompt
+    assert "deep penetration" not in prompt
+    assert "penis pullout" not in prompt
+
+
+def test_sanitize_expansion_allows_pullout_when_next_shot_has_after_sex():
+    shot = {"id": "01", "name": "a", "prompt": "1girl, 1boy, lying"}
+    next_shot = {
+        "id": "02", "name": "b",
+        "prompt": "1girl, 1boy, lying, after sex, cum on body",
+    }
+    prompt = sanitize_expansion_prompt(
+        "1girl, 1boy, lying, penis pullout, cum on body", shot, next_shot)
+    assert "penis pullout" in prompt
+    assert "cum on body" in prompt
 
 
 def test_sanitize_expansion_single_has_no_next_guard():
@@ -289,7 +411,8 @@ def test_sequence_mode_can_reset_final_state_on_first_step():
                 "id": "01",
                 "steps": [
                     {"remove": ["cum", "deep penetration"],
-                     "add": ["shallow penetration", "calm expression"]},
+                     "add": ["cum on body", "shallow penetration",
+                             "calm expression"]},
                     {"remove": ["shallow penetration"],
                      "add": ["moderate penetration", "arm under head"]},
                     {"remove": ["moderate penetration"],
@@ -308,7 +431,7 @@ def test_sequence_mode_can_reset_final_state_on_first_step():
     assert "cum" not in prompts[0]
     assert "cum on body" not in prompts[0]
     assert "deep penetration" not in prompts[0]
-    assert "shallow penetration" in prompts[0]
+    assert "shallow penetration" not in prompts[0]
     assert "moderate penetration" in prompts[1]
 
 

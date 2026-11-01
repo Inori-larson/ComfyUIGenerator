@@ -14,17 +14,13 @@ from typing import Any, Callable
 from comfyui_generator.core.comfy import ComfyClient, ComfyError, ComfyEventStream
 from comfyui_generator.core.pose import (
     builtin_pose_json, builtin_pose_reference, generate_pose_json_skeleton,
-    generate_pose_skeleton, pose_pair_only, pose_preset_for_shot,
-    pose_should_apply,
+    generate_pose_skeleton, pose_preset_for_shot, pose_should_apply,
 )
 from comfyui_generator.core.preview import PreviewFrame
 from comfyui_generator.core.workflow import (
     build_workflow,
-    compose_pass_prompts,
     compose_prompts,
     is_double_shot,
-    prompt_groups,
-    split_mask_region,
     stage_for_node,
 )
 
@@ -293,11 +289,17 @@ class TaskRunner:
     def _expand_denoise(self, task: Task) -> float:
         setting = (self.cfg.get("settings") or {}).get("img2img") or {}
         base = float(setting.get("denoise", 0.35))
-        progress = task.expand_step / float(max(1, task.expand_steps))
-        denoise = max(base, 0.65) + 0.20 * max(0.0, min(1.0, progress))
+        progress = max(0.0, min(1.0, task.expand_step / float(
+            max(1, task.expand_steps))))
+        if setting.get("sequence_mode"):
+            denoise = 0.82 + 0.10 * progress
+            limit = 0.94
+        else:
+            denoise = max(base, 0.65) + 0.20 * progress
+            limit = 0.85
         if str(task.shot.get("phase") or "") == "sex":
             denoise += 0.02
-        return max(0.15, min(0.85, denoise))
+        return max(0.15, min(limit, denoise))
 
     def _chain_image(self, client: ComfyClient, task: Task) -> str:
         setting = (self.cfg.get("settings") or {}).get("img2img") or {}
@@ -494,71 +496,6 @@ class TaskRunner:
         self.log("Task %s timed out" % task.label)
         return None
 
-    def _run_split(self, task: Task, shot: dict[str, Any], prefix: str) -> bool:
-        setting = (self.cfg.get("settings") or {}).get("split") or {}
-        groups = prompt_groups(shot)
-        girl = next((group for group in groups
-                     if str(group.get("gender") or "") == "girl"), None)
-        boy = next((group for group in groups
-                    if str(group.get("gender") or "") == "boy"), None)
-        if not girl or not boy:
-            return False
-        first_shot = dict(shot)
-        first_shot["prompt"] = girl["prompt"]
-        first_shot["cast"] = "1girl solo"
-        first_shot.pop("prompt_groups", None)
-        self._attach_pose(task, first_shot, ("girl",))
-        first_positive, first_negative = compose_pass_prompts(
-            self.cfg, first_shot, girl)
-        self.log("Task %s split pass 1/2: girl only" % task.label)
-        self.log("Task %s split 1 positive: %s" % (task.label, first_positive))
-        self.log("Task %s split 1 negative: %s" % (task.label, first_negative))
-        first_image = self._execute_workflow(
-            task, first_shot, first_positive, first_negative,
-            prefix + "_split1", stage="base")
-        if not first_image:
-            if self._cancel.is_set():
-                return True
-            self.log("Task %s split pass 1 failed; using normal render" % task.label)
-            return False
-        init_image = self._upload_output_image(self.client, task, first_image, "split")
-        if not init_image:
-            self._set_state(task, "done", image=first_image, stage="",
-                            step=task.total or task.step)
-            self.log("Task %s split pass 2 skipped: upload failed" % task.label)
-            return True
-        region = str(setting.get("region") or "auto")
-        mask = split_mask_region(shot, region)
-        second_shot = dict(shot)
-        second_shot["prompt"] = boy["prompt"]
-        second_shot["cast"] = "1boy"
-        second_shot["use_ipadapter"] = False
-        second_shot["skip_character_loras"] = True
-        second_shot.pop("prompt_groups", None)
-        second_shot["init_image"] = init_image
-        second_shot["init_denoise"] = 1.0
-        second_shot["inpaint_mask"] = mask
-        self._attach_pose(task, second_shot, ("boy",))
-        second_positive, second_negative = compose_pass_prompts(
-            self.cfg, second_shot, boy)
-        self.log("Task %s split pass 2/2: boy inpaint %s" % (
-            task.label, mask.get("region") or region))
-        self.log("Task %s split 2 positive: %s" % (task.label, second_positive))
-        self.log("Task %s split 2 negative: %s" % (task.label, second_negative))
-        second_image = self._execute_workflow(
-            task, second_shot, second_positive, second_negative,
-            prefix + "_split2", stage="inpaint", hires=False)
-        if self._cancel.is_set():
-            return True
-        final_image = second_image or first_image
-        if not second_image:
-            task.error = None
-        self._set_state(task, "done", image=final_image, stage="",
-                        step=task.total or task.step)
-        self.log("Task %s done (%s): %s" % (
-            task.label, "split" if second_image else "split first pass",
-            final_image))
-        return True
 
     def _run_one(self, task: Task) -> None:
         with self._lock:
@@ -606,26 +543,6 @@ class TaskRunner:
                         task.label, self._last_done.label,
                         shot["init_denoise"]))
         prefix = "%s/%s" % ((self.cfg.get("prefix") or "anime_story").rstrip("/"), task.prefix)
-        setting = (self.cfg.get("settings") or {}).get("split") or {}
-        pose_setting = (self.cfg.get("settings") or {}).get("pose") or {}
-        pose_preset = pose_preset_for_shot(
-            shot, str(pose_setting.get("preset") or "auto"))
-        pair_reference = bool(
-            (pose_setting.get("reference") or {}).get("pair"))
-        pair_only = bool(pose_setting.get("enabled")) and (
-            pose_pair_only(pose_preset) or pair_reference) and (
-            pose_should_apply(shot) and bool(self._pose_controlnet_name()))
-        if (task.kind != "expand" and pair_only
-                and bool(setting.get("enabled", True))):
-            self.log("Task %s classic pair pose; split skipped" % task.label)
-        if (task.kind != "expand"
-                and bool(setting.get("enabled", True))
-                and is_double_shot(shot) and not pair_only):
-            if self._run_split(task, shot, prefix):
-                return
-            if self._cancel.is_set():
-                return
-            task.error = None
         if task.kind != "expand" and is_double_shot(shot):
             self._attach_pose(task, shot, ("girl", "boy"))
         positive, negative = compose_prompts(self.cfg, shot)

@@ -46,63 +46,22 @@ def test_missing_reference_is_critical(tmp_path):
     assert any("角色参考图" in item for item in report.critical)
 
 
-def test_double_shot_without_split_is_warned():
-    project = _project(settings={"split": {"enabled": False}}, shots=[{
-        "id": "01", "prompt": "1girl, 1boy", "cast": "1girl, 1boy",
-        "shot_size": "wide shot", "camera_angle": "eye level",
-    }])
-    report = check_project(project)
-    assert any("双人分步" in item for item in report.warnings)
-
-
-def test_cross_gender_anatomy_is_warned():
-    project = _project(shots=[{
-        "id": "01", "prompt": "1girl, 1boy", "cast": "1girl, 1boy",
-        "shot_size": "wide shot", "camera_angle": "eye level",
-        "prompt_groups": [
-            {"gender": "girl", "prompt": "1girl, nude"},
-            {"gender": "boy", "prompt": "1boy, large breasts"},
-        ],
-    }])
-    report = check_project(project)
-    assert any("男主" in item and "女性" in item for item in report.warnings)
-
-
 def test_format_report_never_empty():
     report = check_project(_project())
     assert format_report(report) == "未发现连续性问题。"
 
 
-def test_repair_disables_missing_reference_and_enables_split(tmp_path):
+def test_repair_disables_missing_reference_and_fills_grammar(tmp_path):
     project = _project(
         character={
             "tags": "", "use_ipadapter": True,
             "ipadapter": {"reference": str(tmp_path / "missing.png")},
         },
-        settings={"split": {"enabled": False}},
         shots=[{
             "id": "01", "prompt": "1girl, 1boy", "cast": "1girl, 1boy",
         }],
     )
     repaired, changes = repair_project(project)
     assert repaired["character"]["use_ipadapter"] is False
-    assert repaired["settings"]["split"]["enabled"] is True
     assert any("IPAdapter" in item for item in changes)
-    assert any("双人分步" in item for item in changes)
     assert repaired["shots"][0]["shot_size"]
-
-
-def test_repair_removes_cross_gender_anatomy():
-    project = _project(shots=[{
-        "id": "01", "prompt": "1girl, 1boy", "cast": "1girl, 1boy",
-        "shot_size": "wide shot", "camera_angle": "eye level",
-        "prompt_groups": [
-            {"gender": "girl", "prompt": "1girl, nude, penis"},
-            {"gender": "boy", "prompt": "1boy, large breasts"},
-        ],
-    }])
-    repaired, changes = repair_project(project)
-    groups = repaired["shots"][0]["prompt_groups"]
-    assert groups[0]["prompt"] == "1girl, nude"
-    assert groups[1]["prompt"] == "1boy"
-    assert any("跨性别" in item for item in changes)

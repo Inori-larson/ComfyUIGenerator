@@ -191,8 +191,6 @@ class GenerationDefaults:
     hires_denoise: float = 0.4
     hires_steps: int = 20
     upscaler: str = ""
-    split_enabled: bool = True
-    split_region: str = "auto"
     pose_enabled: bool = True
     pose_controlnet: str = ""
     pose_preset: str = "auto"

@@ -6,7 +6,7 @@ from typing import Any
 from PySide6.QtCore import QPointF, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout,
+    QAbstractItemView, QDialog, QDialogButtonBox, QHBoxLayout,
     QHeaderView, QLabel, QListWidget, QListWidgetItem, QPushButton,
     QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 from comfyui_generator.core.pose import (
     COLORS, KEYPOINTS, LIMBS, POSE_PRESET_LABELS, pose_keypoints,
 )
+from comfyui_generator.ui.widgets import ClickScrollComboBox
 
 
 class PoseCanvas(QWidget):
@@ -129,7 +130,7 @@ class PoseEditorDialog(QDialog):
         right_layout = QVBoxLayout(right)
         row = QHBoxLayout()
         row.addWidget(QLabel("编辑人物"))
-        self.person = QComboBox()
+        self.person = ClickScrollComboBox()
         self.person.addItem("女主", "girl")
         self.person.addItem("男主", "boy")
         row.addWidget(self.person)

@@ -165,30 +165,6 @@ class SettingsDialog(QDialog):
         models_form.addRow("", models_hint)
         form.addWidget(models_box)
 
-        generation_box = QGroupBox("生成默认")
-        generation_form = QFormLayout(generation_box)
-        self.split_double = QCheckBox("双人镜头分步生成（先女后男 inpaint）")
-        self.split_double.setChecked(bool(
-            getattr(cfg.generation, "split_enabled", True)))
-        generation_form.addRow("", self.split_double)
-        self.split_region = SearchComboBox(placeholder="选择遮罩区域")
-        self.split_region.setItems([
-            ("自动（按剧情判断）", "auto"),
-            ("右侧", "right"),
-            ("左侧", "left"),
-            ("上半", "top"),
-            ("下半", "bottom"),
-            ("中心/重叠", "center"),
-        ])
-        self.split_region.selectValue(
-            str(getattr(cfg.generation, "split_region", "auto")))
-        generation_form.addRow("默认遮罩区域", self.split_region)
-        split_hint = QLabel(
-            "双人镜头先只生成女主，再在遮罩区域补男主。上下叠、骑乘、贴身镜头请用自动或手动选区域。")
-        split_hint.setWordWrap(True)
-        generation_form.addRow("", split_hint)
-        form.addWidget(generation_box)
-
         app_box = QGroupBox("应用")
         app_form = QFormLayout(app_box)
         self.template = _path_row(app_form, "默认模板 JSON", cfg.generation.template)
@@ -240,8 +216,6 @@ class SettingsDialog(QDialog):
         c.models.checkpoint_dir = self.checkpoint_dir.text().strip()
         c.models.upscaler_dir = self.upscaler_dir.text().strip()
         c.generation.template = self.template.text().strip()
-        c.generation.split_enabled = self.split_double.isChecked()
-        c.generation.split_region = self.split_region.currentValue()
         c.ui.language = self.language.currentValue()
         save_config(c)
         self.accept()

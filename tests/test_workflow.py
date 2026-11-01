@@ -7,9 +7,10 @@ from comfyui_generator.core.workflow import (
     expand_wildcards,
     is_double_shot,
     lora_chain,
-    split_mask_region,
+    prompt_groups,
     split_prompt_groups,
     stage_for_node,
+    _upscale_model_scale,
 )
 
 
@@ -51,13 +52,57 @@ def test_compose_prompts_order(cfg):
     assert "extra char tag" in positive
     assert "wide shot, standing" in positive
     assert positive.endswith("sunny")
-    assert negative == "bad quality"
+    assert negative.startswith("bad quality")
+    assert "multiple boys" in negative
+    assert "multiple girls" in negative
+
+
+def test_compose_prompts_boosts_all_clothing_tags(cfg):
+    positive, _ = compose_prompts(cfg, {
+        "prompt": "1girl, solo, beach",
+        "clothing": "uniform, black bra",
+    })
+    assert "(uniform:1.15)" in positive
+    assert "(black bra:1.15)" in positive
+
+
+def test_compose_prompts_places_current_clothing_before_scene(cfg):
+    positive, _ = compose_prompts(cfg, {
+        "prompt": "1girl, solo, beach, standing",
+        "clothing": "black pantyhose, black bra",
+    })
+    assert positive.index("black pantyhose") < positive.index("beach")
+    assert positive.index("black bra") < positive.index("beach")
+
+
+def test_compose_prompts_does_not_add_explicit_body_tags_when_clothed(cfg):
+    cfg["body"] = {"tags": "pussy, pussy juice"}
+    positive, _ = compose_prompts(
+        cfg, {"prompt": "1girl, solo, standing, uniform, pantyhose"})
+    assert "pussy" not in positive
+    assert "pussy juice" not in positive
+
+
+def test_compose_prompts_adds_body_tags_when_exposed(cfg):
+    cfg["body"] = {"tags": "pussy, pussy juice"}
+    positive, _ = compose_prompts(
+        cfg, {"prompt": "1girl, solo, pantyhose pulled down, torn pantyhose"})
+    assert "pussy" in positive
+    assert "pussy juice" not in positive
+
+
+def test_compose_prompts_adds_fluid_tags_only_with_fluid_context(cfg):
+    cfg["body"] = {"tags": "pussy, pussy juice"}
+    positive, _ = compose_prompts(
+        cfg, {"prompt": "1girl, solo, nude, masturbation, pussy juice"})
+    assert "pussy" in positive
+    assert "pussy juice" in positive
 
 
 def test_compose_prompts_includes_body_tags(cfg):
     cfg = dict(cfg)
     cfg["body"] = {"tags": "pussy, nude"}
-    positive, _ = compose_prompts(cfg, {"prompt": "park"})
+    positive, _ = compose_prompts(cfg, {"prompt": "nude, park"})
     assert "pussy" in positive
     assert "nude" in positive
 
@@ -67,7 +112,7 @@ def test_compose_prompts_keeps_native_body_tags_without_filtering(cfg):
     cfg["style"] = dict(cfg["style"])
     cfg["style"]["negative"] = "bad quality, censored"
     cfg["body"] = {"tags": "pussy, nude, close-up, censored, breasts"}
-    shot = {"prompt": "black blazer, frilled black leotard, black pantyhose, full_body"}
+    shot = {"prompt": "nude, black blazer, frilled black leotard, black pantyhose, full_body"}
     positive, _ = compose_prompts(cfg, shot)
     tags = [tag.strip() for tag in positive.split(",")]
     for expected in ("pussy", "nude", "close-up", "censored", "breasts",
@@ -178,8 +223,8 @@ def test_clothing_loras_are_selected_per_shot(cfg):
 
     assert not any("outfits\\" in item["name"] for item in lora_chain(cfg, idle))
     assert any("outfits\\" in item["name"] for item in lora_chain(cfg, clothed))
-    tags = [tag.strip() for tag in compose_prompts(cfg, clothed)[0].split(",")]
-    assert "school uniform" in tags
+    positive = compose_prompts(cfg, clothed)[0]
+    assert "(school uniform:1.15)" in positive
 
 
 def test_clothing_lora_uses_reference_tags_when_trigger_is_opaque(cfg):
@@ -194,8 +239,8 @@ def test_clothing_lora_uses_reference_tags_when_trigger_is_opaque(cfg):
     idle = {"prompt": "standing, smile"}
     assert any("AF_DarkDesire" in item["name"] for item in lora_chain(cfg, clothed))
     assert not any("AF_DarkDesire" in item["name"] for item in lora_chain(cfg, idle))
-    tags = [tag.strip() for tag in compose_prompts(cfg, clothed)[0].split(",")]
-    assert "af_darkdesire" in tags
+    positive = compose_prompts(cfg, clothed)[0]
+    assert "(af_darkdesire:1.15)" in positive
 
 
 def test_action_lora_uses_filename_or_reference_when_triggers_are_empty(cfg):
@@ -243,7 +288,7 @@ def test_action_and_clothing_tags_are_added_without_loras(cfg):
     positive, _ = compose_prompts(cfg, {"prompt": "park"})
     tags = [tag.strip() for tag in positive.split(",")]
     assert "action_tag" in tags
-    assert "clothing_tag" in tags
+    assert "(clothing_tag:1.15)" in positive
 
 
 def test_compose_prompts_includes_style_lora_tags(cfg):
@@ -271,11 +316,26 @@ def test_workflow_structure(cfg):
     assert wf["16"]["class_type"] == "UpscaleModelLoader"
     assert wf["40"]["class_type"] == "IPAdapterUnifiedLoader"
     assert wf["30"]["class_type"] == "IPAdapterUnifiedLoader"
-    assert wf["61"]["class_type"] == "FaceDetailer"
-    assert wf["63"]["class_type"] == "FaceDetailer"
+    assert wf["301"]["class_type"] == "FaceDetailer"
+    assert wf["303"]["class_type"] == "FaceDetailer"
     assert wf["200"]["inputs"]["text"] == "detailed face"
-    assert wf["63"]["inputs"]["image"] == ["61", 0]
-    assert wf["64"]["inputs"]["filename_prefix"] == "anime_story/01_test"
+    assert wf["303"]["inputs"]["image"] == ["301", 0]
+    assert wf["999"]["inputs"]["filename_prefix"] == "anime_story/01_test"
+
+
+def test_upscale_model_scale_detection_supports_8x():
+    assert _upscale_model_scale("8x_NMKD-Superscale_150000_G.pth") == 8
+    assert _upscale_model_scale("4x-UltraSharp.pth") == 4
+    assert _upscale_model_scale("RealESRGAN_x2plus.pth") == 2
+    assert _upscale_model_scale("unknown.pth") == 4
+
+
+def test_workflow_skips_segmentation_detectors_for_face_detailer(cfg):
+    cfg = dict(cfg)
+    cfg["detailers"] = [{"model": "segm/pussy_yolo11s_seg_best.pt"}]
+    wf = build_workflow(cfg, {"prompt": "1girl"}, "p", "n", 1, False, "pref")
+    assert not any(node.get("class_type") == "FaceDetailer"
+                   for node in wf.values())
 
 
 def test_workflow_applies_openpose_controlnet(cfg):
@@ -324,7 +384,7 @@ def test_workflow_without_hires(cfg):
     wf = build_workflow(cfg, shot, "p", "n", 1, False, "pref")
     assert "13" not in wf
     assert "16" not in wf
-    assert wf["64"]["inputs"]["images"] == ["63", 0]
+    assert wf["999"]["inputs"]["images"] == ["303", 0]
 
 
 def test_wildcards_brace_and_file(tmp_path):
@@ -347,10 +407,10 @@ def test_wildcards_disabled():
 def test_stage_mapping():
     assert stage_for_node("9") == "base"
     assert stage_for_node(13) == "hires"
-    assert stage_for_node("61") == "detail"
+    assert stage_for_node("301") == "detail"
     assert stage_for_node(90) == "inpaint"
     assert stage_for_node(None) == ""
-    assert stage_for_node("64") == ""
+    assert stage_for_node("999") == ""
 
 
 def test_split_prompt_groups_keep_clothes_and_hair_apart():
@@ -405,28 +465,89 @@ def test_split_prompt_groups_detect_female_key_when_order_is_reversed():
     assert "black dress" not in boy["prompt"]
 
 
-def test_split_mask_region_auto_follows_script_position():
-    assert split_mask_region({"script": "男主在左侧抱着她"})["region"] == "left"
-    assert split_mask_region({"script": "男主在右侧站着"})["region"] == "right"
-    assert split_mask_region({"script": "她骑在男主身上"})["region"] == "bottom"
-    assert split_mask_region({"script": "她跨坐到我腿上"})["region"] == "bottom"
-    assert split_mask_region({"script": "男主从后面抱起她"})["region"] == "center"
-    assert split_mask_region({"script": "男主压在她身上"})["region"] == "center"
-    assert split_mask_region({"script": "男主在她上方"})["region"] == "top"
-    top = split_mask_region({"script": "两人上下叠在一起"})
-    assert top["region"] == "center"
-    assert top["width"] == 0.76
-    assert top["height"] == 0.84
+def test_split_prompt_groups_keep_casual_male_clothes_off_girl():
+    shot = {
+        "cast": "1girl 1boy",
+        "prompt": "1girl, 1boy, long hair, black hair, purple eyes, "
+                  "blunt bangs, medium breasts, uniform, black pantyhose, "
+                  "belt, epaulettes, casual shirt, pants",
+    }
+    groups = split_prompt_groups(shot)
+    girl = next(group for group in groups if group["gender"] == "girl")
+    boy = next(group for group in groups if group["gender"] == "boy")
+    assert "casual shirt" not in girl["prompt"]
+    assert "pants" not in girl["prompt"]
+    assert "pantyhose" in girl["prompt"]
+    assert "casual shirt" in boy["prompt"]
+    assert "pants" in boy["prompt"]
+    assert "uniform" not in boy["prompt"]
+    assert "epaulettes" not in boy["prompt"]
 
 
-def test_split_mask_region_manual_override():
-    shot = {"script": "男主在左侧"}
-    mask = split_mask_region(shot, "top")
-    assert mask["region"] == "top"
-    assert mask["x"] == 0.0
-    assert mask["y"] == 0.0
-    assert mask["width"] == 1.0
-    assert mask["height"] == 0.55
+def test_prompt_groups_can_disable_unreliable_fallback():
+    shot = {
+        "prompt": "1girl, 1boy, long hair, black hair, purple eyes, "
+                  "short hair, brown eyes, casual shirt, dark pants",
+        "cast": "1girl 1boy",
+    }
+    assert prompt_groups(shot)
+    assert prompt_groups(shot, allow_fallback=False) == []
+
+
+def test_compose_prompts_makes_male_nude_and_faceless(cfg):
+    positive, negative = compose_prompts(cfg, {
+        "prompt": "1girl, 1boy, clothed male, casual shirt, pants, "
+                  "black pantyhose, uniform",
+        "cast": "1girl 1boy"})
+    assert "clothed male" not in positive
+    assert "casual shirt" not in positive
+    assert "pants" not in positive
+    assert "nude male" in positive
+    assert "faceless male" in positive
+    assert "male head out of frame" in positive
+    assert "black pantyhose" in positive
+    assert positive.startswith("1boy")
+    assert "futanari" in negative
+    assert "penis on female" in negative
+    assert "female head on male" in negative
+    assert "long-haired male" in negative
+
+
+def test_compose_prompts_never_allows_multiple_males(cfg):
+    positive, negative = compose_prompts(cfg, {
+        "prompt": "1girl, solo, 2boys, multiple boys",
+        "cast": "1girl solo"})
+    assert "2boys" not in positive
+    assert "multiple boys" not in positive
+    assert "multiple boys" in negative
+
+
+def test_compose_prompts_blocks_extra_females_without_two_female_cast(cfg):
+    positive, negative = compose_prompts(cfg, {
+        "prompt": "1girl, solo, 2girls, multiple girls",
+        "cast": "1girl solo"})
+    assert "2girls" not in positive
+    assert "multiple girls" in negative
+
+
+def test_compose_prompts_allows_two_females_with_two_female_cast(cfg):
+    positive, negative = compose_prompts(cfg, {
+        "prompt": "2girls, multiple girls, bedroom",
+        "cast": "2girls"})
+    assert "2girls" in positive
+    assert "multiple girls" not in negative
+
+
+def test_compose_prompts_removes_orphan_penis_and_pov_with_visible_male(cfg):
+    positive, negative = compose_prompts(cfg, {
+        "prompt": "1girl, 1boy, nude male, penis, pov, penis in pussy",
+        "cast": "1girl 1boy"})
+    assert "penis in pussy" in positive
+    assert "nude male" in positive
+    assert "pov" not in positive.split(",")
+    assert "penis" not in [tag.strip() for tag in positive.split(",")]
+    assert "two penises" in negative
+    assert "second male" in negative
 
 
 def test_compose_prompts_adds_double_negative(cfg):
@@ -434,6 +555,61 @@ def test_compose_prompts_adds_double_negative(cfg):
         "prompt": "1girl, 1boy, bed", "cast": "1girl 1boy"})
     assert "1girl" in positive
     assert "merged bodies" in negative
+
+
+def test_compose_prompts_adds_solo_head_and_second_person_negative(cfg):
+    positive, negative = compose_prompts(
+        cfg, {"prompt": "1girl, solo, completely nude, masturbation"})
+    assert "1girl" in positive
+    assert "two heads" in negative
+    assert "extra person" in negative
+    assert "1boy" in negative
+
+
+def test_compose_prompts_blocks_futa_anatomy_in_solo_female_scene(cfg):
+    positive, negative = compose_prompts(
+        cfg, {"prompt": "1girl, solo, completely nude, hand between legs, masturbation"})
+    assert "1girl" in positive
+    assert "futanari" in negative
+    assert "dickgirl" in negative
+    assert "penis" in negative
+
+
+def test_compose_prompts_allows_male_body_for_solo_pov_penetration(cfg):
+    positive, negative = compose_prompts(
+        cfg, {"prompt": "1girl, solo, completely nude, penetration, "
+                        "penis in pussy, pov"})
+    assert "1girl" in positive
+    assert "1boy" not in negative
+    assert "male face" in negative
+    assert "futanari" in negative
+
+
+def test_compose_prompts_allows_male_anatomy_for_solo_mouth_scene(cfg):
+    positive, negative = compose_prompts(
+        cfg, {"prompt": "1girl, solo, pov, fellatio, penis"})
+    assert "1girl" in positive
+    assert "1boy" not in negative
+    assert "male head" in negative
+
+
+def test_compose_prompts_allows_explicit_futanari_scene(cfg):
+    positive, negative = compose_prompts(
+        cfg, {"prompt": "1girl, solo, completely nude, futanari, masturbation"})
+    assert "1girl" in positive
+    assert "futanari" not in negative
+    assert "dickgirl" not in negative
+
+
+def test_compose_pass_prompts_block_duplicate_same_gender(cfg):
+    girl = {"gender": "girl", "prompt": "1girl, long hair"}
+    boy = {"gender": "boy", "prompt": "1boy, short hair"}
+    _, girl_negative = compose_pass_prompts(
+        cfg, {"cast": "1girl 1boy"}, girl)
+    _, boy_negative = compose_pass_prompts(
+        cfg, {"cast": "1girl 1boy"}, boy)
+    assert "multiple girls" in girl_negative
+    assert "multiple boys" in boy_negative
 
 
 def test_compose_pass_prompts_use_gender_negatives(cfg):

@@ -2,10 +2,13 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtCore import QEvent, Qt
+from PySide6.QtWidgets import QApplication, QSpinBox, QWidget
 
+from comfyui_generator.ui.main_window import merge_default_positive
 from comfyui_generator.ui.style import APP_QSS
-from comfyui_generator.ui.widgets import WrappingTabs
+from comfyui_generator.ui.widgets import SearchComboBox, WrappingTabs
+from comfyui_generator.ui.wheel_guard import WheelGuard
 
 
 def test_tabs_wrap_without_clipping_at_min_width():
@@ -22,3 +25,83 @@ def test_tabs_wrap_without_clipping_at_min_width():
     assert all(button.width() >= button.sizeHint().width()
                for button in tabs._buttons)
     tabs.close()
+
+
+def test_combo_ignores_hover_wheel():
+    app = QApplication.instance() or QApplication([])
+    combo = SearchComboBox()
+    combo.addItems(["a", "b"])
+
+    class Event:
+        ignored = False
+
+        def ignore(self):
+            self.ignored = True
+
+    event = Event()
+    combo.wheelEvent(event)
+    assert event.ignored
+    assert combo.currentIndex() == 0
+
+
+def test_spinbox_ignores_wheel_without_focus():
+    app = QApplication.instance() or QApplication([])
+    spin = QSpinBox()
+    spin.setRange(0, 10)
+    spin.setValue(5)
+
+    class Event:
+        ignored = False
+
+        def type(self):
+            return QEvent.Type.Wheel
+
+        def ignore(self):
+            self.ignored = True
+
+    event = Event()
+    assert WheelGuard().eventFilter(spin, event)
+    assert event.ignored
+    assert spin.value() == 5
+
+
+def test_spinbox_wheel_is_allowed_after_click():
+    app = QApplication.instance() or QApplication([])
+    spin = QSpinBox()
+    guard = WheelGuard()
+
+    class Press:
+        def type(self):
+            return QEvent.Type.MouseButtonPress
+
+        def button(self):
+            return Qt.MouseButton.LeftButton
+
+    class Wheel:
+        ignored = False
+
+        def type(self):
+            return QEvent.Type.Wheel
+
+        def ignore(self):
+            self.ignored = True
+
+    guard.eventFilter(spin, Press())
+    event = Wheel()
+    assert not guard.eventFilter(spin, event)
+    assert not event.ignored
+
+
+def test_default_positive_prompt_is_merged_without_duplicates():
+    en, zh, text = merge_default_positive(
+        "masterpiece, best quality", "杰作、最佳质量", "杰作、最佳质量")
+    assert en.count("masterpiece") == 1
+    assert en.count("best quality") == 1
+    assert "very aesthetic" in en
+    assert "newest" in en
+    assert "scenery" in en
+    assert "volumetric lighting" in en
+    assert text.count("杰作") == 1
+    assert "非常有美感" in text
+    assert "风景" in text
+    assert "体积光" in text

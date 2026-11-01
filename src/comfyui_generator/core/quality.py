@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any
 
 from comfyui_generator.core.continuity import apply_auto_grammar
-from comfyui_generator.core.workflow import is_double_shot, prompt_groups
 
 
 @dataclass
@@ -34,21 +33,7 @@ class QualityReport:
         return rows or ["未发现连续性问题。"]
 
 
-_FEMALE_ANATOMY = (
-    "breasts", "pussy", "vagina", "labia", "clitoris", "uterus", "womb",
-)
-_MALE_ANATOMY = ("penis", "cock", "testicles", "phallus")
 _CHINESE = re.compile(r"[\u4e00-\u9fff]")
-
-
-def _tag_key(text: str) -> str:
-    return re.sub(r"[\s_\-]+", " ", str(text).lower()).strip()
-
-
-def _contains_any(text: Any, words: tuple[str, ...]) -> bool:
-    blob = " " + re.sub(r"[(),]+", " ", _tag_key(str(text or ""))) + " "
-    blob = re.sub(r"\s+", " ", blob)
-    return any((" " + _tag_key(word) + " ") in blob for word in words)
 
 
 def _check_file(report: QualityReport, label: str, value: Any) -> None:
@@ -64,7 +49,6 @@ def check_project(project: dict[str, Any]) -> QualityReport:
     report = QualityReport()
     character = project.get("character") or {}
     continuity = project.get("continuity") or {}
-    settings = project.get("settings") or {}
 
     for key, label in (("character", "角色锚点"), ("scene", "场景锚点"),
                        ("state", "连续性台账"), ("negative", "额外负面词")):
@@ -85,7 +69,6 @@ def check_project(project: dict[str, Any]) -> QualityReport:
             report.critical.append("已启用画风参考图，但没有填写图片路径")
         _check_file(report, "画风参考图", style_ref.get("image"))
 
-    split = settings.get("split") or {}
     grammar = continuity.get("grammar") or {}
     grammar_auto = bool(grammar.get("auto", True))
     shots = project.get("shots") or []
@@ -107,23 +90,6 @@ def check_project(project: dict[str, Any]) -> QualityReport:
             if _CHINESE.search(str(shot.get(key) or "")):
                 report.warnings.append(
                     "镜头 %s 的%s含中文，建议改英文标签" % (shot_id, label))
-        if not is_double_shot(shot):
-            continue
-        if not bool(split.get("enabled", True)):
-            report.warnings.append(
-                "镜头 %s 是双人镜头，但双人分步已关闭，容易串发色/服装" % shot_id)
-        groups = prompt_groups(shot)
-        girl = next((g for g in groups
-                     if str(g.get("gender") or "") == "girl"), None)
-        boy = next((g for g in groups
-                    if str(g.get("gender") or "") == "boy"), None)
-        if girl and _contains_any(girl.get("prompt"), _MALE_ANATOMY):
-            report.warnings.append(
-                "镜头 %s 女主提示词含男性器官标签" % shot_id)
-        if boy and _contains_any(boy.get("prompt"), _FEMALE_ANATOMY):
-            report.warnings.append(
-                "镜头 %s 男主提示词含女性器官标签" % shot_id)
-
     if not str(continuity.get("character") or "").strip():
         report.info.append("未填写角色锚点；跨镜人物一致性只能依赖角色 LoRA/参考图")
     if not str(continuity.get("scene") or "").strip():
@@ -133,20 +99,6 @@ def check_project(project: dict[str, Any]) -> QualityReport:
 
 def format_report(report: QualityReport) -> str:
     return "\n".join(report.lines())
-
-
-def _remove_anatomy(text: Any, words: tuple[str, ...]) -> str:
-    kept: list[str] = []
-    changed = False
-    for token in str(text or "").split(","):
-        tag = token.strip()
-        if not tag:
-            continue
-        if _contains_any(tag, words):
-            changed = True
-            continue
-        kept.append(tag)
-    return ", ".join(kept) if changed else str(text or "")
 
 
 def repair_project(project: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
@@ -173,38 +125,7 @@ def repair_project(project: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         data["style_ref"] = style_ref
         changes.append("关闭缺少图片的画风参考")
 
-    settings = data.setdefault("settings", {})
-    split = settings.setdefault("split", {})
     shots = data.get("shots") or []
-    for shot in shots:
-        if not isinstance(shot, dict):
-            continue
-        if is_double_shot(shot) and not bool(split.get("enabled", True)):
-            split["enabled"] = True
-            changes.append("启用双人分步")
-
-    for shot in shots:
-        if not isinstance(shot, dict):
-            continue
-        groups = shot.get("prompt_groups")
-        if not isinstance(groups, list) or not groups:
-            continue
-        changed = False
-        for group in groups:
-            if not isinstance(group, dict):
-                continue
-            gender = str(group.get("gender") or "")
-            if gender == "boy":
-                cleaned = _remove_anatomy(group.get("prompt"), _FEMALE_ANATOMY)
-            elif gender == "girl":
-                cleaned = _remove_anatomy(group.get("prompt"), _MALE_ANATOMY)
-            else:
-                continue
-            if cleaned != group.get("prompt"):
-                group["prompt"] = cleaned
-                changed = True
-        if changed:
-            changes.append("镜头 %s 清理跨性别器官标签" % shot.get("id", "?"))
 
     before = [(shot.get("shot_size"), shot.get("camera_angle"))
               for shot in shots if isinstance(shot, dict)]

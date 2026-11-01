@@ -61,9 +61,7 @@ from comfyui_generator.core.tag_cache import load_tag_cache, update_tag_cache
 from comfyui_generator.core.tags import append_tags, estimate_tokens
 from comfyui_generator.core.vision import format_similarity, vision_ready
 from comfyui_generator.core.translate import translate_to_tags
-from comfyui_generator.core.workflow import (
-    compose_pass_prompts, compose_prompts, is_double_shot, prompt_groups,
-)
+from comfyui_generator.core.workflow import compose_prompts
 from comfyui_generator.ui.branding import app_icon, logo_pixmap
 from comfyui_generator.ui.contact_sheet import build_contact_sheet, build_face_sheet
 from comfyui_generator.ui.continuity_worker import ContinuityWorker
@@ -72,6 +70,7 @@ from comfyui_generator.ui.dialogs import (
 )
 from comfyui_generator.ui.settings_dialog import SettingsDialog
 from comfyui_generator.ui.vision_worker import VisionWorker
+from comfyui_generator.ui.wheel_guard import install_wheel_guard
 from comfyui_generator.ui.widgets import SearchComboBox, WrappingTabs
 from comfyui_generator.ui.workers import AssetsWorker, AutoTranslateWorker, ConnectWorker, ExpansionWorker, LoraTagsWorker, PromptWorker, RenderWorker, TagTranslateWorker
 
@@ -86,14 +85,18 @@ SAMPLERS = ["euler_ancestral", "euler", "dpmpp_2m", "dpmpp_2m_sde",
             "dpmpp_sde", "dpmpp_3m_sde", "ddim", "uni_pc", "heun", "lms"]
 SCHEDULERS = ["normal", "karras", "exponential", "sgm_uniform", "simple", "beta", "ddim_uniform"]
 DEFAULT_POSITIVE_EXTRA_TAGS = [
-    "masterpiece", "best quality", "absurdres", "ultra-detailed", "extremely detailed",
+    "masterpiece", "best quality", "amazing quality", "very aesthetic",
+    "absurdres", "newest", "ultra-detailed", "extremely detailed",
     "sharp focus", "highres", "official art",
     "beautiful detailed eyes", "beautiful detailed face",
+    "scenery", "volumetric lighting",
 ]
 DEFAULT_POSITIVE_EXTRA_ZH_TAGS = [
-    "杰作", "最佳质量", "极高分辨率", "超详细", "极详细",
+    "杰作", "最佳质量", "惊人的质量", "非常有美感",
+    "极高分辨率", "最新", "超详细", "极详细",
     "清晰聚焦", "高分辨率", "官方艺术",
     "美丽的详细眼睛", "美丽的详细面部",
+    "风景", "体积光",
 ]
 DEFAULT_NEGATIVE_EXTRA_TAGS = [
     "lowres", "worst quality", "low quality", "normal quality", "bad anatomy",
@@ -124,6 +127,31 @@ DEFAULT_EXTRA_PAIRS = dict(zip(
     DEFAULT_POSITIVE_EXTRA_TAGS + DEFAULT_NEGATIVE_EXTRA_TAGS,
     DEFAULT_POSITIVE_EXTRA_ZH_TAGS + DEFAULT_NEGATIVE_EXTRA_ZH_TAGS,
 ))
+
+
+def _append_chinese_defaults(text: str, defaults: list[str]) -> str:
+    items = [item.strip() for item in re.split(
+        r"[,，、;；\n]+", str(text or "")) if item.strip()]
+    seen = {item.lower() for item in items}
+    for item in defaults:
+        if item.lower() not in seen:
+            items.append(item)
+            seen.add(item.lower())
+    return "、".join(items)
+
+
+def merge_default_positive(en: str, zh: str, text: str) -> tuple[str, str, str]:
+    value = str(text or "").strip()
+    merged_en = append_tags(en or value, DEFAULT_POSITIVE_EXTRA_EN)
+    if not value:
+        return merged_en, DEFAULT_POSITIVE_EXTRA_ZH, DEFAULT_POSITIVE_EXTRA_ZH
+    if re.search(r"[\u4e00-\u9fff]", value):
+        merged_zh = _append_chinese_defaults(
+            zh or value, DEFAULT_POSITIVE_EXTRA_ZH_TAGS)
+        return merged_en, merged_zh, merged_zh
+    return merged_en, zh, merged_en
+
+
 FRAMING_LABELS = [
     ("自动（由模型决定）", "auto"),
     ("全身", "full_body"),
@@ -160,6 +188,7 @@ def _label(text: str, name: str = "Section") -> QLabel:
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        install_wheel_guard()
         self.setWindowTitle("ComfyUI Generator")
         self.setWindowIcon(app_icon())
         self.resize(1480, 940)
@@ -188,6 +217,7 @@ class MainWindow(QMainWindow):
         self.final_bytes: dict[str, bytes] = {}
         self._icon_last: dict[str, float] = {}
         self._lora_info_cache: dict[str, dict] = {}
+        self._selected_shot_ids: list[str] = []
         self._reference_tags: list[str] = []
         self._lora_paths: dict[str, str] = {}
         self._online_tried: set[str] = set()
@@ -567,6 +597,9 @@ class MainWindow(QMainWindow):
         self.shot_table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked
                                         | QAbstractItemView.EditTrigger.EditKeyPressed)
         self.shot_table.itemChanged.connect(self._on_shot_item_changed)
+        self.shot_table.itemSelectionChanged.connect(
+            self._remember_shot_selection)
+        self.shot_table.cellClicked.connect(self._on_shot_cell_clicked)
 
         form_scroll = QScrollArea()
         form_scroll.setWidgetResizable(True)
@@ -975,30 +1008,6 @@ class MainWindow(QMainWindow):
         self.generation_count_label.setWordWrap(True)
         layout.addWidget(self.generation_count_label)
 
-        self.split_check = QCheckBox("双人镜头分步生成（先女后男 inpaint）")
-        self.split_check.setChecked(True)
-        self.split_check.setToolTip("双人镜头先只生成女主，再在右侧遮罩内补男主，减少串衣和串发色")
-        layout.addWidget(self.split_check)
-        split_hint = _label("双人镜头会先生成女主，再按遮罩区域补男主；设置页也可修改全局默认", "Hint")
-        split_hint.setWordWrap(True)
-        layout.addWidget(split_hint)
-        row = QHBoxLayout()
-        row.addWidget(_label("双人分步遮罩", "Hint"))
-        self.split_region = SearchComboBox()
-        self.split_region.setItems([
-            ("自动（按剧情判断）", "auto"),
-            ("右侧", "right"),
-            ("左侧", "left"),
-            ("上半", "top"),
-            ("下半", "bottom"),
-            ("中心/重叠", "center"),
-        ])
-        self.split_region.selectValue("auto")
-        self.split_region.setToolTip(
-            "自动会从分镜脚本判断男主在左/右/上/下/重叠；判断错时手动指定")
-        row.addWidget(self.split_region, 1)
-        layout.addLayout(row)
-
         self.pose_check = QCheckBox("自动 OpenPose 双人骨架")
         self.pose_check.setChecked(False)
         self.pose_check.setToolTip("按剧情自动选择双人姿势并送入 ControlNet；需要 OpenPose ControlNet 模型")
@@ -1026,8 +1035,7 @@ class MainWindow(QMainWindow):
         row.addWidget(self.pose_strength)
         layout.addLayout(row)
         pose_hint = _label(
-            "双人分步时分别使用女/男单骨架；普通双人使用双骨架。"
-            "“经典”预设是整张双人骨架，会自动跳过分步。没有模型时自动跳过。", "Hint")
+            "双人镜头使用整张双人骨架；没有 OpenPose 模型时自动跳过。", "Hint")
         pose_hint.setWordWrap(True)
         layout.addWidget(pose_hint)
         self.btn_pose_editor = QPushButton("预览 / 编辑所有骨架")
@@ -1106,10 +1114,14 @@ class MainWindow(QMainWindow):
         self.sequence_mode_check.setToolTip(
             "开启后 AI 多生成一个起始状态：第 1 张作为关键帧，后续按顺序推进；"
             "分镜原文不会被覆盖。关闭时第 1 张仍是原分镜终态。")
+        self.img2img_check.toggled.connect(self._sync_sequence_mode)
         layout.addWidget(self.sequence_mode_check)
         sequence_hint = _label(
-            "适合抽插、拔出、射精、余韵需要明显过程的镜头；总张数仍然是 "
-            "1 + 每镜扩展张数。", "Hint")
+            "适合抽插、拔出、射精、余韵需要明显过程的镜头；普通扩图已回退"
+            "上一版 0.65-0.85，序列仍用 0.82-0.92 多张递进；保留原机位、"
+            "景别、场景和姿势大类；下一镜上限对所有题材通用，"
+            "下一镜没发生的动作/伤害/道具/场景变化不会提前；"
+            "总张数仍然是 1 + 每镜扩展张数。", "Hint")
         sequence_hint.setWordWrap(True)
         layout.addWidget(sequence_hint)
 
@@ -1303,7 +1315,7 @@ class MainWindow(QMainWindow):
         self.btn_similarity.clicked.connect(self.run_similarity_check)
         layout.addWidget(self.btn_similarity)
         hint = _label(
-            "连续性标签会追加到每镜和双人分步，不会覆盖角色/动作/服装状态机。"
+            "连续性标签会追加到每镜，不会覆盖角色/动作/服装状态机；"
             "分镜表新增“景别 / 机位”两列，可直接编辑；角色参考表在“角色”页设置。"
             "CLIP 相似度以角色参考图（没有则用第一张成品）为基准，"
             "会同时受服装和背景影响；低于 0.55 建议人工检查。",
@@ -1410,7 +1422,8 @@ class MainWindow(QMainWindow):
         self.img2img_denoise.setValue(float(img2img.get("denoise", 0.35)))
         self.expand_spin.setValue(int(img2img.get("expansions", 3)))
         self.sequence_mode_check.setChecked(bool(
-            img2img.get("sequence_mode", False)))
+            img2img.get("sequence_mode", False))
+            and self.img2img_check.isChecked())
         self.expand_external.setChecked(bool(img2img.get(
             "external_ai", bool(self.cfg.external_llm.base_url
                                and self.cfg.external_llm.api_key
@@ -1418,11 +1431,6 @@ class MainWindow(QMainWindow):
         self.cross_shot_check.setChecked(bool(img2img.get("cross_shot", False)))
         self.cross_shot_denoise.setValue(float(
             img2img.get("cross_shot_denoise", 0.35)))
-        split = settings.get("split") or {}
-        self.split_check.setChecked(bool(split.get(
-            "enabled", getattr(self.cfg.generation, "split_enabled", True))))
-        self.split_region.selectValue(str(split.get(
-            "region", getattr(self.cfg.generation, "split_region", "auto"))))
         self._set_pose_settings(settings.get("pose") or {})
         self._set_style_profile_settings(template.get("style_profile") or {})
         self._set_continuity_settings(template.get("continuity") or {})
@@ -1901,10 +1909,18 @@ class MainWindow(QMainWindow):
             style_set = {name_key(name) for name in styles}
             character = [name for name in character if name_key(name) not in style_set]
 
+        comfy_keys = {name_key(name) for name in comfy}
         for name in configured:
             key = name_key(name)
             if key in scoped:
                 continue
+            if comfy_keys:
+                if key not in comfy_keys:
+                    continue
+            else:
+                path = self._resolve_lora_path(name)
+                if not path or not Path(path).is_file():
+                    continue
             in_styles = any(name_key(value) == key for value in styles)
             in_character = any(name_key(value) == key for value in character)
             target_style = in_styles or (not in_character and is_style_lora(name))
@@ -2265,15 +2281,33 @@ class MainWindow(QMainWindow):
             if widget:
                 widget.deleteLater()
         self.detailer_rows.clear()
-        detectors = list(dict.fromkeys([
-            *(self.assets.detectors or []),
-            *local_detectors(self.cfg.comfy.base_dir),
-        ]))
-        detectors = filter_detector_models(self.cfg.comfy.base_dir, detectors)
+        if self.assets.detectors:
+            # ComfyUI's object_info is authoritative: local files that the
+            # UltralyticsDetectorProvider cannot actually load must not appear.
+            detectors = list(dict.fromkeys(self.assets.detectors))
+        else:
+            detectors = filter_detector_models(
+                self.cfg.comfy.base_dir,
+                local_detectors(self.cfg.comfy.base_dir))
+        detectors = [
+            name for name in detectors
+            if not name.replace("\\", "/").lower().startswith("segm/")
+        ]
+        valid_by_name = {Path(name).name: name for name in detectors}
+        for old_key, saved in list(state.items()):
+            if old_key in detectors:
+                continue
+            migrated = valid_by_name.get(Path(old_key).name)
+            if not migrated:
+                continue
+            current = state.get(migrated) or {}
+            if saved.get("checked") and not current.get("checked"):
+                state[migrated] = dict(saved)
+            state.pop(old_key, None)
         choices = build_detailer_choices(detectors)
         if choices:
             self.detailer_hint.setText(
-                "已扫描到 %d 个检测模型（models/ultralytics，LoRA/embedding 已忽略）" % len(choices))
+                "已扫描到 %d 个 BBOX 检测模型（segm 分割模型不用于 FaceDetailer）" % len(choices))
         else:
             self.detailer_hint.setText(
                 "未扫描到检测模型。把模型文件放入 ComfyUI 的 models/ultralytics 后点重新扫描。")
@@ -2876,9 +2910,14 @@ class MainWindow(QMainWindow):
 
     def _build_detailers(self) -> list[dict[str, Any]]:
         cfg_value = float(self.cfg_spin.value())
+        available = set(self.assets.detectors)
         result = []
         for key, box, spin, choice in self.detailer_rows:
             if not box.isChecked():
+                continue
+            if available and choice["detector"] not in available:
+                self.append_log(
+                    "跳过 ComfyUI 不支持的检测模型：%s" % choice["detector"])
                 continue
             result.append({
                 "model": choice["detector"],
@@ -2983,10 +3022,6 @@ class MainWindow(QMainWindow):
                 "cross_shot_denoise": self.cross_shot_denoise.value(),
                 "sequence_mode": self.sequence_mode_check.isChecked(),
             },
-            "split": {
-                "enabled": self.split_check.isChecked(),
-                "region": self.split_region.currentValue(),
-            },
             "pose": self._pose_settings(),
         }
 
@@ -3049,6 +3084,7 @@ class MainWindow(QMainWindow):
         project["shots"] = shots
         project["prefix"] = "anime_story/" + name
         project["server"] = self.cfg.comfy.base_url
+        project["output_dir"] = self.cfg.comfy.output_dir
         return project
 
     # ---------------------------------------------------------------- prompt generation
@@ -3373,6 +3409,7 @@ class MainWindow(QMainWindow):
             self._syncing_shots = False
 
     def _fill_shot_table(self, shots: list[dict[str, Any]]) -> None:
+        self._selected_shot_ids = []
         self.shot_table.setRowCount(0)
         for shot in shots:
             row = self.shot_table.rowCount()
@@ -3634,9 +3671,6 @@ class MainWindow(QMainWindow):
         style_ref = project.get("style_ref") or {}
         if style_ref.get("enabled") is False:
             self.style_ref_check.setChecked(False)
-        split = (project.get("settings") or {}).get("split") or {}
-        if split.get("enabled"):
-            self.split_check.setChecked(True)
         shots = project.get("shots") or []
         if replace_table and shots:
             self._fill_shot_table(shots)
@@ -3735,6 +3769,11 @@ class MainWindow(QMainWindow):
             self._syncing_shots = False
         self._update_shot_stats()
 
+    def _sync_sequence_mode(self, enabled: bool) -> None:
+        self.sequence_mode_check.setEnabled(enabled)
+        if not enabled:
+            self.sequence_mode_check.setChecked(False)
+
     def _update_generation_count(self) -> None:
         if not hasattr(self, "generation_count_label"):
             return
@@ -3743,8 +3782,7 @@ class MainWindow(QMainWindow):
             unit = "1 个提示词"
         else:
             if self.chk_selected.isChecked():
-                shots = len({index.row() for index in
-                             self.shot_table.selectedIndexes()})
+                shots = len(self._selected_shot_rows())
             else:
                 shots = self.shot_table.rowCount()
             unit = "%d 个分镜" % shots
@@ -3793,17 +3831,8 @@ class MainWindow(QMainWindow):
                 blocks.append("【序列 %d】\n正向：\n%s\n\n负向：\n%s" % (
                     index, positive, negative))
             return "\n\n".join(blocks)
-        if is_double_shot(shot):
-            groups = prompt_groups(shot)
-            for index, group in enumerate(groups, 1):
-                positive, negative = compose_pass_prompts(project, shot, group)
-                label = group.get("name") or group.get("gender") or str(index)
-                blocks.append(
-                    "【分步 %d · %s】\n正向：\n%s\n\n负向：\n%s" % (
-                        index, label, positive, negative))
-        else:
-            positive, negative = compose_prompts(project, shot)
-            blocks.append("正向：\n%s\n\n负向：\n%s" % (positive, negative))
+        positive, negative = compose_prompts(project, shot)
+        blocks.append("正向：\n%s\n\n负向：\n%s" % (positive, negative))
         return "\n\n".join(blocks)
 
     def show_effective_prompt(self) -> None:
@@ -4157,9 +4186,35 @@ class MainWindow(QMainWindow):
             return
         self.start_render("single")
 
+    def _on_shot_cell_clicked(self, row: int, column: int) -> None:
+        if column == 0 and row >= 0:
+            self.shot_table.selectRow(row)
+            self._remember_shot_selection()
+
+    def _remember_shot_selection(self) -> None:
+        rows = sorted({index.row() for index in self.shot_table.selectedIndexes()})
+        ids = []
+        for row in rows:
+            item = self.shot_table.item(row, 1)
+            if item and item.text().strip():
+                ids.append(item.text().strip())
+        if ids:
+            self._selected_shot_ids = ids
+
+    def _selected_shot_rows(self) -> list[int]:
+        ids = set(self._selected_shot_ids)
+        if ids:
+            rows = [
+                row for row in range(self.shot_table.rowCount())
+                if (self.shot_table.item(row, 1)
+                    and self.shot_table.item(row, 1).text().strip() in ids)]
+            if rows:
+                return rows
+        return sorted({index.row() for index in self.shot_table.selectedIndexes()})
+
     def _collect_shots(self, selected_only: bool, allow_empty: bool = False) -> list[dict[str, Any]]:
-        rows = sorted({index.row() for index in self.shot_table.selectedIndexes()}) \
-            if selected_only else list(range(self.shot_table.rowCount()))
+        rows = self._selected_shot_rows() if selected_only \
+            else list(range(self.shot_table.rowCount()))
         shots: list[dict[str, Any]] = []
         pending: list[tuple[int, int, str, str]] = []
         for row in rows:
@@ -4264,6 +4319,9 @@ class MainWindow(QMainWindow):
             if not shots:
                 QMessageBox.information(self, "提示", "没有可生成的镜头，请先生成或填写分镜。")
                 return
+            if self.chk_selected.isChecked():
+                self.append_log("仅生成选中镜头：%s" % ", ".join(
+                    str(shot.get("id") or "") for shot in shots))
             text = self._story_premise_text() or shots[0]["prompt"] or "activation"
 
         project = self._build_project(mode, shots, text)
@@ -4297,6 +4355,8 @@ class MainWindow(QMainWindow):
                       if img2img.get("enabled", True) else 0)
         model = self._llm()
         use_external = False
+        sequence_mode = bool((settings.get("img2img") or {}).get(
+            "sequence_mode", False))
         external = self.cfg.external_llm
         external_ready = bool(
             external.base_url and external.api_key and external.model)
@@ -4306,13 +4366,15 @@ class MainWindow(QMainWindow):
         elif not model and external_ready:
             model = external.model
             use_external = True
+        if sequence_mode and external_ready and not use_external:
+            model = external.model
+            use_external = True
+            self.append_log("序列模式优先使用外部模型生成扩展状态。")
         if expansions > 0 and model:
             self._pending_render = (self.project, shots, expansions)
             worker = ExpansionWorker(
                 self.cfg, shots, expansions, model=model,
-                use_external=use_external,
-                sequence=bool((settings.get("img2img") or {}).get(
-                    "sequence_mode", False)))
+                use_external=use_external, sequence=sequence_mode)
             worker.done.connect(self._on_expansions_ready)
             worker.failed.connect(self._on_expansions_failed)
             worker.canceled.connect(self._on_expansions_canceled)
@@ -4820,7 +4882,8 @@ class MainWindow(QMainWindow):
         self.img2img_denoise.setValue(float(img2img.get("denoise", 0.35)))
         self.expand_spin.setValue(int(img2img.get("expansions", 3)))
         self.sequence_mode_check.setChecked(bool(
-            img2img.get("sequence_mode", False)))
+            img2img.get("sequence_mode", False))
+            and self.img2img_check.isChecked())
         self.expand_external.setChecked(bool(img2img.get(
             "external_ai", bool(self.cfg.external_llm.base_url
                                and self.cfg.external_llm.api_key
@@ -4828,11 +4891,6 @@ class MainWindow(QMainWindow):
         self.cross_shot_check.setChecked(bool(img2img.get("cross_shot", False)))
         self.cross_shot_denoise.setValue(float(
             img2img.get("cross_shot_denoise", 0.35)))
-        split = s.get("split") or {}
-        self.split_check.setChecked(bool(split.get(
-            "enabled", getattr(self.cfg.generation, "split_enabled", True))))
-        self.split_region.selectValue(str(split.get(
-            "region", getattr(self.cfg.generation, "split_region", "auto"))))
         self._set_pose_settings(s.get("pose") or {})
         self.clip_skip.setValue(int(project.get("clip_skip", -2)))
 
@@ -5262,7 +5320,6 @@ class MainWindow(QMainWindow):
         project["character"].pop("ipadapter", None)
         settings = project.setdefault("settings", {})
         settings["img2img"] = {"enabled": False, "expansions": 0}
-        settings["split"] = {"enabled": False, "region": "auto"}
         pose = settings.setdefault("pose", {})
         pose["enabled"] = False
         tasks = build_tasks(
@@ -5479,8 +5536,6 @@ class MainWindow(QMainWindow):
                 "sequence_mode": self.sequence_mode_check.isChecked(),
                 "expand_count": self.expand_spin.value(),
                 "expand_external": self.expand_external.isChecked(),
-                "split_enabled": self.split_check.isChecked(),
-                "split_region": self.split_region.currentValue(),
                 "pose": self._pose_settings(),
                 "style_profile": self._style_profile_settings(),
                 "auto_continuity": self.auto_continuity_check.isChecked(),
@@ -5569,11 +5624,16 @@ class MainWindow(QMainWindow):
                 ("positive", self.positive_extra, "_positive_extra_en", "_positive_extra_zh"),
                 ("negative", self.negative_extra, "_negative_extra_en", "_negative_extra_zh")):
             saved = state.get(name) or {}
-            setattr(self, en_attr, str(saved.get("en") or ""))
-            setattr(self, zh_attr, str(saved.get("zh") or ""))
+            en = str(saved.get("en") or "")
+            zh = str(saved.get("zh") or "")
+            text = str(saved.get("text") or "")
+            if name == "positive":
+                en, zh, text = merge_default_positive(en, zh, text)
+            setattr(self, en_attr, en)
+            setattr(self, zh_attr, zh)
             attr.blockSignals(True)
             try:
-                attr.setPlainText(str(saved.get("text") or ""))
+                attr.setPlainText(text)
             finally:
                 attr.blockSignals(False)
 
@@ -5670,16 +5730,13 @@ class MainWindow(QMainWindow):
         self.cross_shot_denoise.setValue(float(
             options.get("cross_shot_denoise", 0.35)))
         self.sequence_mode_check.setChecked(bool(
-            options.get("sequence_mode", False)))
+            options.get("sequence_mode", False))
+            and self.img2img_check.isChecked())
         self.expand_spin.setValue(int(options.get("expand_count", 3)))
         self.expand_external.setChecked(bool(options.get(
             "expand_external", bool(self.cfg.external_llm.base_url
                                    and self.cfg.external_llm.api_key
                                    and self.cfg.external_llm.model))))
-        self.split_check.setChecked(bool(options.get(
-            "split_enabled", getattr(self.cfg.generation, "split_enabled", True))))
-        self.split_region.selectValue(str(options.get(
-            "split_region", getattr(self.cfg.generation, "split_region", "auto"))))
         pose = options.get("pose")
         if not isinstance(pose, dict):
             pose = {

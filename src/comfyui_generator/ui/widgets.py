@@ -11,7 +11,14 @@ from PySide6.QtWidgets import (
 )
 
 
-class SearchComboBox(QComboBox):
+class ClickScrollComboBox(QComboBox):
+    """Combo box that ignores wheel events until the user opens it."""
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        event.ignore()
+
+
+class SearchComboBox(ClickScrollComboBox):
     """Editable combo with contains-search and strict selection.
 
     The user can type to filter, but only values from the list can be committed
@@ -146,6 +153,8 @@ class SearchComboBox(QComboBox):
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802
         if obj is self.lineEdit():
+            if event.type() == QEvent.Type.Wheel:
+                return True
             if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
                 QTimer.singleShot(0, self.show_popup_search)
             elif event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
