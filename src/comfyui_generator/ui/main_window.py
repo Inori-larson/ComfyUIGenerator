@@ -12,7 +12,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QByteArray, QFileSystemWatcher, QSize, Qt, QTimer
+from PySide6.QtCore import (
+    QByteArray, QFileSystemWatcher, QItemSelectionModel, QSize, Qt, QTimer,
+)
 from PySide6.QtGui import QAction, QBrush, QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
@@ -4188,7 +4190,10 @@ class MainWindow(QMainWindow):
 
     def _on_shot_cell_clicked(self, row: int, column: int) -> None:
         if column == 0 and row >= 0:
-            self.shot_table.selectRow(row)
+            index = self.shot_table.model().index(row, 0)
+            self.shot_table.selectionModel().select(
+                index, QItemSelectionModel.SelectionFlag.Select
+                | QItemSelectionModel.SelectionFlag.Rows)
             self._remember_shot_selection()
 
     def _remember_shot_selection(self) -> None:

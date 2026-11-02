@@ -4,6 +4,12 @@ from comfyui_generator.core.storyboard import (
     OUTLINE_SYSTEM,
     STORY_SYSTEM,
     _clothing_key,
+    _half_off_tags,
+    _script_has_half_off,
+    _script_resets_to_full,
+    _global_story_state,
+    _story_progress_ledger,
+    _with_outline_progress,
     SCRIPT_SYSTEM,
     TAG_SYSTEM,
     apply_character_state,
@@ -28,6 +34,7 @@ from comfyui_generator.core.storyboard import (
     slugify,
     strip_male_profile_details,
     StoryboardOptions,
+    _finalize_shot_prompt,
 )
 
 
@@ -45,7 +52,11 @@ def test_tag_prompt_requires_fluid_interactions():
     assert "pussy juice" in TAG_SYSTEM
     assert "cum in mouth" in TAG_SYSTEM
     assert "cum swallowing" in TAG_SYSTEM
+    assert "cum on body" in TAG_SYSTEM
+    assert "creampie" in TAG_SYSTEM
     assert "squirt" in TAG_SYSTEM
+    assert "男方射精方式" in SCRIPT_SYSTEM
+    assert "男方射精方式" in STORY_SYSTEM
 
 
 def test_prompts_do_not_depend_on_reference_tags():
@@ -56,6 +67,24 @@ def test_prompts_do_not_depend_on_reference_tags():
     assert "不生成质量" in TAG_SYSTEM
     for prompt in (STORY_SYSTEM, OUTLINE_SYSTEM, SCRIPT_SYSTEM, TAG_SYSTEM):
         assert "撕破连裤袜" in prompt
+
+
+def test_scene_instructions_allow_natural_detail_expansion():
+    for prompt in (STORY_SYSTEM, OUTLINE_SYSTEM, SCRIPT_SYSTEM, TAG_SYSTEM):
+        assert "自然扩展" in prompt
+        assert "不要每镜随机换一套" in prompt
+    messages = build_script_messages("story", 1, "", [], 1, ["one"])
+    assert "环境细节" in messages[1]["content"]
+
+
+def test_script_messages_include_progress_and_single_beat_rule():
+    messages = build_script_messages(
+        "story", 1, "", [], 1, ["one"],
+        story_state="剧情进度账本：当前阶段=插入")
+    assert "剧情进度账本" in messages[1]["content"]
+    system = messages[0]["content"]
+    assert "每镜只能有一个主行为节拍" in system
+    assert "插入后不得无过渡切回自慰" in system
 
 
 def test_strip_appearance_instructions_only_when_character_lora_is_active():
@@ -130,6 +159,62 @@ def test_torn_clothing_state_is_not_erased_by_clothing_machine():
     assert "panties aside" in result
     assert "black pantyhose" in result
     assert "black panties" in result
+
+
+def test_half_off_script_words_cover_chinese_variants():
+    for script in (
+            "连裤袜半褪在大腿上，内裤歪到一边",
+            "黑色丝袜堆在小腿和脚踝",
+            "内裤挂在一条腿上",
+            "她把连裤袜拉上来"):
+        assert _script_has_half_off(script)
+
+
+def test_half_off_tags_support_ankles_and_calves():
+    result = _half_off_tags([
+        "(black pantyhose:1.2)",
+        "(black pantyhose around ankles:1.2)",
+    ])
+    assert "(black pantyhose:1.2)" not in result
+    assert "(black pantyhose around ankles:1.2)" in result
+    assert "pantyhose around ankles" in result
+    assert "lower legs covered" in result
+
+
+def test_finalize_keeps_carried_half_off_without_current_half_off_script():
+    shot = {
+        "prompt": "1girl, (black pantyhose:1.2), (black pantyhose around ankles:1.2)",
+        "script": "她继续看着你，没有说话。",
+        "clothing_details": {"char_01": "pantyhose half-off"},
+    }
+    _finalize_shot_prompt(shot, "(black pantyhose:1.2)")
+    assert "(black pantyhose:1.2)" not in shot["prompt"]
+    assert "around ankles" in shot["prompt"]
+
+
+def test_finalize_clears_half_off_when_script_explicitly_redresses():
+    shot = {
+        "prompt": "1girl, (black pantyhose:1.2), (black pantyhose around ankles:1.2)",
+        "script": "她整理好衣服，连裤袜仍完整穿着。",
+        "clothing_details": {"char_01": "pantyhose half-off"},
+    }
+    _finalize_shot_prompt(shot, "(black pantyhose:1.2)")
+    assert _script_resets_to_full("连裤袜仍完整穿着")
+    assert "around ankles" not in shot["prompt"]
+
+
+def test_clothing_details_use_current_state_and_dedupe_synonyms():
+    profile = parse_character_profiles(
+        "角色：女主：black hair\n初始服装：女主：black pantyhose")[0]
+    states = {profile.key: {"black pantyhose"}}
+    details = update_clothing_details(
+        [profile], states, [profile],
+        "pantyhose around ankles, half-off pantyhose",
+        {profile.key: {"half-off pantyhose", "pantyhose pulled down"}},
+        script="连裤袜堆在脚踝",
+    )
+    assert details[profile.key] == {
+        "pantyhose around ankles", "half-off pantyhose"}
 
 
 def test_empty_carried_clothing_does_not_reset_to_initial_outfit():
@@ -280,6 +365,64 @@ def test_generic_scene_office_bathroom_beach():
     assert states[0][0] == "office"
     assert states[1][0] == "bathroom"
     assert states[2][0] == "beach"
+
+
+def test_beach_scene_recognizes_sea_breeze_sand_and_rocks():
+    states = scene_states_for_beats([
+        "海风吹过沙地，她躲在礁石后",
+        "开阔海面上有浪花",
+    ])
+    assert states[0][0] == "beach"
+    assert states[1][0] == "beach"
+
+
+def test_story_progress_ledger_records_stages_and_no_loop_rule():
+    shots = [
+        {"id": "01", "outline": "她独自自慰，手指碰到自己"},
+        {"id": "02", "outline": "你出现，她慌张停下"},
+        {"id": "03", "outline": "你插入她，她仰头呻吟"},
+    ]
+    ledger = _story_progress_ledger(shots)
+    assert "自慰" in ledger
+    assert "初遇/男主出现" in ledger
+    assert "插入" in ledger
+    assert "同一镜只能有一个主节拍" in ledger
+    assert "不得无理由重复" in ledger
+
+
+def test_story_progress_ledger_blocks_redress_then_undress_loop():
+    ledger = _story_progress_ledger([
+        {"id": "01", "outline": "她整理好衣物，把胸罩和连裤袜穿回去"},
+    ])
+    assert "整理/事后阶段" in ledger
+    assert "禁止重新脱衣" in ledger
+
+
+def test_premise_act_plan_messages_reject_instruction_fragments():
+    from comfyui_generator.core.storyboard import build_premise_act_plan_messages
+    messages = build_premise_act_plan_messages("写一个 50 镜的故事", 50)
+    content = messages[1]["content"]
+    assert "只规划真正的剧情阶段" in content
+    assert "写作要求" in content
+
+
+def test_global_story_state_contains_progress_ledger():
+    state = _global_story_state("story", [
+        {"id": "01", "outline": "她自慰"},
+        {"id": "02", "outline": "你出现"},
+    ])
+    assert "剧情进度账本" in state
+    assert "当前阶段" in state
+
+
+def test_outline_progress_appends_completed_stages():
+    state = _with_outline_progress("全局状态表：剧情开始", [
+        {"id": "01", "outline": "她自慰"},
+        {"id": "02", "outline": "你出现"},
+    ])
+    assert "全局状态表：剧情开始" in state
+    assert "已完成阶段" in state
+    assert "自慰" in state
 
 
 def test_generic_maid_outfit_and_hospital_scene():
@@ -893,7 +1036,23 @@ def test_long_story_is_split_into_acts_and_keeps_global_ids():
     from comfyui_generator.core.storyboard import generate_storyboard
 
     class LongFake:
+        def __init__(self):
+            self.act_calls = 0
+
         def chat_json(self, model, messages, **kwargs):
+            schema = kwargs.get("schema") or {}
+            if (schema.get("required") or []) == ["acts"]:
+                self.act_calls += 1
+                return {"acts": [
+                    {"id": "01", "title": "独处",
+                     "summary": "她回家后独处自慰",
+                     "cast": "1girl solo", "clothing": "",
+                     "scene": "beach", "nsfw": "masturbation"},
+                    {"id": "02", "title": "发现与插入",
+                     "summary": "男主发现她并进入",
+                     "cast": "1girl 1boy", "clothing": "",
+                     "scene": "beach", "nsfw": "sex"},
+                ]}
             return {"shots": [
                 {"id": "%02d" % index, "name": "s%02d" % index,
                  "script": "脚本", "prompt": "1girl, solo",
@@ -901,10 +1060,12 @@ def test_long_story_is_split_into_acts_and_keeps_global_ids():
                 for index in range(1, 7)
             ]}
 
+    client = LongFake()
     shots = generate_storyboard(
-        LongFake(), "剧情：她回家，自慰，被我看到，做爱",
+        client, "剧情：她回家，自慰，被我看到，做爱",
         StoryboardOptions(model="test-model", shots=31, chunk=3,
                           log=lambda _message: None))
+    assert client.act_calls == 1
     assert len(shots) == 31
     assert shots[0]["id"] == "01"
     assert shots[-1]["id"] == "31"
@@ -1001,3 +1162,61 @@ def test_partial_clothing_removal_keeps_item_but_full_removal_drops_it():
     full = character_states_for_beats(
         [profile], ["脱下胸罩"])[0][profile.key]
     assert "black lace bra" not in full
+
+
+def test_finalize_dedupes_weighted_clothes():
+    shot = {
+        "prompt": "1girl, 1boy, sex, (black bra:1.2), black_bra, "
+                  "(black pantyhose:1.2), black_pantyhose",
+        "clothing": "black bra, black pantyhose",
+    }
+    _finalize_shot_prompt(shot, "black bra, black pantyhose")
+    prompt = shot["prompt"]
+    tags = [tag.strip() for tag in prompt.split(",")]
+    assert "(black bra:1.2)" in tags
+    assert "black_bra" not in tags
+    assert "(black pantyhose:1.2)" in tags
+    assert "black_pantyhose" not in tags
+
+
+def test_half_off_clothing_combines_with_base_item():
+    shot = {
+        "prompt": "1girl, 1boy, (black pantyhose:1.2), pantyhose pulled down, "
+                  "black_bra, bra pull, torn pantyhose",
+        "script": "她把连裤袜褪到膝盖，胸罩半脱。",
+        "clothing": "black pantyhose, black bra",
+    }
+    _finalize_shot_prompt(shot, "black pantyhose, black bra")
+    prompt = shot["prompt"]
+    tags = [tag.strip() for tag in prompt.split(",")]
+    assert "(black pantyhose:1.2)" not in tags
+    assert any("black pantyhose around thighs" in tag for tag in tags)
+    assert "upper thighs bare" in tags
+    assert "thighs exposed" in tags
+    assert "one leg out" not in tags
+
+
+def test_half_off_is_removed_when_script_does_not_describe_it():
+    shot = {
+        "prompt": "1girl, (black pantyhose:1.2), pantyhose pulled down",
+        "script": "她穿着完整的连裤袜站在沙滩上。",
+        "clothing": "black pantyhose",
+    }
+    _finalize_shot_prompt(shot, "black pantyhose")
+    prompt = shot["prompt"]
+    assert "pantyhose pulled down" not in prompt
+    assert "around thighs" not in prompt
+    assert "(black pantyhose:1.2)" in prompt
+
+
+def test_half_off_tag_is_not_duplicated_on_repeated_finalize():
+    shot = {
+        "prompt": "1girl, (black pantyhose:1.2), pantyhose pulled down",
+        "script": "她把连裤袜褪到膝盖。",
+        "clothing": "black pantyhose",
+    }
+    _finalize_shot_prompt(shot, "black pantyhose")
+    _finalize_shot_prompt(shot, "black pantyhose")
+    prompt = shot["prompt"]
+    assert "around thighs around thighs" not in prompt
+    assert prompt.count("around thighs") == 1

@@ -57,6 +57,109 @@ def test_compose_prompts_order(cfg):
     assert "multiple girls" in negative
 
 
+def test_compose_prompts_injects_scene_anchor_tags(cfg):
+    positive, _ = compose_prompts(cfg, {
+        "prompt": "1girl, solo, standing",
+        "scene": "beach, ocean, sand, outdoors",
+    })
+    assert "beach" in positive
+    assert "ocean" in positive
+    assert "sand" in positive
+
+
+def test_compose_prompts_drops_conflicting_indoor_tag_on_beach(cfg):
+    positive, _ = compose_prompts(cfg, {
+        "prompt": "1girl, solo, bedroom, soft lighting",
+        "scene": "beach, ocean, sand, outdoors",
+    })
+    assert "bedroom" not in positive.split(",")
+    assert "beach" in positive
+
+
+def test_compose_prompts_drops_conflicting_outdoor_tag_indoors(cfg):
+    positive, _ = compose_prompts(cfg, {
+        "prompt": "1girl, solo, beach, ocean, sunlight",
+        "scene": "bedroom, bed, indoors",
+    })
+    assert "beach" not in positive.split(",")
+    assert "bedroom" in positive
+
+
+def test_compose_prompts_locks_hair_color(cfg):
+    positive, negative = compose_prompts(cfg, {
+        "prompt": "1girl, solo, standing",
+        "character_tags": "red_hair, red_eyes",
+    })
+    assert "(red_hair:1.2)" in positive
+    assert "(red_eyes:1.2)" in positive
+    assert "different hair color" in negative
+
+
+def test_compose_prompts_locks_any_hair_color(cfg):
+    positive, negative = compose_prompts(cfg, {
+        "prompt": "1girl, solo, standing",
+        "character_tags": "teal_hair, two-tone_hair, heterochromia",
+    })
+    assert "(teal_hair:1.2)" in positive
+    assert "(two-tone_hair:1.2)" in positive
+    assert "(heterochromia:1.2)" in positive
+    assert "different hair color" in negative
+
+
+def test_compose_prompts_does_not_add_detailed_penis_for_solo_female(cfg):
+    positive, _ = compose_prompts(cfg, {
+        "prompt": "1girl, solo, pussy, wet pussy",
+        "cast": "1girl solo",
+    })
+    assert "detailed pussy" in positive
+    assert "detailed penis" not in positive
+
+
+def test_compose_prompts_adds_detailed_penis_when_male_present(cfg):
+    positive, _ = compose_prompts(cfg, {
+        "prompt": "1girl, 1boy, nude male, pussy, penis in pussy",
+        "cast": "1girl 1boy",
+    })
+    assert "detailed penis" in positive
+    assert "detailed pussy" in positive
+
+
+def test_compose_prompts_blocks_damage_when_script_has_none(cfg):
+    _, negative = compose_prompts(cfg, {
+        "prompt": "1girl, solo, black pantyhose",
+        "script": "她穿着完整丝袜站在沙滩上。",
+    })
+    assert "torn pantyhose" in negative
+    _, negative = compose_prompts(cfg, {
+        "prompt": "1girl, solo, torn pantyhose",
+        "script": "她的丝袜被撕破。",
+    })
+    assert "torn pantyhose" not in negative
+
+
+def test_compose_prompts_blocks_intact_legwear_when_half_off(cfg):
+    _, negative = compose_prompts(cfg, {
+        "prompt": "1girl, solo, black pantyhose around thighs, "
+                  "upper thighs bare",
+    })
+    assert "pantyhose around waist" in negative
+    assert "crotch covered by pantyhose" in negative
+
+
+def test_compose_prompts_drops_full_legwear_when_prompt_has_half_off(cfg):
+    positive, _ = compose_prompts(cfg, {
+        "prompt": "1girl, solo, (black pantyhose around thighs:1.2), "
+                  "pantyhose pulled down, upper thighs bare, "
+                  "(bra:1.2), (panties:1.2)",
+        "clothing": "(black pantyhose:1.2), (bra:1.2), (panties:1.2)",
+    })
+    tags = [tag.strip() for tag in positive.split(",")]
+    assert "(black pantyhose:1.2)" not in tags
+    assert any("black pantyhose around thighs" in tag for tag in tags)
+    assert "(bra:1.2)" in tags
+    assert "(panties:1.2)" in tags
+
+
 def test_compose_prompts_boosts_all_clothing_tags(cfg):
     positive, _ = compose_prompts(cfg, {
         "prompt": "1girl, solo, beach",
@@ -536,6 +639,34 @@ def test_compose_prompts_allows_two_females_with_two_female_cast(cfg):
         "cast": "2girls"})
     assert "2girls" in positive
     assert "multiple girls" not in negative
+
+
+def test_compose_prompts_strips_solo_female_from_double(cfg):
+    positive, _ = compose_prompts(cfg, {
+        "prompt": "1girl, 1boy, solo female, nude male",
+        "cast": "1girl 1boy",
+    })
+    tags = [tag.strip() for tag in positive.split(",")]
+    assert "solo female" not in tags
+    assert "1boy" in tags
+
+
+def test_compose_prompts_strips_male_clothing_actions_from_double(cfg):
+    positive, _ = compose_prompts(cfg, {
+        "prompt": "1girl, 1boy, nude_male, male_pov, unbuckling_belt, "
+                  "hands_on_belt, undressing another, hand on clothes, "
+                  "pulling clothes, white_shirt",
+        "cast": "1girl 1boy",
+        "clothing": "white_shirt",
+    })
+    assert "unbuckling_belt" not in positive
+    assert "hands_on_belt" not in positive
+    assert "male_pov" not in positive
+    assert "undressing another" not in positive
+    assert "hand on clothes" not in positive
+    assert "pulling clothes" not in positive
+    assert "nude male" in positive
+    assert "white_shirt" in positive
 
 
 def test_compose_prompts_removes_orphan_penis_and_pov_with_visible_male(cfg):

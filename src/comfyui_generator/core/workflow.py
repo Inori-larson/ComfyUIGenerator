@@ -14,6 +14,7 @@ from typing import Any
 from comfyui_generator.core.continuity import (
     continuity_negative, continuity_positive, strip_shot_grammar,
 )
+from comfyui_generator.core.storyboard import _clothing_key, _SCENE_TAGS
 from comfyui_generator.core.style_profile import apply_style_profile
 
 
@@ -185,6 +186,72 @@ def _boost_clothing_tags(text: str, weight: float = 1.15) -> str:
         else:
             boosted.append("(%s:%s)" % (tag, weight))
     return ", ".join(boosted)
+
+
+_HALF_OFF_TAG_RE = re.compile(
+    r"(?:around (?:one )?(?:thigh|thighs|knee|knees|ankle|ankles|leg)|"
+    r"pulled (?:down|aside)|half[- ]off|one leg out|off shoulder|"
+    r"bra pull|skirt lift|panties aside)",
+    re.I,
+)
+
+
+def _unweighted_tag(tag: str) -> str:
+    value = str(tag or "").strip()
+    match = re.fullmatch(r"\((.+?):\d+(?:\.\d+)?\)", value)
+    if match:
+        value = match.group(1)
+    return re.sub(r"[\s_\-]+", " ", value.lower()).strip()
+
+
+_INDOOR_SCENE_TAGS = {
+    tag for values in _SCENE_TAGS.values() if "indoors" in values
+    for tag in values
+}
+_OUTDOOR_SCENE_TAGS = {
+    tag for values in _SCENE_TAGS.values() if "outdoors" in values
+    for tag in values
+}
+
+
+def _resolve_scene_conflict(positive: str, scene: str) -> str:
+    scene_key = _unweighted_tag(scene)
+    if not scene_key:
+        return positive
+    scene_indoor = any(
+        tag in scene_key for tag in ("indoors", "bedroom", "room"))
+    scene_outdoor = "outdoors" in scene_key or any(
+        tag in scene_key for tag in ("beach", "ocean", "sand", "street",
+                                     "park", "garden", "forest"))
+    if scene_indoor == scene_outdoor:
+        return positive
+    drop = _INDOOR_SCENE_TAGS if scene_outdoor else _OUTDOOR_SCENE_TAGS
+    return ", ".join(
+        tag.strip() for tag in str(positive or "").split(",")
+        if tag.strip() and _unweighted_tag(tag.strip()) not in drop)
+
+
+def _drop_full_clothing_when_half_off(positive: str, prompt: str) -> str:
+    half_off_keys = {
+        key for key in (
+            _clothing_key(tag)
+            for tag in str(prompt or "").split(",")
+            if _HALF_OFF_TAG_RE.search(_unweighted_tag(tag)))
+        if key
+    }
+    if not half_off_keys:
+        return positive
+    kept: list[str] = []
+    for tag in str(positive or "").split(","):
+        value = tag.strip()
+        if not value:
+            continue
+        key = _clothing_key(value)
+        if (key in half_off_keys
+                and not _HALF_OFF_TAG_RE.search(_unweighted_tag(value))):
+            continue
+        kept.append(value)
+    return ", ".join(kept)
 
 
 def merge(base: dict[str, Any] | None, extra: dict[str, Any] | None) -> dict[str, Any]:
@@ -508,19 +575,69 @@ _MALE_DUPLICATE_NEGATIVE = (
     "floating penis, second male, two male bodies, extra male body, "
     "duplicate male body"
 )
+_THIGH_LEGWEAR_NEGATIVE = (
+    "pantyhose around waist, waistband at waist, "
+    "pantyhose covering upper thighs, crotch covered by pantyhose"
+)
+_ONE_LEG_LEGWEAR_NEGATIVE = (
+    "both legs covered, symmetrical legwear, pantyhose on both legs"
+)
+_DAMAGE_NEGATIVE = (
+    "torn pantyhose, ripped pantyhose, torn clothes, ripped clothes, "
+    "hole in clothes, clothing damage"
+)
+_DAMAGE_SCRIPT_WORDS = (
+    "torn", "ripped", "damaged", "tear", "破", "撕", "裂", "洞",
+    "扯开", "拉破",
+)
+
+
+def _is_appearance_lock_tag(tag: str) -> bool:
+    value = str(tag or "").strip()
+    match = re.fullmatch(r"\((.+?):\d+(?:\.\d+)?\)", value)
+    if match:
+        value = match.group(1)
+    low = re.sub(r"[\s_\-]+", " ", value.lower()).strip()
+    if low in ("hair ornament", "hairclip", "hair clip",
+               "hair bow", "hair ribbon"):
+        return False
+    words = low.split()
+    return bool(words and words[-1] in ("hair", "eyes")) or (
+        "heterochromia" in low)
+
+
+def _boost_appearance_tags(text: str) -> str:
+    tags = [tag.strip() for tag in str(text or "").split(",") if tag.strip()]
+    result: list[str] = []
+    for tag in tags:
+        if (_is_appearance_lock_tag(tag)
+                and not re.search(r":\d+(?:\.\d+)?\)$", tag)):
+            result.append("(%s:1.2)" % tag)
+        else:
+            result.append(tag)
+    return ", ".join(result)
+
+
+def _appearance_negative(text: str) -> str:
+    tags = [tag.strip() for tag in str(text or "").split(",") if tag.strip()]
+    if not any(_is_appearance_lock_tag(tag) for tag in tags):
+        return ""
+    return ("different hair color, hair color change, inconsistent hair color, "
+            "two different hair colors")
 _ORPHAN_MALE_TAGS = {"penis", "cock", "pov", "male pov"}
 
 
 def _without_orphan_male_parts(text: str) -> str:
     tags = [tag.strip() for tag in str(text or "").split(",") if tag.strip()]
     has_male_body = any(
-        tag.lower() in ("nude male", "male body", "male torso")
+        tag.lower().replace("_", " ") in (
+            "nude male", "male body", "male torso")
         for tag in tags)
     if not has_male_body:
         return text
     return ", ".join(
         tag for tag in tags
-        if tag.lower() not in _ORPHAN_MALE_TAGS)
+        if tag.lower().replace("_", " ") not in _ORPHAN_MALE_TAGS)
 
 
 def _allows_two_females(shot: dict[str, Any]) -> bool:
@@ -541,6 +658,19 @@ def _without_multi_people(text: str, allow_two_females: bool) -> str:
             continue
         kept.append(tag)
     return ", ".join(kept)
+
+
+_SOLO_CONFLICT_TAGS = {
+    "solo", "solo focus", "solo female", "female solo",
+    "solo male", "male solo",
+}
+
+
+def _without_solo_when_double(text: str) -> str:
+    return ", ".join(
+        tag.strip() for tag in str(text or "").split(",")
+        if tag.strip()
+        and _unweighted_tag(tag.strip()) not in _SOLO_CONFLICT_TAGS)
 _FUTA_WORDS = (
     "futanari", "dickgirl", "shemale", "newhalf", "intersex",
     "hermaphrodite", "extra penis", "penis on female", "female with penis",
@@ -564,8 +694,10 @@ _MALE_FACE_NEGATIVE = (
     "male facial features, beard, necktie"
 )
 _MALE_CLOTHING_NEGATIVE = (
-    "male clothes, male shirt, male pants, male jeans, male underwear, "
-    "male uniform"
+    "male clothes, clothed male, male wearing clothes, male in clothes, "
+    "male shirt, male pants, male jeans, male underwear, male uniform, "
+    "male vest, male dress, male skirt, male in female clothes, "
+    "male wearing female clothes, male with shirt, male with vest"
 )
 _MALE_FEMININE_NEGATIVE = (
     "female head on male, female face on male, male with female head, "
@@ -579,6 +711,9 @@ _MALE_CLOTHING_REMOVE = (
     "school uniform", "casual shirt", "shirt", "pants", "jeans", "trousers",
     "boxers", "briefs", "necktie", "male underwear", "male shirt",
     "male pants", "open fly", "unzipped pants", "zipper", "belt buckle",
+    "unbuckling belt", "hands on belt", "belt undone", "open belt", "belt",
+    "undressing another", "hand on clothes", "hands on clothes",
+    "pulling clothes", "male undressing", "male dressing",
 )
 
 
@@ -606,8 +741,15 @@ _EXPLICIT_TAGS = (
     "penis", "pussy", "vagina", "labia", "clitoris", "sex", "hetero",
     "cum", "semen", "ejaculat", "creampie",
 )
-_UNCENSORED_POSITIVE = (
+_FEMALE_UNCENSORED_POSITIVE = (
+    "uncensored, detailed genitals, detailed pussy"
+)
+_MALE_UNCENSORED_POSITIVE = (
     "uncensored, detailed genitals, detailed penis, detailed pussy"
+)
+_MALE_PRESENT_TAGS = (
+    "1boy", "male body", "nude male", "faceless male", "male pov",
+    "penis in pussy", "penis in mouth",
 )
 _UNCENSORED_NEGATIVE = (
     "mosaic, pixelated, pixelation, censor bar, censorship, mosaic blur, "
@@ -619,7 +761,15 @@ _UNCENSORED_NEGATIVE = (
 def _apply_uncensored(positive: str, negative: str) -> tuple[str, str]:
     if not _contains_any(positive, _EXPLICIT_TAGS):
         return positive, negative
-    positive = join_tags(positive, _UNCENSORED_POSITIVE)
+    has_male = _contains_any(positive, _MALE_PRESENT_TAGS)
+    if has_male:
+        positive = join_tags(positive, _MALE_UNCENSORED_POSITIVE)
+    else:
+        tags = [tag.strip() for tag in str(positive or "").split(",")
+                if tag.strip()]
+        positive = ", ".join(
+            tag for tag in tags if _tag_key(tag) != "detailed penis")
+        positive = join_tags(positive, _FEMALE_UNCENSORED_POSITIVE)
     return positive, join_tags(negative, _UNCENSORED_NEGATIVE)
 
 
@@ -904,15 +1054,23 @@ def compose_prompts(cfg: dict[str, Any], shot: dict[str, Any]) -> tuple[str, str
     style_tags = shot.get("style_positive", style.get("positive", ""))
     style_lora = shot.get("style_lora_tags", style.get("lora_tags", ""))
     style_suffix = shot.get("style_suffix", style.get("suffix", ""))
-    character_tags = shot.get("character_tags", character.get("tags", ""))
+    character_tags = _boost_appearance_tags(
+        shot.get("character_tags", character.get("tags", "")))
+    negative = join_tags(negative, _appearance_negative(character_tags))
     continuity_tags = continuity_positive(cfg.get("continuity"), shot)
+    scene_tags = str(shot.get("scene") or "").strip()
     positive = join_tags(
         style_tags, style_lora, character_tags, action_source,
         clothing_source, body_source, continuity_tags, render_prompt,
-        style_suffix,
+        scene_tags, style_suffix,
     )
+    positive = _resolve_scene_conflict(
+        positive, str(shot.get("scene") or ""))
+    positive = _drop_full_clothing_when_half_off(positive, str(prompt or ""))
     allow_two_females = _allows_two_females(shot)
     positive = _without_multi_people(positive, allow_two_females)
+    if is_double_shot(shot):
+        positive = _without_solo_when_double(positive)
     negative = join_tags(negative, _NO_MULTI_MALE)
     if not allow_two_females:
         negative = join_tags(negative, _NO_EXTRA_FEMALE)
@@ -925,6 +1083,21 @@ def compose_prompts(cfg: dict[str, Any], shot: dict[str, Any]) -> tuple[str, str
             negative, _FUTA_NEGATIVE, _MALE_FACE_NEGATIVE,
             _MALE_CLOTHING_NEGATIVE, _MALE_FEMININE_NEGATIVE,
             _MALE_DUPLICATE_NEGATIVE)
+    prompt_text = str(prompt or "")
+    if re.search(
+            r"(?:pantyhose|stockings|thighhigh|legwear).{0,30}"
+            r"(?:around thighs|pulled down|half-off|half off)",
+            prompt_text, re.I):
+        negative = join_tags(negative, _THIGH_LEGWEAR_NEGATIVE)
+    if re.search(
+            r"(?:pantyhose|stockings|thighhigh|legwear).{0,30}"
+            r"(?:around one leg|one leg out|one leg removed)",
+            prompt_text, re.I):
+        negative = join_tags(negative, _ONE_LEG_LEGWEAR_NEGATIVE)
+    script_text = str(shot.get("script") or "").lower()
+    if script_text and not any(
+            word in script_text for word in _DAMAGE_SCRIPT_WORDS):
+        negative = join_tags(negative, _DAMAGE_NEGATIVE)
     return _apply_uncensored(positive, negative)
 
 

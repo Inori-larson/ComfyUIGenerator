@@ -5,7 +5,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QEvent, Qt
 from PySide6.QtWidgets import QApplication, QSpinBox, QWidget
 
-from comfyui_generator.ui.main_window import merge_default_positive
+from comfyui_generator.ui.main_window import MainWindow, merge_default_positive
 from comfyui_generator.ui.style import APP_QSS
 from comfyui_generator.ui.widgets import SearchComboBox, WrappingTabs
 from comfyui_generator.ui.wheel_guard import WheelGuard
@@ -105,3 +105,18 @@ def test_default_positive_prompt_is_merged_without_duplicates():
     assert "非常有美感" in text
     assert "风景" in text
     assert "体积光" in text
+
+
+def test_checked_shot_rows_accumulate_for_selected_generation():
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    shots = [{"id": "01", "name": "a", "prompt": "p1"},
+             {"id": "02", "name": "b", "prompt": "p2"},
+             {"id": "03", "name": "c", "prompt": "p3"}]
+    window._fill_shot_table(shots)
+    window.chk_selected.setChecked(True)
+    window._on_shot_cell_clicked(0, 0)
+    window._on_shot_cell_clicked(2, 0)
+    selected = window._collect_shots(True)
+    assert [shot["id"] for shot in selected] == ["01", "03"]
+    window.close()
