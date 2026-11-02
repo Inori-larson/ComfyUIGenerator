@@ -1,6 +1,7 @@
 import pytest
 
 from comfyui_generator.core.storyboard import (
+    ACT_PLAN_SYSTEM,
     OUTLINE_SYSTEM,
     STORY_SYSTEM,
     _clothing_key,
@@ -9,6 +10,10 @@ from comfyui_generator.core.storyboard import (
     _script_resets_to_full,
     _global_story_state,
     _story_progress_ledger,
+    stabilize_clothing_sequence,
+    repair_clothing_sequence,
+    repair_clothing_sequence_ai,
+    repair_story_continuity_ai,
     _with_outline_progress,
     SCRIPT_SYSTEM,
     TAG_SYSTEM,
@@ -22,7 +27,9 @@ from comfyui_generator.core.storyboard import (
     clothing_states_for_beats,
     extract_premise_beats,
     filter_locked_appearance,
+    normalize_acts,
     normalize_character_profiles,
+    normalize_outline,
     parse_character_profiles,
     update_clothing_details,
     present_character_profiles,
@@ -67,6 +74,14 @@ def test_prompts_do_not_depend_on_reference_tags():
     assert "不生成质量" in TAG_SYSTEM
     for prompt in (STORY_SYSTEM, OUTLINE_SYSTEM, SCRIPT_SYSTEM, TAG_SYSTEM):
         assert "撕破连裤袜" in prompt
+
+
+def test_prompt_templates_share_priority_and_avoid_foreign_examples():
+    for prompt in (STORY_SYSTEM, OUTLINE_SYSTEM, SCRIPT_SYSTEM,
+                   TAG_SYSTEM, ACT_PLAN_SYSTEM):
+        assert "统一优先级" in prompt
+    assert "yixuan" not in TAG_SYSTEM
+    assert "black blazer" not in TAG_SYSTEM
 
 
 def test_scene_instructions_allow_natural_detail_expansion():
@@ -215,6 +230,400 @@ def test_clothing_details_use_current_state_and_dedupe_synonyms():
     )
     assert details[profile.key] == {
         "pantyhose around ankles", "half-off pantyhose"}
+
+
+def test_clothing_sequence_keeps_damage_until_repaired():
+    profile = parse_character_profiles(
+        "角色：女主：black hair\n初始服装：女主：black pantyhose")[0]
+    shots = [
+        {"id": "01", "prompt": "1girl, (black pantyhose:1.2), torn pantyhose",
+         "script": "她把连裤袜撕破"},
+        {"id": "02", "prompt": "1girl, (black pantyhose:1.2)",
+         "script": "她继续看着你"},
+    ]
+    stabilize_clothing_sequence(shots, [profile])
+    assert "torn black pantyhose" in shots[1]["prompt"]
+    assert "intact" not in shots[1]["prompt"]
+
+
+def test_clothing_sequence_removes_invented_clothing_without_change():
+    profile = parse_character_profiles(
+        "角色：女主：black hair\n初始服装：女主：black pantyhose")[0]
+    shots = [{"id": "01", "prompt": "1girl, white shirt, black pantyhose",
+              "script": "她站着"}]
+    stabilize_clothing_sequence(shots, [profile])
+    assert "white shirt" not in shots[0]["prompt"]
+    assert "black pantyhose" in shots[0]["prompt"]
+
+
+def test_clothing_sequence_allows_and_carries_explicit_outfit_change():
+    profile = parse_character_profiles(
+        "角色：女主：black hair\n初始服装：女主：black pantyhose")[0]
+    shots = [
+        {"id": "01", "prompt": "1girl, white shirt, black pantyhose",
+         "script": "她换上新衬衫"},
+        {"id": "02", "prompt": "1girl, white shirt, black pantyhose",
+         "script": "她继续看着你"},
+    ]
+    stabilize_clothing_sequence(shots, [profile])
+    assert "white shirt" in shots[0]["prompt"]
+    assert "white shirt" in shots[1]["prompt"]
+
+
+def test_clothing_sequence_keeps_panties_present_when_ai_omits_them():
+    profile = parse_character_profiles(
+        "角色：女主：black hair\n初始服装：女主：black pantyhose, lace panties")[0]
+    shots = [
+        {"id": "01", "prompt": "1girl, panties aside", "script": "她把内裤拨到一边"},
+        {"id": "02", "prompt": "1girl, black pantyhose", "script": "她继续"},
+    ]
+    stabilize_clothing_sequence(shots, [profile])
+    assert "panties aside" in shots[1]["prompt"]
+
+
+def test_clothing_sequence_does_not_revert_aside_state_without_reset():
+    profile = parse_character_profiles(
+        "角色：女主：black hair\n初始服装：女主：black pantyhose, lace panties")[0]
+    shots = [
+        {"id": "01", "prompt": "1girl, panties aside", "script": "她把内裤拨到一边"},
+        {"id": "02", "prompt": "1girl, lace panties", "script": "她继续"},
+    ]
+    stabilize_clothing_sequence(shots, [profile])
+    assert "panties aside" in shots[1]["prompt"]
+    assert "lace panties" not in shots[1]["prompt"]
+
+
+def test_clothing_sequence_allows_state_reset_when_script_says_so():
+    profile = parse_character_profiles(
+        "角色：女主：black hair\n初始服装：女主：black pantyhose, lace panties")[0]
+    shots = [
+        {"id": "01", "prompt": "1girl, panties aside", "script": "她把内裤拨到一边"},
+        {"id": "02", "prompt": "1girl, lace panties", "script": "她把内裤拉正"},
+    ]
+    stabilize_clothing_sequence(shots, [profile])
+    assert "lace panties" in shots[1]["prompt"]
+    assert "panties aside" not in shots[1]["prompt"]
+
+
+def test_repair_clothing_sequence_asks_ai_to_fix_missing_panties():
+    profile = parse_character_profiles(
+        "角色：女主：black hair\n初始服装：女主：black pantyhose, lace panties")[0]
+
+    class Fake:
+        def __init__(self):
+            self.calls = []
+
+        def chat_json(self, model, messages, **kwargs):
+            self.calls.append(messages)
+            return {"prompt": "1girl, black pantyhose, panties aside"}
+
+    shots = [
+        {"id": "01", "prompt": "1girl, panties aside", "script": "她继续"},
+        {"id": "02", "prompt": "1girl, black pantyhose", "script": "她继续"},
+    ]
+    client = Fake()
+    repair_clothing_sequence(client, "model", shots, [profile])
+    assert client.calls
+    assert "上一镜仍穿着、这一镜漏掉了" in client.calls[0][1]["content"]
+    assert "panties aside" in shots[1]["prompt"]
+
+
+def test_repair_clothing_sequence_uses_prompt_state_not_user_wardrobe():
+    profile = parse_character_profiles(
+        "角色：女主：black hair\n初始服装：女主：black dress")[0]
+
+    class Fake:
+        def __init__(self):
+            self.calls = 0
+
+        def chat_json(self, model, messages, **kwargs):
+            self.calls += 1
+            return {"prompt": "should not be used"}
+
+    shots = [
+        {"id": "01", "prompt": "1girl, black pantyhose", "script": "她站着"},
+        {"id": "02", "prompt": "1girl, black pantyhose", "script": "她继续"},
+    ]
+    client = Fake()
+    repair_clothing_sequence(client, "model", shots, [profile])
+    assert client.calls == 0
+
+
+def test_repair_clothing_sequence_flags_prompt_contradictions():
+    profile = parse_character_profiles(
+        "角色：女主：black hair\n初始服装：女主：black pantyhose")[0]
+
+    class Fake:
+        def __init__(self):
+            self.calls = []
+
+        def chat_json(self, model, messages, **kwargs):
+            self.calls.append(messages)
+            return {"prompt": "1girl, black pantyhose"}
+
+    shots = [{
+        "id": "01",
+        "prompt": "1girl, completely nude, black pantyhose, pantyhose removed",
+        "script": "她站着",
+    }]
+    client = Fake()
+    repair_clothing_sequence(client, "model", shots, [profile])
+    assert client.calls
+    feedback = client.calls[0][1]["content"]
+    assert "全裸" in feedback
+    assert "同时写了脱下和在穿" in feedback
+
+
+def test_repair_clothing_sequence_does_not_programmatically_append():
+    profile = parse_character_profiles(
+        "角色：女主：black hair\n初始服装：女主：black pantyhose, lace panties")[0]
+
+    class Fake:
+        def chat_json(self, model, messages, **kwargs):
+            return {"prompt": "1girl, black pantyhose"}
+
+    shots = [
+        {"id": "01", "prompt": "1girl, black pantyhose, lace panties",
+         "script": "她站着"},
+        {"id": "02", "prompt": "1girl, black pantyhose", "script": "她继续"},
+    ]
+    repair_clothing_sequence(Fake(), "model", shots, [profile])
+    assert "lace panties" not in shots[1]["prompt"]
+
+
+def test_clothing_key_does_not_treat_top_light_as_top():
+    assert _clothing_key("strong top light") == ""
+    assert _clothing_key("top-down lighting") == ""
+    assert _clothing_key("tube top") == "top"
+
+
+def test_repair_clothing_sequence_flags_unannounced_new_clothing():
+    profile = parse_character_profiles(
+        "角色：女主：black hair\n初始服装：女主：black pantyhose")[0]
+
+    class Fake:
+        def __init__(self):
+            self.calls = []
+
+        def chat_json(self, model, messages, **kwargs):
+            self.calls.append(messages)
+            return {"prompt": "1girl, black pantyhose"}
+
+    shots = [
+        {"id": "01", "prompt": "1girl, black pantyhose", "script": "她站着"},
+        {"id": "02", "prompt": "1girl, black pantyhose, white shirt",
+         "script": "她继续"},
+    ]
+    client = Fake()
+    repair_clothing_sequence(client, "model", shots, [profile])
+    assert client.calls
+    assert "上一镜没有这件服装" in client.calls[0][1]["content"]
+    assert "white shirt" not in shots[1]["prompt"]
+
+
+def test_repair_topless_checks_all_upper_garments():
+    profile = parse_character_profiles(
+        "角色：女主：black hair\n初始服装：女主：black bra")[0]
+
+    class Fake:
+        def __init__(self):
+            self.calls = []
+
+        def chat_json(self, model, messages, **kwargs):
+            self.calls.append(messages)
+            return {"prompt": "1girl, topless"}
+
+    shots = [{"id": "01", "prompt": "1girl, topless, black shirt, black bra",
+              "script": "她站着"}]
+    client = Fake()
+    repair_clothing_sequence(client, "model", shots, [profile])
+    assert client.calls
+    assert "同时出现上身服装" in client.calls[0][1]["content"]
+
+
+def test_repair_bottomless_checks_all_lower_garments():
+    profile = parse_character_profiles(
+        "角色：女主：black hair\n初始服装：女主：black panties")[0]
+
+    class Fake:
+        def __init__(self):
+            self.calls = []
+
+        def chat_json(self, model, messages, **kwargs):
+            self.calls.append(messages)
+            return {"prompt": "1girl, bottomless"}
+
+    shots = [{"id": "01", "prompt": "1girl, bottomless, black skirt, black panties",
+              "script": "她站着"}]
+    client = Fake()
+    repair_clothing_sequence(client, "model", shots, [profile])
+    assert client.calls
+    assert "同时出现下身服装" in client.calls[0][1]["content"]
+
+
+def test_ai_clothing_validation_keeps_valid_prompts():
+    class Fake:
+        def __init__(self):
+            self.calls = 0
+
+        def chat_json(self, model, messages, **kwargs):
+            self.calls += 1
+            return {"shots": [
+                {"id": "01", "valid": True, "issues": [], "prompt": "p1"},
+                {"id": "02", "valid": True, "issues": [], "prompt": "p2"},
+            ]}
+
+    shots = [{"id": "01", "prompt": "p1", "script": "s1"},
+             {"id": "02", "prompt": "p2", "script": "s2"}]
+    client = Fake()
+    repair_clothing_sequence_ai(client, "m", shots, [])
+    assert client.calls == 1
+    assert [shot["prompt"] for shot in shots] == ["p1", "p2"]
+
+
+def test_ai_clothing_validation_applies_rewrite_only_when_invalid():
+    class Fake:
+        def chat_json(self, model, messages, **kwargs):
+            return {"shots": [
+                {"id": "01", "valid": True, "issues": [], "prompt": "p1"},
+                {"id": "02", "valid": False,
+                 "issues": ["上一镜的 skirt 漏了"],
+                 "prompt": "p2 fixed"},
+            ]}
+
+    shots = [{"id": "01", "prompt": "p1", "script": "s1"},
+             {"id": "02", "prompt": "p2", "script": "s2"}]
+    repair_clothing_sequence_ai(Fake(), "m", shots, [])
+    assert shots[0]["prompt"] == "p1"
+    assert shots[1]["prompt"] == "p2 fixed"
+
+
+def test_ai_clothing_validation_carries_state_between_chunks():
+    class Fake:
+        def __init__(self):
+            self.messages = []
+
+        def chat_json(self, model, messages, **kwargs):
+            self.messages.append(messages[1]["content"])
+            return {"shots": [
+                {"id": "01", "valid": True,
+                 "clothing_state": "panties aside, torn pantyhose"},
+            ]}
+
+    shots = [{"id": "01", "prompt": "p1", "script": "s1"},
+             {"id": "02", "prompt": "p2", "script": "s2"}]
+    client = Fake()
+    repair_clothing_sequence_ai(client, "m", shots, [], chunk=1)
+    assert shots[0]["clothing_state"] == "panties aside, torn pantyhose"
+    assert "panties aside, torn pantyhose" in client.messages[1]
+
+
+def test_ai_story_validation_keeps_valid_shots():
+    class Fake:
+        def __init__(self):
+            self.calls = 0
+
+        def chat_json(self, model, messages, **kwargs):
+            self.calls += 1
+            return {"shots": [
+                {"id": "01", "valid": True, "issues": [],
+                 "script": "s1", "prompt": "p1"},
+                {"id": "02", "valid": True, "issues": [],
+                 "script": "s2", "prompt": "p2"},
+            ]}
+
+    shots = [{"id": "01", "script": "s1", "prompt": "p1"},
+             {"id": "02", "script": "s2", "prompt": "p2"}]
+    client = Fake()
+    repair_story_continuity_ai(client, "m", shots)
+    assert client.calls == 1
+    assert [shot["script"] for shot in shots] == ["s1", "s2"]
+
+
+def test_ai_story_validation_rewrites_repeated_shot():
+    class Fake:
+        def chat_json(self, model, messages, **kwargs):
+            return {"shots": [
+                {"id": "01", "valid": True, "issues": [],
+                 "script": "s1", "prompt": "p1"},
+                {"id": "02", "valid": False,
+                 "issues": ["重复 shot 01 的前戏"],
+                 "script": "new beat", "prompt": "new prompt"},
+            ]}
+
+    shots = [{"id": "01", "script": "s1", "prompt": "p1"},
+             {"id": "02", "script": "s2", "prompt": "p2"}]
+    repair_story_continuity_ai(Fake(), "m", shots)
+    assert shots[0]["script"] == "s1"
+    assert shots[1]["script"] == "new beat"
+    assert shots[1]["outline"] == "new beat"
+    assert shots[1]["prompt"] == "new prompt"
+
+
+def test_ai_story_validation_passes_history_to_later_chunks():
+    class Fake:
+        def __init__(self):
+            self.messages = []
+
+        def chat_json(self, model, messages, **kwargs):
+            self.messages.append(messages[1]["content"])
+            return {"shots": []}
+
+    shots = [{"id": "%02d" % i, "script": "s%d" % i, "prompt": "p%d" % i}
+             for i in range(1, 18)]
+    client = Fake()
+    repair_story_continuity_ai(client, "m", shots, chunk=8)
+    assert len(client.messages) == 3
+    assert '"id": "01"' in client.messages[1]
+
+
+def test_ai_clothing_validation_chunks_long_sequences():
+    class Fake:
+        def __init__(self):
+            self.calls = 0
+
+        def chat_json(self, model, messages, **kwargs):
+            self.calls += 1
+            return {"shots": []}
+
+    shots = [{"id": "%02d" % i, "prompt": "p%d" % i, "script": ""}
+             for i in range(1, 10)]
+    client = Fake()
+    repair_clothing_sequence_ai(client, "m", shots, [], chunk=8)
+    assert client.calls == 2
+
+
+def test_repair_clothing_sequence_does_not_call_ai_when_valid():
+    profile = parse_character_profiles(
+        "角色：女主：black hair\n初始服装：女主：black pantyhose, lace panties")[0]
+
+    class Fake:
+        def __init__(self):
+            self.calls = 0
+
+        def chat_json(self, model, messages, **kwargs):
+            self.calls += 1
+            return {"prompt": "should not be used"}
+
+    shots = [{"id": "01", "prompt": "1girl, black pantyhose, lace panties",
+              "script": "她站着"}]
+    client = Fake()
+    repair_clothing_sequence(client, "model", shots, [profile])
+    assert client.calls == 0
+    assert "should not be used" not in shots[0]["prompt"]
+
+
+def test_clothing_sequence_allows_explicit_repair():
+    profile = parse_character_profiles(
+        "角色：女主：black hair\n初始服装：女主：black pantyhose")[0]
+    shots = [
+        {"id": "01", "prompt": "1girl, torn pantyhose",
+         "script": "她撕破连裤袜"},
+        {"id": "02", "prompt": "1girl, black pantyhose",
+         "script": "她换上新的连裤袜"},
+    ]
+    stabilize_clothing_sequence(shots, [profile])
+    assert "torn" not in shots[1]["prompt"]
 
 
 def test_empty_carried_clothing_does_not_reset_to_initial_outfit():
@@ -1016,7 +1425,7 @@ def test_generate_with_initial_shot_keeps_it():
     assert len(shots) == 3
     assert shots[0] == initial[0]
     assert [shot["id"] for shot in shots] == ["01", "02", "03"]
-    assert len(client.calls) == 3
+    assert len(client.calls) == 5
     assert "本次生成镜头数：2" in client.calls[1][0][1]["content"]
 
 
@@ -1220,3 +1629,32 @@ def test_half_off_tag_is_not_duplicated_on_repeated_finalize():
     prompt = shot["prompt"]
     assert "around thighs around thighs" not in prompt
     assert prompt.count("around thighs") == 1
+
+
+def test_outline_output_does_not_require_name_and_keeps_structured_fields():
+    outline = normalize_outline({"shots": [{
+        "id": "01", "cast": "1girl solo", "phase": "前戏",
+        "beat": "她开始试探", "clothing": "black pantyhose",
+        "scene": "beach", "camera": "medium shot", "nsfw": "mild",
+        "outline": "她坐在沙滩巾上开始试探",
+    }]}, 1, "story")
+    assert outline[0]["name"] == "story_01"
+    assert outline[0]["phase"] == "前戏"
+    assert outline[0]["clothing"] == "black pantyhose"
+
+
+def test_act_plan_uses_ai_start_end_and_beats():
+    acts = normalize_acts({"acts": [
+        {"id": "01", "title": "前戏", "start": 1, "end": 15,
+         "beats": ["试探", "第一次触碰"], "summary": "前戏",
+         "cast": "1girl solo", "clothing": "", "scene": "beach",
+         "nsfw": "mild"},
+        {"id": "02", "title": "事后", "start": 16, "end": 20,
+         "beats": ["余韵"], "summary": "事后",
+         "cast": "1girl solo", "clothing": "", "scene": "beach",
+         "nsfw": "afterglow"},
+    ]}, 20, "story")
+    assert acts[0]["start"] == 1
+    assert acts[0]["end"] == 15
+    assert acts[0]["beats"] == ["试探", "第一次触碰"]
+    assert acts[1]["start"] == 16

@@ -57,32 +57,34 @@ def test_compose_prompts_order(cfg):
     assert "multiple girls" in negative
 
 
-def test_compose_prompts_injects_scene_anchor_tags(cfg):
+def test_compose_prompts_does_not_inject_hardcoded_scene_anchor(cfg):
     positive, _ = compose_prompts(cfg, {
         "prompt": "1girl, solo, standing",
         "scene": "beach, ocean, sand, outdoors",
     })
-    assert "beach" in positive
-    assert "ocean" in positive
-    assert "sand" in positive
+    assert "beach" not in positive.split(",")
+    assert "ocean" not in positive.split(",")
+    assert "sand" not in positive.split(",")
 
 
-def test_compose_prompts_drops_conflicting_indoor_tag_on_beach(cfg):
+def test_compose_prompts_keeps_ai_scene_without_hardcoded_filter(cfg):
     positive, _ = compose_prompts(cfg, {
         "prompt": "1girl, solo, bedroom, soft lighting",
         "scene": "beach, ocean, sand, outdoors",
     })
-    assert "bedroom" not in positive.split(",")
-    assert "beach" in positive
+    tags = [tag.strip() for tag in positive.split(",")]
+    assert "bedroom" in tags
+    assert "beach" not in tags
 
 
-def test_compose_prompts_drops_conflicting_outdoor_tag_indoors(cfg):
+def test_compose_prompts_keeps_ai_outdoor_scene_without_hardcoded_filter(cfg):
     positive, _ = compose_prompts(cfg, {
         "prompt": "1girl, solo, beach, ocean, sunlight",
         "scene": "bedroom, bed, indoors",
     })
-    assert "beach" not in positive.split(",")
-    assert "bedroom" in positive
+    tags = [tag.strip() for tag in positive.split(",")]
+    assert "beach" in tags
+    assert "bedroom" not in tags
 
 
 def test_compose_prompts_locks_hair_color(cfg):

@@ -159,30 +159,24 @@ def test_sequence_expansion_uses_stronger_denoise():
     assert values[0] < values[-1]
 
 
-def test_expansion_replaces_old_hand_and_expression_tags():
+def test_expansion_delta_applies_ai_remove_and_add_without_semantic_rewrite():
     shot = {
         "id": "01", "name": "a",
-        "prompt": "1girl, red_eyes, red_hair, arms_up, grabbing_own_breast, "
-                  "open_mouth, half-closed_eyes, looking_at_viewer, bedroom",
+        "prompt": "1girl, red_eyes, red_hair, arms_up, bedroom",
     }
     result = apply_expansion_delta(
-        shot["prompt"], [],
-        ["hand_resting_on_hip", "arm_under_head", "calm_expression"],
+        shot["prompt"], ["arms_up"],
+        ["hand_resting_on_hip", "calm_expression"],
         shot, None)
     assert "hand_resting_on_hip" in result
-    assert "arm_under_head" in result
     assert "calm_expression" in result
     assert "red_eyes" in result
     assert "red_hair" in result
     assert "arms_up" not in result
-    assert "grabbing_own_breast" not in result
-    assert "open_mouth" not in result
-    assert "half-closed_eyes" not in result
-    assert "looking_at_viewer" not in result
     assert "bedroom" in result
 
 
-def test_expansion_replaces_penetration_depth_and_pullout():
+def test_expansion_keeps_ai_state_unless_ai_explicitly_removes_it():
     shot = {
         "id": "01", "name": "a",
         "prompt": "1girl, deep penetration, penis in pussy, cum, bedroom",
@@ -190,19 +184,20 @@ def test_expansion_replaces_penetration_depth_and_pullout():
     shallow = apply_expansion_delta(
         shot["prompt"], [], ["shallow penetration"], shot, None)
     assert "shallow penetration" in shallow
-    assert "deep penetration" not in shallow
-    assert "penis in pussy" not in shallow
+    assert "deep penetration" in shallow
+    assert "penis in pussy" in shallow
     assert "cum" in shallow
 
     pulled = apply_expansion_delta(
-        shallow, [], ["penis pullout", "after sex"], shot, None)
+        shallow, ["deep penetration", "penis in pussy"],
+        ["penis pullout", "after sex"], shot, None)
     assert "penis pullout" in pulled
     assert "after sex" in pulled
-    assert "shallow penetration" not in pulled
+    assert "deep penetration" not in pulled
     assert "penis in pussy" not in pulled
 
 
-def test_sanitize_expansion_blocks_future_clothing_and_penetration():
+def test_sanitize_expansion_only_dedupes_and_preserves_ai_tags():
     shot = {
         "id": "01", "name": "a",
         "prompt": "1girl, 1boy, white_shirt, black_pantyhose, panties, riding",
@@ -213,153 +208,38 @@ def test_sanitize_expansion_blocks_future_clothing_and_penetration():
     }
     prompt = sanitize_expansion_prompt(
         "1girl, 1boy, white_shirt, black_pantyhose, panties, "
-        "panties aside, penetration, thrusting, completely nude",
+        "panties aside, penetration, thrusting, completely nude, white_shirt",
         shot, next_shot)
-    assert "white_shirt" in prompt
-    assert "black_pantyhose" in prompt
-    assert "panties aside" not in prompt
-    assert "penetration" not in prompt
-    assert "thrusting" not in prompt
-    assert "completely nude" not in prompt
+    tags = [tag.strip() for tag in prompt.split(",")]
+    for expected in (
+            "white_shirt", "black_pantyhose", "panties", "panties aside",
+            "penetration", "thrusting", "completely nude"):
+        assert expected in tags
+    assert tags.count("white_shirt") == 1
 
 
-def test_sanitize_expansion_allows_nudity_and_sex_already_in_next_shot():
-    shot = {"id": "01", "name": "a", "prompt": "1girl, 1boy, cowgirl_position"}
-    next_shot = {
-        "id": "02", "name": "b",
-        "prompt": "1girl, 1boy, completely nude, penetration, thrusting",
-    }
-    prompt = sanitize_expansion_prompt(
-        "1girl, 1boy, completely nude, penetration, thrusting", shot, next_shot)
-    assert "completely nude" in prompt
-    assert "penetration" in prompt
-    assert "thrusting" in prompt
-
-
-def test_sanitize_expansion_blocks_actions_missing_from_next_shot():
-    shot = {"id": "01", "name": "a", "prompt": "1girl, 1boy, lying"}
-    next_shot = {"id": "02", "name": "b", "prompt": "1girl, 1boy, lying, smile"}
-    prompt = sanitize_expansion_prompt(
-        "1girl, 1boy, lying, deep penetration, cum, penis pullout, "
-        "completely nude, tears", shot, next_shot)
-    assert "deep penetration" not in prompt
-    assert "cum" not in prompt
-    assert "penis pullout" not in prompt
-    assert "completely nude" not in prompt
-    assert "smile" not in prompt
-
-
-def test_sanitize_expansion_blocks_non_sex_future_states():
-    shot = {
-        "id": "01", "name": "a",
-        "prompt": "1girl, warrior, standing, sword_sheathed",
-    }
-    next_shot = {
-        "id": "02", "name": "b",
-        "prompt": "1girl, warrior, standing, sword_sheathed, smile",
-    }
+def test_sanitize_expansion_preserves_unknown_actions_and_scene_details():
+    shot = {"id": "01", "prompt": "1girl, warrior, standing, sword_sheathed"}
+    next_shot = {"id": "02", "prompt": "1girl, warrior, standing, smile"}
     prompt = sanitize_expansion_prompt(
         "1girl, warrior, standing, sword_sheathed, blood_on_face, "
         "holding_gun, broken_window, hand_on_cheek",
         shot, next_shot)
-    assert "blood_on_face" not in prompt
-    assert "holding_gun" not in prompt
-    assert "broken_window" not in prompt
-    assert "sword_sheathed" in prompt
-    assert "hand_on_cheek" in prompt
+    for expected in (
+            "blood_on_face", "holding_gun", "broken_window", "hand_on_cheek"):
+        assert expected in prompt
 
 
-def test_sanitize_expansion_allows_future_states_present_in_next_shot():
-    shot = {
-        "id": "01", "name": "a",
-        "prompt": "1girl, warrior, standing, sword_sheathed",
-    }
-    next_shot = {
-        "id": "02", "name": "b",
-        "prompt": "1girl, warrior, standing, sword_sheathed, "
-                  "blood_on_face, broken_window",
-    }
-    prompt = sanitize_expansion_prompt(
-        "1girl, warrior, standing, blood_on_face, broken_window, "
-        "sword_sheathed", shot, next_shot)
-    assert "blood_on_face" in prompt
-    assert "broken_window" in prompt
-    assert "sword_sheathed" in prompt
-
-
-def test_sanitize_expansion_keeps_solo_scene_to_one_person():
+def test_sanitize_expansion_preserves_partner_actions_in_solo_shot():
     shot = {"id": "01", "name": "a", "prompt": "1girl, solo, lying, on table"}
     prompt = sanitize_expansion_prompt(
         "1girl, solo, lying, on table, legs wrapped around waist, "
-        "legs wrapped around thighs, arms around neck, kissing, 1boy, "
-        "hand_on_table, pussy",
+        "arms around neck, kissing, 1boy, hand_on_table, pussy",
         shot, None)
-    assert "legs wrapped around waist" not in prompt
-    assert "legs wrapped around thighs" not in prompt
-    assert "arms around neck" not in prompt
-    assert "kissing" not in prompt
-    assert "1boy" not in prompt
-    assert "hand_on_table" in prompt
-    assert "pussy" in prompt
-
-
-def test_sanitize_expansion_allows_partner_actions_for_double_shot():
-    shot = {
-        "id": "01", "name": "a",
-        "prompt": "1girl, 1boy, lying, legs wrapped around waist, kissing",
-    }
-    prompt = sanitize_expansion_prompt(
-        "1girl, 1boy, lying, legs wrapped around waist, kissing",
-        shot, None)
-    assert "legs wrapped around waist" in prompt
-    assert "kissing" in prompt
-
-
-def test_sanitize_expansion_does_not_exceed_next_shot_depth_or_pullout():
-    shot = {"id": "01", "name": "a", "prompt": "1girl, 1boy, lying"}
-    next_shot = {
-        "id": "02", "name": "b",
-        "prompt": "1girl, 1boy, lying, shallow penetration",
-    }
-    prompt = sanitize_expansion_prompt(
-        "1girl, 1boy, lying, shallow penetration, deep penetration, "
-        "penis pullout", shot, next_shot)
-    assert "shallow penetration" in prompt
-    assert "deep penetration" not in prompt
-    assert "penis pullout" not in prompt
-
-
-def test_sanitize_expansion_allows_pullout_when_next_shot_has_after_sex():
-    shot = {"id": "01", "name": "a", "prompt": "1girl, 1boy, lying"}
-    next_shot = {
-        "id": "02", "name": "b",
-        "prompt": "1girl, 1boy, lying, after sex, cum on body",
-    }
-    prompt = sanitize_expansion_prompt(
-        "1girl, 1boy, lying, penis pullout, cum on body", shot, next_shot)
-    assert "penis pullout" in prompt
-    assert "cum on body" in prompt
-
-
-def test_sanitize_expansion_single_has_no_next_guard():
-    shot = {"id": "01", "name": "a", "prompt": "1girl, 1boy, cowgirl_position, panties"}
-    prompt = sanitize_expansion_prompt(
-        "1girl, 1boy, cowgirl_position, panties, completely nude, cum",
-        shot, None)
-    assert "completely nude" in prompt
-    assert "cum" in prompt
-
-
-def test_sanitize_expansion_removes_missing_clothing_item():
-    shot = {"id": "01", "name": "a",
-            "prompt": "1girl, 1boy, cowgirl_position, black pantyhose"}
-    prompt = sanitize_expansion_prompt(
-        "1girl, 1boy, panties aside, bra pull, open shirt, black pantyhose",
-        shot, None)
-    assert "panties aside" not in prompt
-    assert "bra pull" not in prompt
-    assert "open shirt" not in prompt
-    assert "black pantyhose" in prompt
+    for expected in (
+            "legs wrapped around waist", "arms around neck", "kissing",
+            "1boy", "hand_on_table", "pussy"):
+        assert expected in prompt
 
 
 def test_build_expansion_messages_includes_next_shot_and_count():
@@ -404,15 +284,14 @@ def test_generate_expansions_parses_ai_json():
     assert result["01"][0] != result["01"][1]
 
 
-def test_sequence_mode_can_reset_final_state_on_first_step():
+def test_sequence_mode_uses_ai_deltas_without_hardcoded_reset():
     class FakeClient:
         def chat_json(self, model, messages, **kwargs):
             return {"expansions": [{
                 "id": "01",
                 "steps": [
                     {"remove": ["cum", "deep penetration"],
-                     "add": ["cum on body", "shallow penetration",
-                             "calm expression"]},
+                     "add": ["cum on body", "shallow penetration"]},
                     {"remove": ["shallow penetration"],
                      "add": ["moderate penetration", "arm under head"]},
                     {"remove": ["moderate penetration"],
@@ -428,71 +307,57 @@ def test_sequence_mode_can_reset_final_state_on_first_step():
         FakeClient(), "model", shots, 2, sequence=True)
     prompts = result["01"]
     assert len(prompts) == 3
-    assert "cum" not in prompts[0]
-    assert "cum on body" not in prompts[0]
     assert "deep penetration" not in prompts[0]
-    assert "shallow penetration" not in prompts[0]
+    assert "shallow penetration" in prompts[0]
     assert "moderate penetration" in prompts[1]
+    assert "deeper penetration" in prompts[2]
 
 
-def test_sequence_does_not_reset_state_already_present_in_previous_shot():
-    class FakeClient:
-        def chat_json(self, model, messages, **kwargs):
-            return {"expansions": [
-                {"id": "01", "steps": [
-                    {"remove": ["cum", "deep penetration"],
-                     "add": ["shallow penetration", "calm expression"]},
-                ]},
-                {"id": "02", "steps": [
-                    {"remove": ["cum", "deep penetration"],
-                     "add": ["shallow penetration", "calm expression"]},
-                ]},
-            ]}
-
-    shots = [
-        {"id": "01", "prompt": "1girl, cum, deep penetration, bedroom"},
-        {"id": "02", "prompt": "1girl, cum, deep penetration, bedroom"},
-    ]
-    result = generate_expansions(
-        FakeClient(), "model", shots, 1, sequence=True, chunk=6)
-    assert result["01"][0].count("cum") == 0
-    assert "cum" in result["02"][0]
-    assert "deep penetration" in result["02"][0]
-    assert "shallow penetration" not in result["02"][0]
-
-
-def test_apply_delta_never_removes_existing_fluid():
+def test_apply_delta_removes_only_explicit_ai_remove():
     shot = {"id": "01", "prompt": "1girl, cum, deep penetration"}
-    result = apply_expansion_delta(
-        "1girl, cum, deep penetration",
-        ["cum", "deep penetration"],
-        ["cum on thighs", "shallow penetration"],
-        shot, None,
-    )
-    assert "cum" in result
-    assert "cum on thighs" in result
-    assert "deep penetration" not in result
+    kept = apply_expansion_delta(
+        "1girl, cum, deep penetration", [],
+        ["cum on thighs", "shallow penetration"], shot, None)
+    assert "cum" in kept
+    assert "deep penetration" in kept
+    assert "cum on thighs" in kept
+    assert "shallow penetration" in kept
+
+    removed = apply_expansion_delta(
+        "1girl, cum, deep penetration", ["cum", "deep penetration"],
+        ["cum on thighs", "shallow penetration"], shot, None)
+    tags = [tag.strip() for tag in removed.split(",")]
+    assert "cum" not in tags
+    assert "deep penetration" not in tags
+    assert "cum on thighs" in tags
 
 
-def test_damage_state_does_not_become_intact():
+def test_sanitize_expansion_preserves_damage_and_intact_tags_from_ai():
     shot = {"id": "01", "prompt": "1girl, crotchless pantyhose, torn shirt"}
     prompt = sanitize_expansion_prompt(
         "1girl, crotchless pantyhose, torn shirt, pantyhose intact",
         shot, None)
     assert "crotchless pantyhose" in prompt
     assert "torn shirt" in prompt
-    assert "pantyhose intact" not in prompt
+    assert "pantyhose intact" in prompt
 
 
-def test_apply_delta_replaces_old_limb_pose():
+def test_apply_delta_does_not_replace_old_limb_pose_without_remove():
     shot = {"prompt": "1girl, lying, on back, spread legs, arms up, vaginal sex"}
-    prompt = apply_expansion_delta(
+    kept = apply_expansion_delta(
         shot["prompt"], [],
         ["legs wrapped around his waist", "hands on his shoulders"],
         shot, None)
-    assert "legs wrapped around his waist" in prompt
-    assert "hands on his shoulders" in prompt
-    assert "spread legs" not in prompt
-    assert "arms up" not in prompt
-    assert "lying" in prompt
-    assert "vaginal sex" in prompt
+    assert "legs wrapped around his waist" in kept
+    assert "hands on his shoulders" in kept
+    assert "spread legs" in kept
+    assert "arms up" in kept
+    assert "lying" in kept
+    assert "vaginal sex" in kept
+
+    replaced = apply_expansion_delta(
+        shot["prompt"], ["spread legs", "arms up"],
+        ["legs wrapped around his waist", "hands on his shoulders"],
+        shot, None)
+    assert "spread legs" not in replaced
+    assert "arms up" not in replaced

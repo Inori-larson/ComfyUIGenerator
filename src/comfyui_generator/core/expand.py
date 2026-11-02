@@ -337,17 +337,8 @@ def _anchor_tags(shot: dict[str, Any],
 
 def sanitize_expansion_prompt(prompt: str, shot: dict[str, Any],
                               next_shot: dict[str, Any] | None) -> str:
+    del shot, next_shot
     tags = [tag.strip() for tag in str(prompt or "").split(",") if tag.strip()]
-    tags += _anchor_tags(shot, next_shot)
-    tags = _clothing_gate(tags, shot)
-    tags = _damage_gate(tags, shot)
-    tags = _filtered(tags, guard_next(next_shot))
-    next_text = _text(next_shot)
-    if next_text:
-        tags = [tag for tag in tags if not _future_blocked(tag, next_text)]
-    solo_blocked = _solo_blocked(shot)
-    if solo_blocked:
-        tags = _filtered(tags, solo_blocked)
     seen: set[str] = set()
     result: list[str] = []
     for tag in tags:
@@ -392,55 +383,16 @@ def apply_expansion_delta(prompt: str, remove: list[str], add: list[str],
                           shot: dict[str, Any],
                           next_shot: dict[str, Any] | None,
                           preserve_irreversible: bool = True) -> str:
+    del preserve_irreversible
     tags = [tag.strip() for tag in str(prompt or "").split(",") if tag.strip()]
-    irreversible = [tag for tag in tags
-                    if any(_has(tag, (word,)) for word in _IRREVERSIBLE)]
     remove_words = [_norm(item) for item in remove if str(item).strip()]
     if remove_words:
         tags = [tag for tag in tags
                 if not any(_has(tag, (word,)) for word in remove_words)]
-    added: list[str] = []
-    added_slots: set[str] = set()
-    added_state: set[str] = set()
-    expression_replaced = False
     seen = {tag.lower() for tag in tags}
     for item in add:
         tag = str(item or "").strip()
         if tag and tag.lower() not in seen:
-            slots = _limb_slots(tag)
-            if slots:
-                if slots & added_slots:
-                    continue
-                remove_slots = set(slots)
-                if "hands" in slots or "arms" in slots:
-                    remove_slots.update(("hands", "arms"))
-                tags = [old for old in tags
-                        if not (remove_slots & _limb_slots(old))]
-                added_slots.update(slots)
-            expression = _expression_slots(tag)
-            if expression and not expression_replaced:
-                tags = [old for old in tags if not _expression_slots(old)]
-                expression_replaced = True
-            state = _state_slots(tag)
-            if state:
-                if (("depth" in state and "depth" in added_state)
-                        or ("vagina" in state and "vagina" in added_state
-                            and "pullout" not in state)):
-                    continue
-                remove_slots = set(state)
-                if "depth" in state or "pullout" in state:
-                    remove_slots.update(("depth", "pullout"))
-                tags = [old for old in tags
-                        if not (remove_slots & _state_slots(old))]
-                added_state.update(state)
             seen.add(tag.lower())
-            added.append(tag)
-    result = sanitize_expansion_prompt(", ".join(added + tags), shot, next_shot)
-    result_tags = [tag.strip() for tag in result.split(",") if tag.strip()]
-    seen = {tag.lower() for tag in result_tags}
-    if preserve_irreversible:
-        for tag in irreversible:
-            if tag.lower() not in seen:
-                seen.add(tag.lower())
-                result_tags.append(tag)
-    return ", ".join(result_tags)
+            tags.append(tag)
+    return sanitize_expansion_prompt(", ".join(tags), shot, next_shot)

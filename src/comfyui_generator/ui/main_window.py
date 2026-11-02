@@ -3417,7 +3417,6 @@ class MainWindow(QMainWindow):
             row = self.shot_table.rowCount()
             self.shot_table.insertRow(row)
             self._set_shot_row(row, shot)
-        self._autofill_shot_grammar()
         if self.shot_table.rowCount():
             self.shot_table.setCurrentCell(0, 3)
         self._update_shot_stats()
@@ -4075,7 +4074,6 @@ class MainWindow(QMainWindow):
         row = self.shot_table.rowCount()
         self.shot_table.insertRow(row)
         self._set_shot_row(row, {"id": "%02d" % (row + 1), "name": "shot_%02d" % (row + 1), "prompt": ""})
-        self._autofill_shot_grammar()
         self.shot_table.selectRow(row)
         self.shot_table.editItem(self.shot_table.item(row, 3))
         self._update_shot_stats()

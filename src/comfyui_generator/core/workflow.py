@@ -14,7 +14,7 @@ from typing import Any
 from comfyui_generator.core.continuity import (
     continuity_negative, continuity_positive, strip_shot_grammar,
 )
-from comfyui_generator.core.storyboard import _clothing_key, _SCENE_TAGS
+from comfyui_generator.core.storyboard import _clothing_key
 from comfyui_generator.core.style_profile import apply_style_profile
 
 
@@ -202,33 +202,6 @@ def _unweighted_tag(tag: str) -> str:
     if match:
         value = match.group(1)
     return re.sub(r"[\s_\-]+", " ", value.lower()).strip()
-
-
-_INDOOR_SCENE_TAGS = {
-    tag for values in _SCENE_TAGS.values() if "indoors" in values
-    for tag in values
-}
-_OUTDOOR_SCENE_TAGS = {
-    tag for values in _SCENE_TAGS.values() if "outdoors" in values
-    for tag in values
-}
-
-
-def _resolve_scene_conflict(positive: str, scene: str) -> str:
-    scene_key = _unweighted_tag(scene)
-    if not scene_key:
-        return positive
-    scene_indoor = any(
-        tag in scene_key for tag in ("indoors", "bedroom", "room"))
-    scene_outdoor = "outdoors" in scene_key or any(
-        tag in scene_key for tag in ("beach", "ocean", "sand", "street",
-                                     "park", "garden", "forest"))
-    if scene_indoor == scene_outdoor:
-        return positive
-    drop = _INDOOR_SCENE_TAGS if scene_outdoor else _OUTDOOR_SCENE_TAGS
-    return ", ".join(
-        tag.strip() for tag in str(positive or "").split(",")
-        if tag.strip() and _unweighted_tag(tag.strip()) not in drop)
 
 
 def _drop_full_clothing_when_half_off(positive: str, prompt: str) -> str:
@@ -1042,9 +1015,13 @@ def compose_prompts(cfg: dict[str, Any], shot: dict[str, Any]) -> tuple[str, str
     if any(_is_clothing_lora(lora) for lora in chain):
         clothing_source = _scope_trigger_tags(cfg, shot, "clothing")
     else:
-        clothing_source = (shot.get("clothing_tags")
-                           or shot.get("clothing")
-                           or clothing.get("tags", ""))
+        prompt_tags = [tag.strip() for tag in str(prompt or "").split(",")
+                       if tag.strip()]
+        prompt_has_clothing = any(_clothing_key(tag) for tag in prompt_tags)
+        clothing_source = "" if prompt_has_clothing else (
+            shot.get("clothing_tags")
+            or shot.get("clothing")
+            or clothing.get("tags", ""))
     clothing_source = _boost_clothing_tags(clothing_source)
     if any(_is_body_lora(lora) for lora in chain):
         body_source = _body_trigger_tags(cfg, shot)
@@ -1058,15 +1035,14 @@ def compose_prompts(cfg: dict[str, Any], shot: dict[str, Any]) -> tuple[str, str
         shot.get("character_tags", character.get("tags", "")))
     negative = join_tags(negative, _appearance_negative(character_tags))
     continuity_tags = continuity_positive(cfg.get("continuity"), shot)
-    scene_tags = str(shot.get("scene") or "").strip()
     positive = join_tags(
         style_tags, style_lora, character_tags, action_source,
         clothing_source, body_source, continuity_tags, render_prompt,
-        scene_tags, style_suffix,
+        style_suffix,
     )
-    positive = _resolve_scene_conflict(
-        positive, str(shot.get("scene") or ""))
-    positive = _drop_full_clothing_when_half_off(positive, str(prompt or ""))
+    if not shot.get("preserve_ai_clothing"):
+        positive = _drop_full_clothing_when_half_off(
+            positive, str(prompt or ""))
     allow_two_females = _allows_two_females(shot)
     positive = _without_multi_people(positive, allow_two_females)
     if is_double_shot(shot):

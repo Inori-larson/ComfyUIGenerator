@@ -13,7 +13,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from comfyui_generator.core.continuity import apply_auto_grammar
 
 
 @dataclass
@@ -125,13 +124,4 @@ def repair_project(project: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         data["style_ref"] = style_ref
         changes.append("关闭缺少图片的画风参考")
 
-    shots = data.get("shots") or []
-
-    before = [(shot.get("shot_size"), shot.get("camera_angle"))
-              for shot in shots if isinstance(shot, dict)]
-    apply_auto_grammar(shots, data.get("continuity") or {})
-    after = [(shot.get("shot_size"), shot.get("camera_angle"))
-             for shot in shots if isinstance(shot, dict)]
-    if before != after:
-        changes.append("补齐缺失的景别/机位")
     return data, changes

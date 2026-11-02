@@ -42,6 +42,37 @@ def test_external_client_parses_openai_json(monkeypatch):
     assert captured["body"]["thinking"] == {"type": "disabled"}
 
 
+def test_external_client_retries_with_larger_budget_on_length(monkeypatch):
+    cfg = SimpleNamespace(base_url="https://example.test/v1", api_key="",
+                          model="test-model", timeout=30)
+    client = ExternalLLMClient(cfg)
+    bodies = []
+
+    def fake_urlopen(req, timeout):
+        bodies.append(json.loads(req.data.decode("utf-8")))
+        if len(bodies) == 1:
+            return FakeResponse({
+                "choices": [{
+                    "finish_reason": "length",
+                    "message": {"content": "{\"shots\": ["},
+                }]
+            })
+        return FakeResponse({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"content": "{\"shots\": []}"},
+            }]
+        })
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    result = client.chat_json(
+        "test-model", [{"role": "user", "content": "x"}],
+        num_predict=4096, retries=1)
+    assert result == {"shots": []}
+    assert bodies[0]["max_tokens"] == 4096
+    assert bodies[1]["max_tokens"] == 8192
+
+
 def test_external_client_accepts_array_root(monkeypatch):
     cfg = SimpleNamespace(base_url="https://example.test/v1", api_key="",
                           model="test-model", timeout=30)

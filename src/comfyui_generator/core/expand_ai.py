@@ -270,24 +270,14 @@ def _cleaned_batch(raw: Any, batch: list[dict[str, Any]],
         if not isinstance(steps, list):
             continue
         next_shot = batch[index + 1] if index + 1 < len(batch) else None
-        prev_shot = previous_shot if index == 0 else batch[index - 1]
-        can_reset = _sequence_can_reset(shot, prev_shot)
         current = str(shot.get("prompt") or "")
         cleaned = []
-        for step_index, step in enumerate(steps[:count]):
+        for step in steps[:count]:
             if not isinstance(step, dict):
                 continue
-            remove = _as_list(step.get("remove"))
-            add = _as_list(step.get("add"))
-            reset = sequence and step_index == 0 and can_reset
-            if reset:
-                remove += _sequence_reset_tags(current)
-                add = [tag for tag in add if not _sequence_reset_tags(tag)]
-            elif sequence and step_index == 0:
-                add = _sequence_reset_tags(current) + add
             current = apply_expansion_delta(
-                current, remove, add, shot, next_shot,
-                preserve_irreversible=not reset)
+                current, _as_list(step.get("remove")),
+                _as_list(step.get("add")), shot, next_shot)
             cleaned.append(current)
         if cleaned:
             result[shot_id] = cleaned
@@ -297,48 +287,13 @@ def _cleaned_batch(raw: Any, batch: list[dict[str, Any]],
 def _needs_retry(cleaned: dict[str, list[str]], batch: list[dict[str, Any]],
                  count: int) -> bool:
     for shot in batch:
-        shot_id = str(shot.get("id") or "")
-        prompts = cleaned.get(shot_id) or []
+        prompts = cleaned.get(str(shot.get("id") or "")) or []
         if len(prompts) != count:
             return True
-        base = {tag.strip().lower() for tag in
-                str(shot.get("prompt") or "").split(",") if tag.strip()}
-        seen: set[str] = set()
-        previous_keys = base
-        previous_pose = _pose_tags(base)
-        previous_penetration = _penetration_tags(base)
-        for index, prompt in enumerate(prompts):
-            keys = {tag.strip().lower() for tag in prompt.split(",") if tag.strip()}
-            if len(keys ^ base) < 6 or prompt.lower() in seen:
-                return True
-            if len(_body_action_tags(keys) ^ _body_action_tags(previous_keys)) < 2:
-                return True
-            changed_categories = _categories(keys ^ base)
-            base_categories = _categories(base)
-            if "action" in base_categories and "action" not in changed_categories:
-                return True
-            if len(base_categories) >= 2 and len(changed_categories) < 2:
-                return True
-            added = keys - base
-            if _hand_tags(base) and not _hand_tags(added):
-                return True
-            if _expression_tags(base) and not _expression_tags(added):
-                return True
-            penetration = _penetration_tags(keys)
-            if previous_penetration and penetration == previous_penetration:
-                return True
-            previous_penetration = penetration
-            pose = _pose_tags(keys)
-            if pose == previous_pose:
-                return True
-            previous_pose = pose
-            if index + 1 < len(prompts):
-                if any(word in base and word in keys for word in _DEPTH_WORDS):
-                    return True
-                if any(word in base and word in keys for word in _FLUID_WORDS):
-                    return True
-            previous_keys = keys
-            seen.add(prompt.lower())
+        if any(not str(prompt or "").strip() for prompt in prompts):
+            return True
+        if len({prompt.lower() for prompt in prompts}) != len(prompts):
+            return True
     return False
 
 
@@ -373,32 +328,20 @@ def generate_expansions(client: Any, model: str, shots: list[dict[str, Any]],
                 break
             if attempt >= 2:
                 if log:
-                    log("AI expansion still similar after retries")
+                    log("AI expansion still incomplete after retries")
                 break
             if log:
-                log("AI expansion too similar; retrying strict pass")
+                log("AI expansion incomplete or repeated; retrying")
             convo = messages + [
                 {"role": "assistant", "content": json.dumps(
                     raw, ensure_ascii=False)},
                 {"role": "user", "content": (
-                    "The previous deltas were too small or repeated. Rewrite "
-                    "the whole JSON. Each step must contain at least 6 total "
-                    "remove+add tags, including at least 2 action/limb/pose "
-                    "changes and at least 1 clear body-orientation or "
-                    "intercourse-position change (leaning, arching, hip "
-                    "angle, leg wrap, legs raised, hand support, depth). "
-                    "Do not keep the same pose across all steps, but do not "
-                    "change the camera angle, framing, shot size, location, "
-                    "character count, or main pose category. Never add an "
-                    "action, event, injury, weapon/prop use, scene change, "
-                    "penetration depth, pullout, cum, undressing, or new "
-                    "position that the next shot does not contain. This "
-                    "applies to every genre, not only sex scenes. Keep "
-                    "scene and character anchors, and form a clear "
-                    "progression. In sequence mode the first state may reset "
-                    "final cum/penetration tags to create the starting state; "
-                    "from the second state onward never remove cum/semen/fluid "
-                    "or torn/ripped clothing. Return JSON only.")},
+                    "The previous JSON was incomplete or repeated. "
+                    "Rewrite the whole JSON following the original request "
+                    "and the full shot context. You decide how much should "
+                    "change; do not force a fixed number of tags or actions. "
+                    "Keep continuity, keep the same shot context, and make "
+                    "the sequence natural. Return JSON only.")},
             ]
         result.update(cleaned)
     return result

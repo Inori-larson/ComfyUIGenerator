@@ -51,7 +51,7 @@ def test_format_report_never_empty():
     assert format_report(report) == "未发现连续性问题。"
 
 
-def test_repair_disables_missing_reference_and_fills_grammar(tmp_path):
+def test_repair_disables_missing_reference_without_auto_grammar(tmp_path):
     project = _project(
         character={
             "tags": "", "use_ipadapter": True,
@@ -64,4 +64,4 @@ def test_repair_disables_missing_reference_and_fills_grammar(tmp_path):
     repaired, changes = repair_project(project)
     assert repaired["character"]["use_ipadapter"] is False
     assert any("IPAdapter" in item for item in changes)
-    assert repaired["shots"][0]["shot_size"]
+    assert not repaired["shots"][0].get("shot_size")

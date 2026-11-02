@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -12,29 +13,37 @@ PROMPT_COVERAGE = (
     "覆盖维度：角色身份与外观、服装/裸露状态、当前可见身体部位、姿势、动作、表情、"
     "场景/地点、镜头景别、机位/角度、构图、光线/时间、NSFW 状态。"
 )
-INTIMATE_CLOTHING_EVENTS = (
+PRIORITY_RULES = (
+    "统一优先级：用户明确要求 > 角色锁定与初始服装 > 已发生剧情/服装状态 > "
+    "默认节奏与风格。发生冲突时，以优先级更高的一方为准。\n"
+)
+INTIMATE_CLOTHING_EVENTS_ZH = (
     "可选的服装破坏/半脱情色元素（按剧情选用，不要每镜都用，也不要无铺垫突然撕毁）："
-    "1. 撕破连裤袜/丝袜/渔网袜/蕾丝袜的裆部、膝盖、大腿或胸口，露出内裤、皮肤或私处；"
-    "2. 拨开、拉开、扯到一边或撕破情趣内裤/蕾丝内裤/黑色蕾丝内裤/半透明内裤/"
-    "丁字裤/C字裤/开裆内裤/珍珠内裤，半挂在腿侧；"
-    "3. 扯开衬衫、制服、旗袍、婚纱、连衣裙、紧身衣的纽扣、拉链、肩带或吊带；"
-    "4. 推下胸罩、扯断肩带、解开后背扣、撕下乳贴或让无肩带胸罩滑落；"
-    "5. 撕破蕾丝手套、臂套、腿环、吊袜带、束腰、连体衣/连裤袜，破洞露出皮肤；"
-    "6. 破损后衣物仍挂在身上，隔着破洞抚摸、指交、口交、乳交、磨蹭或插入；"
-    "7. 事后破损衣物滑落、挂在腰/腿/手臂，边缘撕裂、潮湿，保持连续不要自动复原。"
-    "标签示例：torn pantyhose, ripped pantyhose, torn stockings, torn fishnet, "
-    "torn panties, panties aside, lace panties, black lace panties, sheer panties, "
-    "lace underwear, lace lingerie, lace bra, lace trim, torn shirt, open shirt, "
-    "torn dress, torn skirt, torn leotard, torn bodysuit, broken bra, bra pull, "
-    "torn gloves, torn garter, torn corset, clothes torn, ripped clothes, "
-    "hole in clothes, crotchless。"
+    "只能对角色当前已有的服装做半脱、拨开、撕破、滑落或挂腿处理，禁止借机新增未设定服装；"
+    "例如撕破连裤袜/丝袜/渔网袜/蕾丝袜的裆部、膝盖、大腿或胸口；"
+    "把内裤拨到一边或半挂在腿侧；推下胸罩、解开肩带或让胸罩滑落；"
+    "破损后衣物仍挂在身上，可隔着破洞抚摸、指交、口交、磨蹭或插入；"
+    "事后破损衣物保持挂在腰/腿/手臂，边缘撕裂、潮湿，不要自动复原。"
+)
+CLOTHING_EVENTS_BRIEF = (
+    "可选的服装破坏/半脱：撕破连裤袜/丝袜、拨开内裤、推下胸罩、"
+    "破损衣物挂腿；只能用于角色已有服装，不要新增未设定服装，不要每镜都用。"
+)
+INTIMATE_CLOTHING_EVENTS_TAGS = (
+    "可用英文标签示例（只在 TAG 阶段使用，且必须绑定 script 中已有的具体单品）："
+    "torn pantyhose, ripped pantyhose, pantyhose pulled down, pantyhose around thighs, "
+    "torn panties, panties aside, panties around one leg, bra pull, bra hanging, "
+    "broken bra, open shirt, torn shirt, clothes pull, half-off clothes, "
+    "torn skirt, torn dress, torn leotard, torn bodysuit, crotchless, "
+    "hole in clothes。不要输出无主语的 torn clothes / clothing damage。"
 )
 BOORU_WORKFLOW = (
     "先在心里拆解，不要把拆解过程写进结果：人数/cast、当前服装结果、姿势、动作、表情、"
     "NSFW、场景、光线、镜头。再严格按此顺序组装标签：cast → 服装/裸露 → 姿势 → 动作 → "
     "表情 → NSFW → 场景 → 光线 → 镜头。已经脱掉的服装标签必须删除。"
-    "性行为段每镜换姿势和互动，禁止连续重复同一姿势。情趣服装保留不要全部脱掉，除非剧情明确要求全裸。"
-    "表现半脱，适当增加色情细节。" + INTIMATE_CLOTHING_EVENTS +
+    "性行为段每镜换姿势和互动，禁止连续重复同一姿势。情趣服装保留不要全部脱掉，"
+    "除非剧情明确要求全裸。表现半脱，适当增加色情细节。" +
+    CLOTHING_EVENTS_BRIEF + INTIMATE_CLOTHING_EVENTS_TAGS +
     "撕破的服装必须保留为状态标签，不能改写成普通完整服装。"
 )
 SCRIPT_SCHEMA: dict[str, Any] = {
@@ -46,11 +55,24 @@ SCRIPT_SCHEMA: dict[str, Any] = {
                 "type": "object",
                 "properties": {
                     "id": {"type": "string"},
-                    "name": {"type": "string"},
-                    "script": {"type": "string"},
                     "cast": {"type": "string"},
+                    "present_characters": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "phase": {"type": "string"},
+                    "beat": {"type": "string"},
+                    "clothing": {"type": "string"},
+                    "visible": {"type": "string"},
+                    "pose": {"type": "string"},
+                    "expression": {"type": "string"},
+                    "scene": {"type": "string"},
+                    "camera": {"type": "string"},
+                    "lighting": {"type": "string"},
+                    "nsfw": {"type": "string"},
+                    "script": {"type": "string"},
                 },
-                "required": ["id", "name", "script", "cast"],
+                "required": ["id", "cast", "script"],
             },
         }
     },
@@ -84,11 +106,20 @@ OUTLINE_SCHEMA: dict[str, Any] = {
                 "type": "object",
                 "properties": {
                     "id": {"type": "string"},
-                    "name": {"type": "string"},
                     "cast": {"type": "string"},
+                    "present_characters": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "phase": {"type": "string"},
+                    "beat": {"type": "string"},
+                    "clothing": {"type": "string"},
+                    "scene": {"type": "string"},
+                    "camera": {"type": "string"},
+                    "nsfw": {"type": "string"},
                     "outline": {"type": "string"},
                 },
-                "required": ["id", "name", "cast", "outline"],
+                "required": ["id", "cast", "outline"],
             },
         }
     },
@@ -96,11 +127,12 @@ OUTLINE_SCHEMA: dict[str, Any] = {
 }
 
 OUTLINE_SYSTEM = (
+    PRIORITY_RULES +
     "你是二次元 NSFW 剧情大纲和分镜编剧。请按用户剧情生成完整编号分镜大纲，只写中文大纲，不写英文标签。\n"
     "成功标准：\n"
     "1. 按用户要求的总格数生成，id 从 01 连续编到最后一格，不能少、重、跳。\n"
     "2. 每条 outline 必须写清本镜独有剧情：谁出现、做了什么、服装/裸露变化、场景、镜头、光线、NSFW 状态；"
-    + INTIMATE_CLOTHING_EVENTS +
+    + CLOTHING_EVENTS_BRIEF +
     "禁止复制上一镜、禁止只写同一动作、禁止所有镜头重复。\n"
     "3. 大环境/地点/时间/光线必须全程连续；同一大环境内的自然元素、道具、植被、"
     "建筑、家具、天气、光线细节可按剧情自然扩展，不要只写空泛大环境，"
@@ -110,17 +142,23 @@ OUTLINE_SYSTEM = (
     "脱衣必须写清是哪个角色、具体哪件初始服装；男主/男性/我脱衣或全裸时必须写清，不能影响女主状态。\n"
     "5. cast 必须写人物数量与性别：用户未明确要求男性时只能 1girl solo；"
     "明确要求双人时才写女主+男主 1girl 1boy；没有出现的角色不得写。\n"
-    "6. 按起承转合推进，不能从开头几镜后开始循环；每镜只能有一个主行为节拍，"
+    "6. 用户消息中的剧情进度账本、已完成镜头是硬事实；不得重写、重复或回退这些事件。"
+    "按起承转合推进，不能从开头几镜后开始循环；每镜只能有一个主行为节拍，"
     "连续动作必须拆成多个镜头；插入后不得无过渡切回自慰、前戏或初遇；"
     "整理衣物或事后余韵后，不得无新事件又重新脱衣/自慰/前戏。\n"
     "7. 节奏循序渐进：前段只试探和轻微接触，中段自慰/勾引/前戏/慢脱，后段才插入；"
-    "禁止无铺垫直接全裸或插入。性交中默认至少保留一件情趣服装、内衣或丝袜，"
+    "禁止无铺垫直接全裸或插入。性交中适当保留情趣服装（根据剧情需要调整），"
     "除非用户明确要求全裸；优先写半脱、拨开、撕破、挂腿。"
     "男主和女主的服装状态必须分别写，男主不能穿女主衣服。\n"
-    "只输出 JSON shots[{id,name,cast,outline}]，不要解释，不要英文标签。"
+    "outline 只写本镜新推进的剧情节点，不写完整画面；画面细节留给后续 script。\n"
+    "每条请同时填写 phase、beat、clothing、scene、camera、nsfw，outline 写完整剧情节点。\n"
+    "每条填写 present_characters 数组，只能写角色锁定表中实际出场的 name。\n"
+    "只输出 JSON shots[{id,cast,present_characters,phase,beat,clothing,scene,camera,nsfw,outline}]，"
+    "不要解释，不要英文标签。"
 )
 
 SCRIPT_SYSTEM = (
+    PRIORITY_RULES +
     "你是二次元 NSFW 剧情大纲和分镜编剧。先只生成中文分镜脚本，不写英文标签。\n"
     "成功标准（必须全部满足，否则视为失败）：\n"
     "1. 大环境（如果用户有指定则受本条限制，没指定可不受本条限制）：剧情指定的"
@@ -130,17 +168,19 @@ SCRIPT_SYSTEM = (
     "2. 每个角色服装只能从各自初始服装开始，禁止发明锁定表之外的内衣、内裤、丝袜、胸罩、蕾丝、连体衣等；"
     "禁止复穿已脱衣物，禁止跳步；写清每个角色当前还穿着什么、已脱哪件初始服装；"
     "男主/男性/我脱衣、半裸或全裸时必须写清，不能影响女主状态。"
-    "性交中默认至少保留一件情趣服装、内衣或丝袜，除非用户明确要求全裸；"
+    "性交中适当保留情趣服装（根据剧情需要调整），除非用户明确要求全裸；"
     "优先半脱、拨开、撕破、挂腿，禁止无铺垫直接全裸。"
-    + INTIMATE_CLOTHING_EVENTS +
+    + CLOTHING_EVENTS_BRIEF +
     "性行为、前戏、口交、插入、高潮、射精和余韵必须写清体液与交互："
     "唾液、湿润、阴道汁、潮吹、射精、精液、吞咽、射在身体/脸上等；"
     "不能只写动作，不能整段没有体液反馈。"
-    "性交高潮或结尾默认必须明确男方射精方式：内射、射在身上、口交吞咽或射在脸上至少一种；"
-    "除非用户明确要求不射精或不体液。"
+    "有男性参与时，性交高潮或结尾默认必须明确男方射精方式："
+    "内射、射在身上、口交吞咽或射在脸上至少一种；"
+    "没有男性参与时不要凭空加入男性或射精。除非用户明确要求不射精或不体液。"
     "3. 每镜 script 必须覆盖：角色/cast、服装/裸露状态、可见身体部位、姿势动作、表情、"
     "地点、景别、机位/角度、构图、光线时间、NSFW 状态。\n"
-    "4. 因果连续：下一镜必须能从上镜动作自然接上，禁止无故重启动作或换场景；"
+    "4. 因果连续：用户消息中的剧情进度账本、已完成镜头是硬事实，"
+    "下一镜必须从这些事实自然接上，禁止重写或重复；禁止无故重启动作或换场景；"
     "每镜只能有一个主行为节拍，连续动作必须拆成多个镜头；"
     "插入、高潮、口交、吞咽、整理衣物不得塞进同一镜；"
     "插入后不得无过渡切回自慰、前戏或初遇；"
@@ -153,10 +193,17 @@ SCRIPT_SYSTEM = (
     "id 必须从 01 连续编到总格数，不能重复、跳号。\n"
     "9. 每镜 script 按模板组织：角色/cast：…；服装：…；可见部位：…；姿势动作：…；"
     "表情：…；场景：…；镜头：…；构图：…；光线时间：…；NSFW：…。\n"
-    "只输出 schema JSON：shots[{id,name,script,cast}]，不要解释，不要英文标签。"
+    "script 以 outline 为基础展开，不重新设计剧情，不重复已完成的剧情节点。\n"
+    "每条同时填写 phase、beat、clothing、visible、pose、expression、scene、camera、"
+    "lighting、nsfw，script 写完整画面描述。\n"
+    "每条填写 present_characters 数组，只能写角色锁定表中实际出场的 name。\n"
+    "只输出 schema JSON："
+    "shots[{id,cast,present_characters,phase,beat,clothing,visible,pose,expression,"
+    "scene,camera,lighting,nsfw,script}]，不要解释，不要英文标签。"
 )
 
 TAG_SYSTEM = (
+    PRIORITY_RULES +
     "你是专业的二次元 NSFW Danbooru 提示词工程师。把给定的中文分镜 script 逐镜转换成英文 Booru prompt。\n"
     "成功标准（必须全部满足）：\n"
     "1. 只输出 schema JSON：shots[{id,prompt}]。\n"
@@ -184,8 +231,9 @@ TAG_SYSTEM = (
     "单写 penis/POV 只用于男主身体完全不可见的镜头。"
     "禁止 two penises、extra penis、second male、two male bodies。"
     "初始服装和情趣衣物默认保留；需要暴露时，用同一件衣物的半脱/破损/拨开标签推进，不要整件删除。"
-    "可用通用标签：torn clothes、clothes pull、half-off clothes、clothing damage、panties aside、"
-    "one breast out、open clothes；同时保留原始服装 tag。"
+    "破损/半脱标签必须绑定 script 中已有的具体单品，例如 torn pantyhose、"
+    "panties aside、bra pull、pantyhose pulled down；不要输出无主语的 torn clothes、"
+    "clothing damage、open clothes 来凭空生成新衣服。同时保留原始服装 tag。"
     "不要写死具体衣物种类；任何被保留的服装都用它自己的半脱/破损状态来露，而不是换成另一种衣服。"
     "已经脱掉的衣物后续不能重新穿上；服装状态只能从完整→半脱/破损→更少，不能倒退。"
     "除非剧情明确进入最后全裸阶段，否则不要写 completely nude。"
@@ -200,16 +248,11 @@ TAG_SYSTEM = (
     "6. 每条 prompt 建议 25-45 个标签，复杂场景 50-70，最多 100；英文逗号分隔、去重，不要为凑数堆标签。\n"
     "7. 镜头只用 full body、upper body、close-up、medium shot、wide shot、from above/below/side、"
     "dutch angle、POV、depth of field 等抽象词；禁止 camera、holding camera、lens、tripod、photographer。\n"
-    "8. 看向镜头写 looking at viewer，不写 looking at camera。本阶段不接收任何角色标签。\n"
+    "8. 看向镜头写 looking at viewer，不写 looking at camera。"
+    "角色标签以角色锁定表和 script 为准，不要自行补充不存在的外貌或服装。\n"
     "9. 不生成质量/画质标签（masterpiece, best quality, absurdres、ultra-detailed、highres、sharp focus 等）。\n"
-    "单人示例（只学组织顺序，不要照抄）：坐在床边，双腿分开，手指插入，半闭眼，卧室台灯，夜晚。"
-    "→ 1girl, solo, completely nude, pussy, sitting on bed, legs spread, fingering, finger in pussy, "
-    "half-closed eyes, bedroom, bed, lamp, night, soft lighting, medium shot。"
-    "双人示例（只学组织顺序，不要照抄）：男主裸体站在左侧，女主穿黑丝和制服坐在右侧。"
-    "→ 1girl, 1boy, nude male, faceless male, male head out of frame, "
-    "male face out of frame, yixuan, long hair, hairclip, black blazer, "
-    "frilled leotard, black pantyhose, bedroom, lamp, night, from side, "
-    "1boy on the left, 1girl on the right。"
+    "不要复制任何示例中的具体角色、服装或颜色；所有角色和服装都以当前 script、"
+    "角色锁定表和上一镜状态为准。"
 )
 
 STORY_SCHEMA: dict[str, Any] = {
@@ -234,19 +277,17 @@ STORY_SCHEMA: dict[str, Any] = {
 }
 
 STORY_SYSTEM = (
+    PRIORITY_RULES +
     "你是二次元 NSFW 剧情编剧。根据用户自然语言写出完整剧情，不写分镜标签，不写镜头编号。\n"
     "要求：\n"
     "1. 写清开始、发展、转折、高潮、结尾，不能只写开头就循环。\n"
-    "2. 根据用户要求的总格数提供足够的剧情事件；30 格一幕，每一幕有独立事件和进展。\n"
+    "2. 根据用户要求的总格数提供足够的剧情事件；每一段都要有独立事件和进展。\n"
     "默认只生成女主单人剧情：只有用户在角色或剧情中明确写出男主、男性、1boy、"
     "“我（男性）”或明确要求双人时，才允许加入男性角色。禁止擅自加入 1boy、男主、"
     "男性手、男性身体、男性影子或男性服装；没有明确要求时统一使用 1girl solo。\n"
-    "叙事节奏硬约束（除用户明确要求快速/直接/全裸外必须遵守）：按总格数百分比推进。"
-    "前 0–20% 只建立气氛、试探、对话、轻微肢体接触，禁止插入、禁止全裸；"
-    "20–45% 展开自慰、勾引、爱抚、前戏和缓慢脱衣；"
-    "45–70% 做边缘控制、半脱、拨开、撕破衣物，至少保留一件情趣服装或丝袜；"
-    "70–90% 才进入插入和性交，性交中也优先保留内衣、丝袜、吊带或半脱衣物；"
-    "90–100% 高潮余韵。禁止没铺垫就脱光、直接插入或跳过前戏。\n"
+    "叙事节奏以用户剧情为准；用户没有明确节奏时，默认按"
+    "气氛铺垫→试探/前戏→性行为→高潮余韵自然推进，避免没铺垫直接全裸或直接插入。"
+    "每一步必须有新事件或新进展，不能在同一节拍原地打转。\n"
     "3. 先建立角色锁定表 characters，覆盖剧情中所有实际出场角色：女主、男主、我/男性、配角、"
     "以及多人场景中的每个人。每个角色必须有唯一 name、gender、appearance、initial_clothing。"
     "女主 appearance 写英文 Booru 外貌标签（发色、发型、瞳色、体型、身材、标志物、服装以外的固定特征）；"
@@ -270,10 +311,11 @@ STORY_SYSTEM = (
     "只有剧情明确移动才换大环境。\n"
     "6. 性行为、前戏、脱衣、高潮等必须写清楚，不要用模糊词或跳过；"
     "性行为必须写唾液、湿润、阴道汁、潮吹、射精、精液、吞咽或射在身体上等体液交互，不能只有动作。"
-    + INTIMATE_CLOTHING_EVENTS +
+    + INTIMATE_CLOTHING_EVENTS_ZH +
     "要与挑逗、爱抚、自慰、性行为等场景自然组合，写清哪件衣物破损、位置、当前遮挡或暴露状态。"
-    "性交高潮或结尾默认必须明确男方射精方式：内射、射在身上、口交吞咽或射在脸上至少一种；"
-    "除非用户明确要求不射精或不体液。\n"
+    "有男性参与时，性交高潮或结尾默认必须明确男方射精方式："
+    "内射、射在身上、口交吞咽或射在脸上至少一种；"
+    "没有男性参与时不要凭空加入男性或射精。除非用户明确要求不射精或不体液。\n"
     "7. 只输出 JSON：{\"story\": \"完整中文剧情\", \"characters\": [{\"name\":\"...\","
     "\"gender\":\"girl/boy\",\"appearance\":\"...\",\"initial_clothing\":\"...\"}]}，"
     "不要解释，不要分镜 JSON。\n"
@@ -289,13 +331,20 @@ ACT_PLAN_SCHEMA: dict[str, Any] = {
                 "properties": {
                     "id": {"type": "string"},
                     "title": {"type": "string"},
+                    "start": {"type": "integer"},
+                    "end": {"type": "integer"},
+                    "beats": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
                     "summary": {"type": "string"},
                     "cast": {"type": "string"},
                     "clothing": {"type": "string"},
                     "scene": {"type": "string"},
                     "nsfw": {"type": "string"},
                 },
-                "required": ["id", "title", "summary", "cast", "clothing", "scene", "nsfw"],
+                "required": ["id", "title", "start", "end", "beats", "summary",
+                             "cast", "clothing", "scene", "nsfw"],
             },
         }
     },
@@ -303,12 +352,16 @@ ACT_PLAN_SCHEMA: dict[str, Any] = {
 }
 
 ACT_PLAN_SYSTEM = (
+    PRIORITY_RULES +
     "你是连续剧情分幕编剧。把完整剧情按用户要求的总格数拆成若干幕。\n"
     "要求：\n"
-    "1. 每幕最多 30 格；用户总格数超过 30 时，最后一幕可以少于 30 格。\n"
+    "1. 每幕写清 start/end 镜头范围，最多 30 格；用户总格数超过 30 时，"
+    "最后一幕可以少于 30 格。每幕 beats 写 3-6 个按顺序发生的关键节拍，"
+    "后一幕不得重复前一幕的 beat。\n"
     "2. 按剧情顺序覆盖全部内容，不能漏掉结尾，不能重复同一事件。\n"
     "3. 每幕 summary 写清：本幕发生什么、谁出现、每个角色的服装/裸露进度、场景、NSFW 进度；"
     "如果有服装破损/撕毁、拨开情趣内裤等情节，也要写清哪个角色、哪件衣物、位置和当前状态；"
+    "全片可安排 1-2 次角色已有服装的破损/滑落事件，由剧情自然决定，不强制每镜出现；"
     "下一幕必须能自然接上上一幕。\n"
     "4. cast 写清本幕人物，例如 1girl solo、1girl 1boy；不确定就按剧情写。"
     "用户未明确要求男性时只能写 1girl solo，禁止擅自加入 1boy 或男主。"
@@ -316,10 +369,11 @@ ACT_PLAN_SYSTEM = (
     "5. clothing 写本幕服装起点和终点，必须按角色分别写，只能使用各角色初始服装中存在的单品；"
     "禁止新增初始服装之外的内衣/内裤/丝袜/胸罩/蕾丝；scene 写本幕主场景；nsfw 写本幕情色/性行为进度。\n"
     "6. 节奏必须循序渐进：前段只试探和轻微接触，中段自慰/勾引/前戏/慢脱，后段才插入；"
-    "性交中默认至少保留一件情趣服装或丝袜，除非用户明确要求全裸。"
+    "性交中适当保留情趣服装（根据剧情需要调整），除非用户明确要求全裸。"
     "男主和女主的服装、裸露状态分别记录，男主不能穿女主衣服。\n"
-    "只输出 JSON：{\"acts\":[{\"id\":\"01\",\"title\":\"...\",\"summary\":\"...\","
-    "\"cast\":\"...\",\"clothing\":\"...\",\"scene\":\"...\",\"nsfw\":\"...\"}]}，不要解释。\n"
+    "只输出 JSON：{\"acts\":[{\"id\":\"01\",\"title\":\"...\",\"start\":1,\"end\":20,"
+    "\"beats\":[\"...\",\"...\"],\"summary\":\"...\",\"cast\":\"...\","
+    "\"clothing\":\"...\",\"scene\":\"...\",\"nsfw\":\"...\"}]}，不要解释。\n"
 )
 
 
@@ -350,6 +404,7 @@ class StoryboardOptions:
     style_positive: str = ""
     strip_appearance: bool = False
     full_story: bool = False
+    preserve_ai_clothing: bool = True
     on_partial: Callable[[list[dict[str, str]]], None] | None = None
     log: Callable[[str], None] = field(default=lambda _msg: None)
 
@@ -558,6 +613,10 @@ def _act_summary(spine: list[dict[str, Any]], start: int, end: int) -> str:
             for key in ("cast", "phase", "clothing", "scene", "nsfw")
             if str(item.get(key) or "").strip()
         ]
+        beats = item.get("beats")
+        if isinstance(beats, list) and beats:
+            details.append("关键节拍：" + "、".join(
+                str(beat) for beat in beats if str(beat).strip()))
         rows.append("%s%s" % (
             item.get("summary", ""),
             "（%s）" % "，".join(details) if details else ""))
@@ -886,6 +945,8 @@ def _clothing_key(tag: str) -> str:
     low = re.sub(r"[_\-]+", " ", str(tag).lower()).strip()
     if low in {"undressing", "dressing", "dress up", "dress down"}:
         return ""
+    if "light" in low and "top" in low:
+        return ""
     for key, patterns in _CLOTHING_KEYS:
         if any(re.search(pattern, low, re.I) for pattern in patterns):
             return key
@@ -902,6 +963,11 @@ _UPPER_BODY_CLOTHING = {
     "bra", "shirt", "vest", "blazer", "jacket", "coat", "cardigan",
     "blouse", "sweater", "hoodie", "tank top", "camisole", "crop top",
     "top", "corset", "bustier", "necktie", "scarf", "collar",
+}
+_TOPLESS_REMOVE = _UPPER_BODY_CLOTHING - {"necktie", "scarf", "collar"}
+_BOTTOMLESS_REMOVE = {
+    "panties", "underwear", "thong", "bikini", "skirt", "pants", "jeans",
+    "shorts",
 }
 
 
@@ -1543,6 +1609,14 @@ def _shot_state_index(shot: dict[str, Any], outline: list[dict[str, Any]],
 
 def present_character_profiles(profiles: list[CharacterProfile], shot: dict[str, Any],
                                beat: str = "") -> list[CharacterProfile]:
+    present = (shot or {}).get("present_characters")
+    if isinstance(present, list):
+        wanted = {str(name).strip().lower() for name in present
+                  if str(name).strip()}
+        chosen = [profile for profile in profiles
+                  if profile.name.lower() in wanted or profile.key.lower() in wanted]
+        if chosen:
+            return chosen
     cast = str((shot or {}).get("cast") or "")
     text = " ".join([beat, str((shot or {}).get("outline") or ""),
                      str((shot or {}).get("script") or "")])
@@ -1956,7 +2030,8 @@ def _half_off_tags(tags: list[str]) -> list[str]:
 
 
 def _finalize_shot_prompt(shot: dict[str, Any],
-                          female_clothing: str | None = None) -> None:
+                          female_clothing: str | None = None,
+                          preserve_clothing: bool = False) -> None:
     tags = [tag.strip() for tag in str(shot.get("prompt") or "").split(",")
             if tag.strip()]
     text = " ".join(tags).lower()
@@ -1983,7 +2058,7 @@ def _finalize_shot_prompt(shot: dict[str, Any],
                 "solo", "solo focus", "solo female", "female solo",
                 "solo male", "male solo"):
             continue
-        if script_text and not damage_script and any(
+        if not preserve_clothing and script_text and not damage_script and any(
                 word in low for word in _DAMAGE_WORDS):
             continue
         if any(word in low for word in _MULTI_MALE_TAGS):
@@ -1995,43 +2070,45 @@ def _finalize_shot_prompt(shot: dict[str, Any],
             continue
         if double and any(word in low for word in _MALE_PROMPT_CLOTHING):
             continue
-        if double and _clothing_key(tag):
+        if not preserve_clothing and double and _clothing_key(tag):
             if (_tag_weight_key(tag)[0] not in female_exact
                     and not (_is_clothing_state_tag(tag)
                              and _clothing_key(tag) in female_keys)):
                 continue
-        if female_clothing and low in (
+        if not preserve_clothing and female_clothing and low in (
                 "completely nude", "fully nude", "full nude", "nude", "naked"):
             continue
-        if not female_clothing and (
+        if not preserve_clothing and not female_clothing and (
                 _clothing_key(tag) or _is_clothing_state_tag(tag)):
             continue
         cleaned.append(tag)
     if double:
         cleaned.extend(_MALE_NUDE_TAGS)
-    if not female_clothing and "1girl" in text:
-        cleaned.append("completely nude")
-    elif (female_clothing and damage_script and any(
-            word in text for word in (
-                "pussy", "crotch", "breasts out", "one breast out", "nipples"))):
-        cleaned.extend(_GENERIC_CLOTHING_DAMAGE)
-    script = str(shot.get("script") or "")
-    detail_text = " ".join(
-        str(value) for value in (shot.get("clothing_details") or {}).values())
-    carried_half_off = any(
-        word in detail_text.lower().replace("_", " ")
-        for word in _HALF_OFF_WORDS)
-    keep_half_off = (
-        not script
-        or _script_has_half_off(script)
-        or (carried_half_off and not _script_resets_to_full(script)))
-    if script and not keep_half_off:
-        cleaned = [
-            tag for tag in cleaned
-            if not any(word in tag.lower().replace("_", " ")
-                       for word in _HALF_OFF_WORDS)]
-    else:
-        cleaned = _half_off_tags(cleaned)
+    if not preserve_clothing:
+        if not female_clothing and "1girl" in text:
+            cleaned.append("completely nude")
+        elif (female_clothing and damage_script and any(
+                word in text for word in (
+                    "pussy", "crotch", "breasts out", "one breast out",
+                    "nipples"))):
+            cleaned.extend(_GENERIC_CLOTHING_DAMAGE)
+        script = str(shot.get("script") or "")
+        detail_text = " ".join(
+            str(value) for value in (shot.get("clothing_details") or {}).values())
+        carried_half_off = any(
+            word in detail_text.lower().replace("_", " ")
+            for word in _HALF_OFF_WORDS)
+        keep_half_off = (
+            not script
+            or _script_has_half_off(script)
+            or (carried_half_off and not _script_resets_to_full(script)))
+        if script and not keep_half_off:
+            cleaned = [
+                tag for tag in cleaned
+                if not any(word in tag.lower().replace("_", " ")
+                           for word in _HALF_OFF_WORDS)]
+        else:
+            cleaned = _half_off_tags(cleaned)
     cleaned = _dedupe_weighted_clothing(cleaned)
     seen: set[str] = set()
     result: list[str] = []
@@ -2043,30 +2120,638 @@ def _finalize_shot_prompt(shot: dict[str, Any],
     shot["prompt"] = ", ".join(result)
 
 
+_OUTFIT_CHANGE_WORDS = (
+    "换装", "换衣", "换衣服", "换上", "换上新的", "换一套", "穿上",
+    "套上", "披上", "戴上", "新衣", "新的衣服", "另一套", "change clothes",
+    "changed clothes", "put on", "wearing a new",
+)
+_OUTFIT_REPAIR_WORDS = (
+    "换新", "新的", "补好", "修好", "完好无损", "破口消失", "换成新的",
+    "换了新的", "repaired", "brand new",
+)
+_STATE_RESET_WORDS = (
+    "拉正", "穿好", "整理好", "拉回", "拨正", "调整好", "复位",
+    "重新穿好", "put back on", "adjust back",
+)
+
+
+def _script_allows_state_reset(script: str) -> bool:
+    text = str(script or "").lower()
+    return bool(text) and any(word in text for word in _STATE_RESET_WORDS)
+
+
+def _script_allows_outfit_change(script: str) -> bool:
+    text = str(script or "").lower()
+    return bool(text) and any(word in text for word in _OUTFIT_CHANGE_WORDS)
+
+
+def _script_allows_repair(script: str) -> bool:
+    text = str(script or "").lower()
+    return bool(text) and any(word in text for word in _OUTFIT_REPAIR_WORDS)
+
+
+def stabilize_clothing_sequence(shots: list[dict[str, Any]],
+                                profiles: list[CharacterProfile]) -> None:
+    girls = [profile for profile in profiles if profile.gender == "girl"]
+    if not girls:
+        return
+    profile = girls[0]
+    current: dict[str, str] = {
+        key: tag for tag in profile.initial_clothing
+        if (key := _clothing_key(tag))
+    }
+    current_repr = dict(current)
+    damaged: set[str] = set()
+    for shot in shots:
+        script = str(shot.get("script") or shot.get("outline") or "")
+        change = _script_allows_outfit_change(script)
+        repair = _script_allows_repair(script)
+        state_reset = _script_allows_state_reset(script)
+        for key in list(current):
+            if _removes_item(script, key) and not change:
+                current.pop(key, None)
+                current_repr.pop(key, None)
+                damaged.discard(key)
+        tags = [tag.strip() for tag in str(shot.get("prompt") or "").split(",")
+                if tag.strip()]
+        nude = any(_is_full_nude_tag(tag) for tag in tags)
+        if nude:
+            current.clear()
+            current_repr.clear()
+            damaged.clear()
+        kept: list[str] = []
+        present_keys: set[str] = set()
+        for tag in tags:
+            key = _clothing_key(tag)
+            if not key:
+                kept.append(tag)
+                continue
+            is_damage = any(word in tag.lower() for word in _DAMAGE_WORDS)
+            is_state = _is_clothing_state_tag(tag) and not is_damage
+            if key not in current:
+                if not change:
+                    continue
+                current[key] = tag
+                current_repr[key] = tag
+            elif is_state:
+                current_repr[key] = tag
+            elif is_damage:
+                damaged.add(key)
+            elif (not state_reset and _is_clothing_state_tag(
+                    current_repr.get(key, ""))):
+                continue
+            elif state_reset or change:
+                current[key] = tag
+                current_repr[key] = tag
+                damaged.discard(key)
+            present_keys.add(key)
+            if is_damage:
+                damaged.add(key)
+            kept.append(tag)
+        if repair:
+            damaged.clear()
+        if damaged:
+            kept = [
+                tag for tag in kept
+                if not (_clothing_key(tag) in damaged
+                        and any(word in tag.lower() for word in (
+                            "intact", "pristine", "完好", "完整")))
+            ]
+            for key in sorted(damaged):
+                if any(_clothing_key(tag) == key
+                       and any(word in tag.lower() for word in _DAMAGE_WORDS)
+                       for tag in kept):
+                    continue
+                base = _tag_weight_key(current.get(key, key))[0]
+                kept.append("torn %s" % base)
+        for key, tag in current_repr.items():
+            if key not in present_keys:
+                kept.append(tag)
+        shot["prompt"] = ", ".join(kept)
+
+
+_CLOTHING_REPAIR_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"prompt": {"type": "string"}},
+    "required": ["prompt"],
+}
+
+
+def _clothing_repair_messages(shot: dict[str, Any],
+                              feedback: list[str],
+                              previous_prompt: str = "") -> list[dict[str, str]]:
+    user = [
+        "剧本：%s" % str(shot.get("script") or shot.get("outline") or ""),
+        "当前镜头原 prompt：%s" % str(shot.get("prompt") or ""),
+        "上一镜 prompt（仅用于连续性参考）：%s" % previous_prompt,
+        "连续性校验发现的问题：\n" + "\n".join("- " + item for item in feedback),
+        "请只重写当前镜头的英文 Booru prompt，保留原剧本的场景、角色、动作、"
+        "镜头和 NSFW 内容，只修正服装连续性。不要修改分镜，不要增加新剧情。"
+        "只输出 JSON：{\"prompt\":\"...\"}。",
+    ]
+    return [
+        {"role": "system", "content": (
+            "你是 Booru 提示词修复器。根据校验反馈重写当前镜头 prompt，"
+            "只修正服装连续性问题；保留原有剧情、动作、场景、构图和画风。")},
+        {"role": "user", "content": "\n".join(user)},
+    ]
+
+
+_OFF_BODY_WORDS = (
+    "removed", "discarded", "on towel", "on sand", "on floor", "on waist",
+    "holding", "folded", "in hand", "thrown", "dropped", "taken off",
+    "pulled off", "slipped off", "panties off", "bra off", "pantyhose off",
+)
+
+
+def _is_off_body_tag(tag: str) -> bool:
+    low = str(tag or "").lower().replace("_", " ")
+    if "off shoulder" in low or "off-shoulder" in low:
+        return False
+    return any(word in low for word in _OFF_BODY_WORDS)
+
+
+def repair_clothing_sequence(client: Any, model: str,
+                             shots: list[dict[str, Any]],
+                             profiles: list[CharacterProfile],
+                             timeout: float = 300.0,
+                             log: Callable[[str], None] | None = None) -> None:
+    girls = [profile for profile in profiles if profile.gender == "girl"]
+    if not girls:
+        return
+    current: dict[str, str] = {}
+    current_repr: dict[str, str] = {}
+    damaged: set[str] = set()
+    previous_prompt = ""
+    for shot in shots:
+        script = str(shot.get("script") or shot.get("outline") or "")
+        change = _script_allows_outfit_change(script)
+        repair = _script_allows_repair(script)
+        state_reset = _script_allows_state_reset(script)
+        removed = {
+            key for key in current
+            if _removes_item(script, key) and not change
+        }
+        for key in removed:
+            current.pop(key, None)
+            current_repr.pop(key, None)
+            damaged.discard(key)
+        tags = [tag.strip() for tag in str(shot.get("prompt") or "").split(",")
+                if tag.strip()]
+
+        def issues_for(values: list[str]) -> list[str]:
+            worn_values = [tag for tag in values if not _is_off_body_tag(tag)]
+            keys = {_clothing_key(tag) for tag in worn_values
+                    if _clothing_key(tag)}
+            low = " ".join(values).lower()
+            off_keys = {_clothing_key(tag) for tag in values
+                        if _is_off_body_tag(tag) and _clothing_key(tag)}
+            if "topless" in low:
+                off_keys.update(_TOPLESS_REMOVE)
+            if "bottomless" in low:
+                off_keys.update(_BOTTOMLESS_REMOVE)
+            issues: list[str] = []
+            nude_now = any(_is_full_nude_tag(tag) for tag in values)
+            for key, tag in current_repr.items():
+                if key in removed or key in off_keys:
+                    continue
+                if key not in keys:
+                    issues.append("上一镜仍穿着、这一镜漏掉了：%s" % tag)
+                elif (_is_clothing_state_tag(tag)
+                      and not state_reset
+                      and not any(
+                          _clothing_key(item) == key
+                          and _is_clothing_state_tag(item)
+                          for item in worn_values)):
+                    issues.append("服装状态被改回去了：上一镜是 %s，不能变回完整穿着"
+                                  % tag)
+            for key in damaged:
+                if key in removed or key in off_keys or key not in keys:
+                    continue
+                if not any(_clothing_key(tag) == key
+                           and any(word in tag.lower() for word in _DAMAGE_WORDS)
+                           for tag in worn_values):
+                    issues.append("上一镜已有破损，这一镜必须保留：%s"
+                                  % current.get(key, key))
+            if previous_prompt and not change and not state_reset:
+                for tag in worn_values:
+                    key = _clothing_key(tag)
+                    if key and key not in current:
+                        issues.append("上一镜没有这件服装，除非剧本明确换装：%s"
+                                      % tag)
+            if nude_now and keys:
+                issues.append("当前写成全裸，却同时出现服装标签：%s"
+                              % ", ".join(sorted(keys)))
+            if "bottomless" in low and any(
+                    key in keys for key in _BOTTOMLESS_REMOVE):
+                issues.append("当前写 bottomless，却同时出现下身服装")
+            if "topless" in low and any(
+                    key in keys for key in _TOPLESS_REMOVE):
+                issues.append("当前写 topless，却同时出现上身服装")
+            for key in keys:
+                has_removed = any(
+                    _clothing_key(tag) == key and _is_off_body_tag(tag)
+                    for tag in values)
+                has_worn = any(
+                    _clothing_key(tag) == key and not _is_off_body_tag(tag)
+                    for tag in values)
+                if has_removed and has_worn:
+                    issues.append("同一服装同时写了脱下和在穿：%s" % key)
+            return issues
+
+        feedback = issues_for(tags)
+        if feedback:
+            try:
+                raw = client.chat_json(
+                    model,
+                    _clothing_repair_messages(shot, feedback, previous_prompt),
+                    schema=_CLOTHING_REPAIR_SCHEMA,
+                    temperature=0.5,
+                    num_predict=4096,
+                    num_ctx=32768,
+                    keep_alive="5m",
+                    timeout=timeout,
+                    retries=1,
+                )
+                fixed = raw_prompt(raw.get("prompt") or "")
+                if fixed:
+                    shot["prompt"] = fixed
+                    tags = [tag.strip() for tag in fixed.split(",")
+                            if tag.strip()]
+                    if log:
+                        log("服装连续性已重新生成 shot %s" % shot.get("id", ""))
+                elif log:
+                    log("服装连续性重生成返回空 shot %s" % shot.get("id", ""))
+            except Exception as exc:
+                if log:
+                    log("服装连续性重生成失败 shot %s: %s" % (
+                        shot.get("id", ""), exc))
+
+        # 状态缓存只来自 AI prompt，不再来自用户初始服装。
+        nude = any(_is_full_nude_tag(tag) for tag in tags)
+        if nude:
+            current.clear()
+            current_repr.clear()
+            damaged.clear()
+        else:
+            low = " ".join(tags).lower()
+            if "bottomless" in low:
+                for key in _BOTTOMLESS_REMOVE:
+                    current.pop(key, None)
+                    current_repr.pop(key, None)
+                    damaged.discard(key)
+            if "topless" in low:
+                for key in _TOPLESS_REMOVE:
+                    current.pop(key, None)
+                    current_repr.pop(key, None)
+                    damaged.discard(key)
+            for tag in tags:
+                key = _clothing_key(tag)
+                if not key:
+                    continue
+                if (key not in current and previous_prompt
+                        and not change and not state_reset):
+                    continue
+                is_damage = any(word in tag.lower() for word in _DAMAGE_WORDS)
+                is_state = _is_clothing_state_tag(tag) and not is_damage
+                if _is_off_body_tag(tag):
+                    current.pop(key, None)
+                    current_repr.pop(key, None)
+                    damaged.discard(key)
+                elif is_damage:
+                    damaged.add(key)
+                elif is_state:
+                    current[key] = tag
+                    current_repr[key] = tag
+                elif state_reset:
+                    current[key] = tag
+                    current_repr[key] = tag
+                elif key not in current_repr:
+                    current[key] = tag
+                    current_repr[key] = tag
+            if repair:
+                damaged.clear()
+        previous_prompt = str(shot.get("prompt") or "")
+        if log:
+            remaining = issues_for(tags)
+            if remaining:
+                log("服装连续性仍有问题 shot %s: %s" % (
+                    shot.get("id", ""), "；".join(remaining)))
+
+
+_CLOTHING_VALIDATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "shots": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "valid": {"type": "boolean"},
+                    "issues": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "prompt": {"type": "string"},
+                    "clothing_state": {"type": "string"},
+                },
+                "required": ["id", "valid"],
+            },
+        },
+    },
+    "required": ["shots"],
+}
+
+
+def _clothing_validation_messages(previous_prompt: str,
+                                  previous_state: str,
+                                  batch: list[dict[str, Any]]
+                                  ) -> list[dict[str, str]]:
+    payload = {
+        "previous_prompt": previous_prompt,
+        "previous_clothing_state": previous_state,
+        "shots": [{
+            "id": str(shot.get("id") or ""),
+            "script": str(shot.get("script") or shot.get("outline") or ""),
+            "prompt": str(shot.get("prompt") or ""),
+        } for shot in batch],
+    }
+    return [
+        {"role": "system", "content": (
+            "你是 NSFW 连续剧情分镜的服装连续性审稿员。"
+            "根据剧本、上一镜 prompt、当前镜头 prompt 和本批镜头顺序，"
+            "检查所有服装与裸露状态，不受固定服装词表限制。"
+            "重点检查：上一镜仍在穿的衣服这一镜漏掉、"
+            "半脱/拨开/破损状态无理由恢复完整、"
+            "已脱下的服装无理由重新出现、"
+            "没有剧本依据的新服装、"
+            "全裸/半裸标签与服装标签互相矛盾。"
+            "如果某镜 prompt 没有服装连续性问题，valid=true，"
+            "不要返回 prompt，以减少输出长度。"
+            "如果有问题，valid=false，并在 issues 写清原因，"
+            "同时重写该镜 prompt：保留原剧本的场景、角色、动作、表情、构图、"
+            "镜头、光线和 NSFW 内容，只修正服装状态。"
+            "每一镜都必须返回简短的 clothing_state，写清当前仍穿着什么、"
+            "半脱/破损/脱下/放在一旁的服装。"
+            "只输出 JSON：{shots:[{id,valid,issues,prompt,clothing_state}]}，不要解释。")},
+        {"role": "user", "content": json.dumps(
+            payload, ensure_ascii=False) + (
+            "\n第一镜参考 previous_prompt 和 previous_clothing_state；"
+            "之后每一镜参考前一镜。有效镜头只返回 clothing_state，不返回 prompt。")},
+    ]
+
+
+def repair_clothing_sequence_ai(client: Any, model: str,
+                                shots: list[dict[str, Any]],
+                                profiles: list[CharacterProfile],
+                                timeout: float = 300.0,
+                                log: Callable[[str], None] | None = None,
+                                chunk: int = 8,
+                                start: int = 0) -> None:
+    del profiles
+    if not shots:
+        return
+    start = max(0, min(int(start), len(shots)))
+    previous_prompt = ""
+    previous_state = ""
+    if start > 0:
+        previous_prompt = str(shots[start - 1].get("prompt") or "")
+        previous_state = str(shots[start - 1].get("clothing_state") or "")
+    for offset in range(start, len(shots), max(1, int(chunk))):
+        batch = shots[offset:offset + max(1, int(chunk))]
+        try:
+            raw = client.chat_json(
+                model,
+                _clothing_validation_messages(
+                    previous_prompt, previous_state, batch),
+                schema=_CLOTHING_VALIDATION_SCHEMA,
+                temperature=0.2,
+                num_predict=8192,
+                num_ctx=32768,
+                keep_alive="5m",
+                timeout=timeout,
+                retries=1,
+            )
+            items = raw.get("shots") if isinstance(raw, dict) else []
+            by_id = {
+                str(item.get("id") or ""): item
+                for item in items
+                if isinstance(item, dict)
+            }
+            for index, shot in enumerate(batch):
+                item = by_id.get(str(shot.get("id") or ""))
+                if item is None and index < len(items):
+                    item = items[index] if isinstance(items[index], dict) else None
+                if not isinstance(item, dict):
+                    continue
+                fixed = raw_prompt(item.get("prompt") or "")
+                if item.get("valid") is False and fixed:
+                    shot["prompt"] = fixed
+                    if log:
+                        issues = item.get("issues") or []
+                        log("服装连续性已由 AI 修正 shot %s: %s" % (
+                            shot.get("id", ""),
+                            "；".join(str(x) for x in issues)[:300]))
+                state = str(item.get("clothing_state") or "").strip()
+                if state:
+                    shot["clothing_state"] = state
+        except Exception as exc:
+            if log:
+                log("AI 服装连续性校验失败，保留原 prompt: %s" % exc)
+        previous_prompt = str(batch[-1].get("prompt") or "")
+        previous_state = str(
+            batch[-1].get("clothing_state") or previous_state)
+
+
+_STORY_VALIDATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "shots": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "valid": {"type": "boolean"},
+                    "issues": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "script": {"type": "string"},
+                    "prompt": {"type": "string"},
+                    "beat": {"type": "string"},
+                    "clothing": {"type": "string"},
+                    "scene": {"type": "string"},
+                    "camera": {"type": "string"},
+                    "nsfw": {"type": "string"},
+                },
+                "required": ["id", "valid"],
+            },
+        },
+    },
+    "required": ["shots"],
+}
+
+
+def _story_validation_messages(history: list[dict[str, Any]],
+                               batch: list[dict[str, Any]]
+                               ) -> list[dict[str, str]]:
+    payload = {
+        "history": history,
+        "shots": [{
+            "id": str(shot.get("id") or ""),
+            "script": str(shot.get("script") or shot.get("outline") or ""),
+            "prompt": str(shot.get("prompt") or ""),
+        } for shot in batch],
+    }
+    return [
+        {"role": "system", "content": (
+            "你是 NSFW 连续剧情分镜的剧情连续性审稿员。"
+            "只检查剧情、动作、场景和构图是否重复、回退或原地打转，不限制题材。"
+            "根据完整历史镜头摘要和当前批次，检查："
+            "是否重复已经发生过的同一事件、同一前戏节拍、同一对话、同一动作；"
+            "是否在已经推进后无理由回到更早阶段；"
+            "是否连续多镜只有轻微换词但剧情没有前进；"
+            "动作姿势是否与上一镜物理不连贯（躺着突然站起、背对突然正对等）；"
+            "场景、时间、光线是否无过渡跳变；"
+            "连续镜头是否机位/构图只是重复换词。"
+            "如果某镜有效，valid=true，不要返回 script 和 prompt，以减少输出长度。"
+            "如果某镜重复、回退或衔接失败，valid=false，在 issues 写清问题，"
+            "并重写该镜 script 和 prompt：保留角色、场景、服装、动作风格和 NSFW 强度，"
+            "但必须让剧情进入新的节拍或写出必要过渡。"
+            "无效镜头请同时返回 beat、clothing、scene、camera、nsfw 字段。"
+            "不要修改有效镜头。只输出 JSON："
+            "{shots:[{id,valid,issues,script,prompt,beat,clothing,scene,camera,nsfw}]}，不要解释。")},
+        {"role": "user", "content": json.dumps(
+            payload, ensure_ascii=False) + (
+            "\n请逐镜检查当前批次；历史镜头只用于判断重复，不要重写历史。")},
+    ]
+
+
+def repair_story_continuity_ai(client: Any, model: str,
+                               shots: list[dict[str, Any]],
+                               timeout: float = 300.0,
+                               log: Callable[[str], None] | None = None,
+                               chunk: int = 8,
+                               start: int = 0) -> None:
+    if not shots:
+        return
+    start = max(0, min(int(start), len(shots)))
+    for offset in range(start, len(shots), max(1, int(chunk))):
+        batch = shots[offset:offset + max(1, int(chunk))]
+        history = [{
+            "id": str(shot.get("id") or ""),
+            "script": str(shot.get("script") or shot.get("outline") or "")[:180],
+        } for shot in shots[:offset]]
+        try:
+            raw = client.chat_json(
+                model,
+                _story_validation_messages(history, batch),
+                schema=_STORY_VALIDATION_SCHEMA,
+                temperature=0.25,
+                num_predict=8192,
+                num_ctx=32768,
+                keep_alive="5m",
+                timeout=timeout,
+                retries=1,
+            )
+            items = raw.get("shots") if isinstance(raw, dict) else []
+            by_id = {
+                str(item.get("id") or ""): item
+                for item in items
+                if isinstance(item, dict)
+            }
+            for index, shot in enumerate(batch):
+                item = by_id.get(str(shot.get("id") or ""))
+                if item is None and index < len(items):
+                    item = items[index] if isinstance(items[index], dict) else None
+                if not isinstance(item, dict) or item.get("valid") is not False:
+                    continue
+                script = str(item.get("script") or "").strip()
+                prompt = raw_prompt(item.get("prompt") or "")
+                if script:
+                    shot["script"] = script
+                    shot["outline"] = script
+                if prompt:
+                    shot["prompt"] = prompt
+                for key in ("beat", "clothing", "scene", "camera", "nsfw"):
+                    value = str(item.get(key) or "").strip()
+                    if value:
+                        shot[key] = value
+                if log:
+                    issues = item.get("issues") or []
+                    log("剧情连续性已由 AI 修正 shot %s: %s" % (
+                        shot.get("id", ""),
+                        "；".join(str(x) for x in issues)[:300]))
+        except Exception as exc:
+            if log:
+                log("AI 剧情连续性校验失败，保留原内容: %s" % exc)
+
+
+def repair_story_continuity_safe(client: Any, model: str,
+                                 shots: list[dict[str, Any]],
+                                 timeout: float = 300.0,
+                                 log: Callable[[str], None] | None = None,
+                                 start: int = 0) -> None:
+    try:
+        repair_story_continuity_ai(
+            client, model, shots, timeout=timeout, log=log, start=start)
+    except Exception as exc:
+        if log:
+            log("剧情连续性校验已跳过，不影响生成: %s" % exc)
+
+
+def repair_clothing_sequence_safe(client: Any, model: str,
+                                  shots: list[dict[str, Any]],
+                                  profiles: list[CharacterProfile],
+                                  timeout: float = 300.0,
+                                  log: Callable[[str], None] | None = None,
+                                  start: int = 0) -> None:
+    try:
+        repair_clothing_sequence_ai(
+            client, model, shots, profiles, timeout=timeout, log=log,
+            start=start)
+    except Exception as exc:
+        if log:
+            log("服装连续性校验已跳过，不影响提示词生成: %s" % exc)
+
+
 def apply_character_state(prompt: str, profiles: list[CharacterProfile],
                           states: dict[str, set[str]],
                           present: list[CharacterProfile] | None = None,
-                          details: dict[str, set[str]] | None = None) -> str:
+                          details: dict[str, set[str]] | None = None,
+                          preserve_ai_clothing: bool = False) -> str:
     present = present or profiles
     worn: set[str] = set()
     for profile in present:
         worn.update(states.get(profile.key) or set())
     wardrobe = {tag for profile in profiles for tag in profile.initial_clothing}
-    tags = [tag.strip() for tag in apply_story_state(prompt, worn, wardrobe).split(",")
-            if tag.strip()]
+    original = [tag.strip() for tag in str(prompt or "").split(",")
+                if tag.strip()]
+    has_ai_clothing = any(
+        _clothing_key(tag) or _is_clothing_state_tag(tag)
+        or _is_full_nude_tag(tag) for tag in original)
+    if preserve_ai_clothing and has_ai_clothing:
+        tags = original
+    else:
+        tags = [tag.strip() for tag in apply_story_state(
+            prompt, worn, wardrobe).split(",") if tag.strip()]
     tags = [tag for tag in tags if not _appearance_conflicts(tag, present)]
-    for profile in present:
-        for tag in (details or {}).get(profile.key) or set():
-            key = _clothing_key(tag)
-            if not key or any(_clothing_key(worn_tag) == key for worn_tag in worn):
-                if tag.lower() not in {item.lower() for item in tags}:
-                    tags.append(tag)
-    nude_flags = [_is_fully_nude(profile, states) for profile in present]
-    if nude_flags and any(nude_flags) and not all(nude_flags):
-        tags = [tag for tag in tags if not _is_full_nude_tag(tag)]
-    elif nude_flags and all(nude_flags):
-        if not any(_is_full_nude_tag(tag) for tag in tags):
-            tags.append("completely nude")
+    if not (preserve_ai_clothing and has_ai_clothing):
+        for profile in present:
+            for tag in (details or {}).get(profile.key) or set():
+                key = _clothing_key(tag)
+                if not key or any(_clothing_key(worn_tag) == key
+                                  for worn_tag in worn):
+                    if tag.lower() not in {item.lower() for item in tags}:
+                        tags.append(tag)
+        nude_flags = [_is_fully_nude(profile, states) for profile in present]
+        if nude_flags and any(nude_flags) and not all(nude_flags):
+            tags = [tag for tag in tags if not _is_full_nude_tag(tag)]
+        elif nude_flags and all(nude_flags):
+            if not any(_is_full_nude_tag(tag) for tag in tags):
+                tags.append("completely nude")
     seen = {tag.lower() for tag in tags}
     for profile in present:
         for tag in profile.appearance:
@@ -2274,6 +2959,15 @@ def normalize_outline(raw: dict[str, Any] | list[Any], wanted: int,
         text = str(item.get("outline") or item.get("script")
                    or item.get("prompt") or item.get("description") or "").strip()
         if not text:
+            text = "；".join(
+                part for part in (
+                    str(item.get("beat") or "").strip(),
+                    str(item.get("clothing") or "").strip(),
+                    str(item.get("scene") or "").strip(),
+                    str(item.get("camera") or "").strip(),
+                    str(item.get("nsfw") or "").strip(),
+                ) if part)
+        if not text:
             continue
         number = "%02d" % (start + len(outline))
         base = slugify(item.get("name") or "%s_%s" % (fallback_prefix, number),
@@ -2285,7 +2979,16 @@ def normalize_outline(raw: dict[str, Any] | list[Any], wanted: int,
         used.add(name.lower())
         hinted = str(item.get("cast") or "").strip()
         cast = forced_cast or hinted
-        outline.append({"id": number, "name": name, "cast": cast, "outline": text})
+        shot = {"id": number, "name": name, "cast": cast, "outline": text}
+        present = item.get("present_characters")
+        if isinstance(present, list):
+            shot["present_characters"] = [
+                str(name).strip() for name in present if str(name).strip()]
+        for key in ("phase", "beat", "clothing", "scene", "camera", "nsfw"):
+            value = str(item.get(key) or "").strip()
+            if value:
+                shot[key] = value
+        outline.append(shot)
     if not outline:
         raise ValueError("Model returned no usable outline.")
     return outline
@@ -2462,6 +3165,7 @@ def normalize_acts(raw: dict[str, Any] | list[Any], total: int,
         summary = str(item.get("summary") or item.get("content") or "").strip()
         if not summary:
             continue
+        beats = item.get("beats")
         cleaned.append({
             "title": str(item.get("title") or "第%d幕" % (index + 1)).strip(),
             "summary": summary,
@@ -2469,6 +3173,10 @@ def normalize_acts(raw: dict[str, Any] | list[Any], total: int,
             "clothing": str(item.get("clothing") or "").strip(),
             "scene": str(item.get("scene") or "").strip(),
             "nsfw": str(item.get("nsfw") or "").strip(),
+            "beats": [str(beat).strip() for beat in beats
+                      if str(beat).strip()] if isinstance(beats, list) else [],
+            "start": item.get("start"),
+            "end": item.get("end"),
         })
     if not cleaned:
         if not str(story or "").strip():
@@ -2476,12 +3184,21 @@ def normalize_acts(raw: dict[str, Any] | list[Any], total: int,
         cleaned = [{
             "title": "完整剧情", "summary": str(story).strip(),
             "cast": "", "clothing": "", "scene": "", "nsfw": "",
+            "beats": [], "start": 1, "end": total,
         }]
     span = max(1, (total + len(cleaned) - 1) // len(cleaned))
     for index, item in enumerate(cleaned):
         item["id"] = "%02d" % (index + 1)
-        item["start"] = index * span + 1
-        item["end"] = min(total, (index + 1) * span)
+        try:
+            start = int(item.get("start") or 0)
+            end = int(item.get("end") or 0)
+        except (TypeError, ValueError):
+            start = end = 0
+        if start < 1 or end > total or start > end:
+            start = index * span + 1
+            end = min(total, (index + 1) * span)
+        item["start"] = start
+        item["end"] = end
     return cleaned
 
 
@@ -2529,6 +3246,7 @@ def plan_story_spine(client: OllamaClient, model: str, premise: str,
         "clothing": act.get("clothing", ""),
         "scene": act.get("scene", ""),
         "nsfw": act.get("nsfw", ""),
+        "beats": act.get("beats") or [],
         "start": act.get("start", 1),
         "end": act.get("end", shots),
     } for act in acts]
@@ -2637,7 +3355,8 @@ def generate_full_story_pipeline(client: OllamaClient, premise: str,
                         profiles, states, present, shot["prompt"], details,
                         script=str(shot.get("script") or ""))
                     shot["prompt"] = apply_character_state(
-                        shot["prompt"], profiles, states, present, details)
+                        shot["prompt"], profiles, states, present, details,
+                        preserve_ai_clothing=options.preserve_ai_clothing)
                     worn = set()
                     for profile in present:
                         worn.update(states.get(profile.key) or set())
@@ -2657,8 +3376,20 @@ def generate_full_story_pipeline(client: OllamaClient, premise: str,
                         shot, profiles, states, details, present)
                 if state_index < len(scene_states):
                     shot["scene"] = ", ".join(scene_states[state_index])
-                _finalize_shot_prompt(shot, female_clothing)
+                _finalize_shot_prompt(
+                    shot, female_clothing,
+                    preserve_clothing=options.preserve_ai_clothing)
+                shot["preserve_ai_clothing"] = options.preserve_ai_clothing
+            chunk_start = len(result)
             result.extend(part)
+            repair_story_continuity_safe(
+                client, options.model, result,
+                timeout=max(options.timeout, 300.0), log=options.log,
+                start=chunk_start)
+            repair_clothing_sequence_safe(
+                client, options.model, result, profiles,
+                timeout=max(options.timeout, 300.0), log=options.log,
+                start=chunk_start)
             _notify_partial(options, result)
             log("Stage 4/4: Act %d +%d shots (%d/%d)" % (
                 act_index, len(part), len(result), shots))
@@ -2691,13 +3422,23 @@ def normalize_scripts(raw: dict[str, Any] | list[Any], wanted: int,
             name = "%s_%d" % (base, counter)
             counter += 1
         used.add(name.lower())
-        scripts.append({
+        shot = {
             "id": number,
             "name": name,
             "script": script,
             "cast": str(item.get("cast") or "").strip(),
             "outline": "",
-        })
+        }
+        present = item.get("present_characters")
+        if isinstance(present, list):
+            shot["present_characters"] = [
+                str(name).strip() for name in present if str(name).strip()]
+        for key in ("phase", "beat", "clothing", "visible", "pose",
+                    "expression", "scene", "camera", "lighting", "nsfw"):
+            value = str(item.get(key) or "").strip()
+            if value:
+                shot[key] = value
+        scripts.append(shot)
     if not scripts:
         raise ValueError("Model returned no usable Chinese scripts.")
     return scripts
@@ -2720,7 +3461,7 @@ def normalize_tagged(raw: dict[str, Any] | list[Any],
         prompt = raw_prompt(item.get("prompt") or item.get("tags") or "")
         if not prompt:
             continue
-        shots.append({
+        shot = {
             "id": script["id"],
             "name": script["name"],
             "prompt": prompt,
@@ -2728,7 +3469,17 @@ def normalize_tagged(raw: dict[str, Any] | list[Any],
             "cast": script.get("cast", ""),
             "phase": script.get("phase", ""),
             "outline": script.get("outline") or script["script"],
-        })
+        }
+        present = script.get("present_characters")
+        if isinstance(present, list):
+            shot["present_characters"] = [
+                str(name).strip() for name in present if str(name).strip()]
+        for key in ("beat", "clothing", "visible", "pose", "expression",
+                    "scene", "camera", "lighting", "nsfw"):
+            value = str(script.get(key) or "").strip()
+            if value:
+                shot[key] = value
+        shots.append(shot)
     if not shots:
         raise ValueError("Model returned no usable tagged shots.")
     return shots
@@ -2752,6 +3503,10 @@ def build_script_messages(premise: str, shots: int, setting: str,
         user.append(character_bible)
     if act_summary:
         user.append("本幕硬性大纲：%s" % act_summary)
+    if phase:
+        user.append("本幕阶段：%s" % phase)
+    if cast_hint:
+        user.append("本批起始 cast 参考：%s（后续以逐镜分镜为准）" % cast_hint)
     if story_state:
         user.append(story_state)
     if strip_appearance:
@@ -2789,6 +3544,11 @@ def build_tag_messages(scripts: list[dict[str, str]], style_positive: str = "",
     user = []
     if character_bible:
         user.append(character_bible)
+    if phase:
+        user.append("本幕阶段：%s" % phase)
+    if cast_hint:
+        user.append("本批起始 cast 参考：%s（逐镜仍以 script 的 cast 为准）"
+                    % cast_hint)
     if story_state:
         user.append(story_state)
     if strip_appearance:
@@ -2860,12 +3620,18 @@ def _generate_long_storyboard(client: OllamaClient, premise: str,
     while len(result) < shots:
         act_index += 1
         act_start = len(result) + 1
-        act_size = min(MAX_ACT_SHOTS, shots - len(result))
-        act_end = act_start + act_size - 1
+        act = _phase_at(spine, act_start) if spine else {}
+        try:
+            act_end = int(act.get("end") or 0)
+        except (TypeError, ValueError):
+            act_end = 0
+        if act_end < act_start or act_end > shots:
+            act_end = min(shots, act_start + MAX_ACT_SHOTS - 1)
+        act_size = max(1, act_end - act_start + 1)
         act_summary = _act_summary(spine, act_start, act_end)
         story_state = _global_story_state(premise, result, profiles)
-        log("Act %d/%d: shots %d-%d (max %d per act)" % (
-            act_index, act_total, act_start, act_end, MAX_ACT_SHOTS))
+        log("Act %d/%d: shots %d-%d" % (
+            act_index, act_total, act_start, act_end))
         outline = plan_storyboard_outline(
             client, options.model, premise, act_size, options.setting,
             chunk=3, timeout=max(options.timeout, 600.0),
@@ -2963,7 +3729,8 @@ def _generate_long_storyboard(client: OllamaClient, premise: str,
                         profiles, states, present, shot["prompt"], details,
                         script=str(shot.get("script") or ""))
                     shot["prompt"] = apply_character_state(
-                        shot["prompt"], profiles, states, present, details)
+                        shot["prompt"], profiles, states, present, details,
+                        preserve_ai_clothing=options.preserve_ai_clothing)
                     worn = set()
                     for profile in present:
                         worn.update(states.get(profile.key) or set())
@@ -2982,8 +3749,20 @@ def _generate_long_storyboard(client: OllamaClient, premise: str,
                     attach_character_prompt_groups(
                         shot, profiles, states, details, present)
                     shot["scene"] = ", ".join(scene_states[state_index])
-                _finalize_shot_prompt(shot, female_clothing)
+                _finalize_shot_prompt(
+                    shot, female_clothing,
+                    preserve_clothing=options.preserve_ai_clothing)
+                shot["preserve_ai_clothing"] = options.preserve_ai_clothing
+            chunk_start = len(result)
             result.extend(part)
+            repair_story_continuity_safe(
+                client, options.model, result,
+                timeout=max(options.timeout, 300.0), log=options.log,
+                start=chunk_start)
+            repair_clothing_sequence_safe(
+                client, options.model, result, profiles,
+                timeout=max(options.timeout, 300.0), log=options.log,
+                start=chunk_start)
             _notify_partial(options, result)
             log("Act %d: +%d shots (%d/%d)" % (act_index, len(part), len(result), shots))
             if not part:
@@ -3121,7 +3900,8 @@ def generate_storyboard(client: OllamaClient, premise: str,
                     profiles, states, present, shot["prompt"], details,
                     script=str(shot.get("script") or ""))
                 shot["prompt"] = apply_character_state(
-                    shot["prompt"], profiles, states, present, details)
+                    shot["prompt"], profiles, states, present, details,
+                    preserve_ai_clothing=options.preserve_ai_clothing)
                 worn = set()
                 for profile in present:
                     worn.update(states.get(profile.key) or set())
@@ -3140,8 +3920,20 @@ def generate_storyboard(client: OllamaClient, premise: str,
                 attach_character_prompt_groups(
                     shot, profiles, states, details, present)
                 shot["scene"] = ", ".join(scene_states[state_index])
-            _finalize_shot_prompt(shot, female_clothing)
+            _finalize_shot_prompt(
+                shot, female_clothing,
+                preserve_clothing=options.preserve_ai_clothing)
+            shot["preserve_ai_clothing"] = options.preserve_ai_clothing
+        chunk_start = len(result)
         result.extend(part)
+        repair_story_continuity_safe(
+            client, options.model, result,
+            timeout=max(options.timeout, 300.0), log=options.log,
+            start=chunk_start)
+        repair_clothing_sequence_safe(
+            client, options.model, result, profiles,
+            timeout=max(options.timeout, 300.0), log=options.log,
+            start=chunk_start)
         _notify_partial(options, result)
         log("Stage B: +%d shots (%d/%d)" % (len(part), len(result), shots))
         if not part:

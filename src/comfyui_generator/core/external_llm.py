@@ -45,13 +45,14 @@ class ExternalLLMClient:
         effective_timeout = float(timeout or getattr(self.cfg, "timeout", 240.0) or 240.0)
         last = ""
         finish = ""
+        token_budget = max(256, min(32768, int(num_predict or 4096)))
         convo = list(messages)
         for attempt in range(max(0, int(retries)) + 1):
             payload = {
                 "model": target,
                 "messages": convo,
                 "temperature": float(temperature),
-                "max_tokens": max(256, min(16384, int(num_predict or 4096))),
+                "max_tokens": token_budget,
                 "stream": False,
             }
             if getattr(self.cfg, "disable_thinking", True):
@@ -108,6 +109,8 @@ class ExternalLLMClient:
             except (ValueError, json.JSONDecodeError):
                 pass
             if attempt < retries:
+                if finish == "length":
+                    token_budget = min(32768, max(8192, token_budget * 2))
                 convo = list(messages)
                 if last.strip():
                     convo += [
