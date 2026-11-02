@@ -28,6 +28,7 @@ from comfyui_generator.core.storyboard import (
     extract_premise_beats,
     filter_locked_appearance,
     normalize_acts,
+    normalize_cast,
     normalize_character_profiles,
     normalize_outline,
     parse_character_profiles,
@@ -1629,6 +1630,14 @@ def test_half_off_tag_is_not_duplicated_on_repeated_finalize():
     prompt = shot["prompt"]
     assert "around thighs around thighs" not in prompt
     assert prompt.count("around thighs") == 1
+
+
+def test_cast_normalization_handles_nonstandard_forms():
+    assert normalize_cast("1girl 1boy", "") == "1girl 1boy"
+    assert normalize_cast("ren yamashiro + 我", "她看着他") == "1girl 1boy"
+    assert normalize_cast("", "我看着她") == "1girl 1boy"
+    assert normalize_cast("", "她独自坐着") == "1girl solo"
+    assert normalize_cast("1boy solo", "") == "1boy solo"
 
 
 def test_outline_output_does_not_require_name_and_keeps_structured_fields():

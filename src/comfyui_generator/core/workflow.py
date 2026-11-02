@@ -205,14 +205,11 @@ def _unweighted_tag(tag: str) -> str:
 
 
 def _drop_full_clothing_when_half_off(positive: str, prompt: str) -> str:
-    half_off_keys = {
-        key for key in (
-            _clothing_key(tag)
-            for tag in str(prompt or "").split(",")
-            if _HALF_OFF_TAG_RE.search(_unweighted_tag(tag)))
-        if key
-    }
-    if not half_off_keys:
+    half_off_states = [
+        tag.strip() for tag in str(prompt or "").split(",")
+        if tag.strip() and _HALF_OFF_TAG_RE.search(_unweighted_tag(tag))
+    ]
+    if not half_off_states:
         return positive
     kept: list[str] = []
     for tag in str(positive or "").split(","):
@@ -220,9 +217,12 @@ def _drop_full_clothing_when_half_off(positive: str, prompt: str) -> str:
         if not value:
             continue
         key = _clothing_key(value)
-        if (key in half_off_keys
-                and not _HALF_OFF_TAG_RE.search(_unweighted_tag(value))):
-            continue
+        plain = _unweighted_tag(value)
+        if key and not _HALF_OFF_TAG_RE.search(plain):
+            if any(_clothing_key(state) == key
+                   and plain and plain in _unweighted_tag(state)
+                   for state in half_off_states):
+                continue
         kept.append(value)
     return ", ".join(kept)
 

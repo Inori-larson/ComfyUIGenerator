@@ -235,7 +235,8 @@ TAG_SYSTEM = (
     "panties aside、bra pull、pantyhose pulled down；不要输出无主语的 torn clothes、"
     "clothing damage、open clothes 来凭空生成新衣服。同时保留原始服装 tag。"
     "不要写死具体衣物种类；任何被保留的服装都用它自己的半脱/破损状态来露，而不是换成另一种衣服。"
-    "已经脱掉的衣物后续不能重新穿上；服装状态只能从完整→半脱/破损→更少，不能倒退。"
+    "已经脱掉的衣物后续不能重新穿上；服装状态只能从完整→半脱/破损→更少，不能倒退；"
+    "破损单品不要同时保留同款完整基础标签。"
     "除非剧情明确进入最后全裸阶段，否则不要写 completely nude。"
     "性行为、前戏、口交、插入、高潮、射精、余韵镜头不能只写动作，必须写出对应体液和交互："
     "口交写 saliva、drool、cum in mouth、cum swallowing；插入写 wet pussy、pussy juice、creampie；"
@@ -375,6 +376,16 @@ ACT_PLAN_SYSTEM = (
     "\"beats\":[\"...\",\"...\"],\"summary\":\"...\",\"cast\":\"...\","
     "\"clothing\":\"...\",\"scene\":\"...\",\"nsfw\":\"...\"}]}，不要解释。\n"
 )
+
+
+def _format_issue_log(title: str, issues: Any) -> str:
+    lines = [title]
+    values = [str(item).strip() for item in (issues or []) if str(item).strip()]
+    for index, value in enumerate(values[:8], 1):
+        lines.append("  %d. %s" % (index, value))
+    if len(values) > 8:
+        lines.append("  ... 另有 %d 条问题" % (len(values) - 8))
+    return "\n".join(lines)
 
 
 def raw_prompt(text: Any) -> str:
@@ -658,6 +669,8 @@ def _story_progress_ledger(shots: list[dict[str, Any]]) -> str:
     stage_rows: list[str] = []
     current: list[str] = []
     recent: list[str] = []
+    previous_tags: list[str] = []
+    run_length = 0
     for shot in shots:
         text = str(shot.get("outline") or shot.get("script")
                    or shot.get("prompt") or "").strip()
@@ -665,8 +678,13 @@ def _story_progress_ledger(shots: list[dict[str, Any]]) -> str:
         for tag in tags:
             counts[tag] = counts.get(tag, 0) + 1
         if tags:
+            run_length = run_length + 1 if tags == previous_tags else 1
+            previous_tags = tags
             current = tags
             stage_rows.append("%s:%s" % (shot.get("id", ""), "+".join(tags)))
+        else:
+            run_length = 0
+            previous_tags = []
         recent.append("%s %s" % (shot.get("id", ""), text[:80]))
     completed = "、".join(
         "%s×%d" % (name, counts[name]) for name, _ in _STORY_STAGE_PATTERNS
@@ -676,6 +694,10 @@ def _story_progress_ledger(shots: list[dict[str, Any]]) -> str:
         loop_guard = (
             "当前已进入整理/事后阶段：下一镜禁止重新脱衣、自慰或前戏；"
             "必须推进到新事件、时间跳跃或换大环境。")
+    if run_length >= 15:
+        loop_guard += (
+            "当前阶段已连续 %d 镜，下一镜必须推进到新事件或压缩该阶段，"
+            "不能继续原地换词。" % run_length)
     return (
         "剧情进度账本：已完成阶段=%s；当前阶段=%s；最近阶段=%s；最近镜头=%s。"
         "%s续写规则：只能从当前阶段向前推进；不得无理由重复已完成的初遇/自慰/前戏/"
@@ -939,6 +961,31 @@ def _initial_clothing_tags(premise: str) -> list[str]:
         raw = parts[1] if len(parts) == 2 else line
         return [tag.strip() for tag in re.split(r"[,，、]", raw) if tag.strip()]
     return []
+
+
+def normalize_cast(cast: str, script: str = "") -> str:
+    value = str(cast or "").strip()
+    text = "%s %s" % (value, str(script or ""))
+    low = text.lower()
+    boy = bool(re.search(
+        r"(?:1boy|2boys|男主|男性|男人|我|你)", text, re.I))
+    many_girls = bool(re.search(
+        r"(?:2girls|multiple girls|two girls|两个女|两名女)", text, re.I))
+    cast_without_boy = re.sub(
+        r"(?:1boy|2boys|男主|男性|男人|我|你|solo|\+)", "", value,
+        flags=re.I).strip()
+    girl = bool(re.search(
+        r"(?:1girl|2girls|女主|女性|女孩|她)", text, re.I)) or bool(
+        cast_without_boy)
+    if many_girls:
+        return "2girls" + (" 1boy" if boy else "")
+    if boy and girl:
+        return "1girl 1boy"
+    if boy:
+        return "1boy solo"
+    if girl:
+        return "1girl solo"
+    return value
 
 
 def _clothing_key(tag: str) -> str:
@@ -2486,6 +2533,7 @@ def _clothing_validation_messages(previous_prompt: str,
             "半脱/拨开/破损状态无理由恢复完整、"
             "已脱下的服装无理由重新出现、"
             "没有剧本依据的新服装、"
+            "破损单品同时保留完整基础标签、"
             "全裸/半裸标签与服装标签互相矛盾。"
             "如果某镜 prompt 没有服装连续性问题，valid=true，"
             "不要返回 prompt，以减少输出长度。"
@@ -2550,9 +2598,9 @@ def repair_clothing_sequence_ai(client: Any, model: str,
                     shot["prompt"] = fixed
                     if log:
                         issues = item.get("issues") or []
-                        log("服装连续性已由 AI 修正 shot %s: %s" % (
-                            shot.get("id", ""),
-                            "；".join(str(x) for x in issues)[:300]))
+                        log(_format_issue_log(
+                            "服装连续性已修正 shot %s" % shot.get("id", ""),
+                            issues))
                 state = str(item.get("clothing_state") or "").strip()
                 if state:
                     shot["clothing_state"] = state
@@ -2578,6 +2626,7 @@ _STORY_VALIDATION_SCHEMA: dict[str, Any] = {
                         "type": "array",
                         "items": {"type": "string"},
                     },
+                    "cast": {"type": "string"},
                     "script": {"type": "string"},
                     "prompt": {"type": "string"},
                     "beat": {"type": "string"},
@@ -2615,7 +2664,10 @@ def _story_validation_messages(history: list[dict[str, Any]],
             "是否连续多镜只有轻微换词但剧情没有前进；"
             "动作姿势是否与上一镜物理不连贯（躺着突然站起、背对突然正对等）；"
             "场景、时间、光线是否无过渡跳变；"
-            "连续镜头是否机位/构图只是重复换词。"
+            "连续镜头是否机位/构图只是重复换词；"
+            "cast 与 prompt 人数是否一致：cast 有 1boy 时 prompt 必须有男性在场，"
+            "或明确写 male body out of frame；若男性完全不在场，cast 改成 1girl solo；"
+            "同一阶段连续超过 15-20 镜仍未推进时，要求压缩或推进到下一阶段。"
             "如果某镜有效，valid=true，不要返回 script 和 prompt，以减少输出长度。"
             "如果某镜重复、回退或衔接失败，valid=false，在 issues 写清问题，"
             "并重写该镜 script 和 prompt：保留角色、场景、服装、动作风格和 NSFW 强度，"
@@ -2670,6 +2722,9 @@ def repair_story_continuity_ai(client: Any, model: str,
                     continue
                 script = str(item.get("script") or "").strip()
                 prompt = raw_prompt(item.get("prompt") or "")
+                cast = str(item.get("cast") or "").strip()
+                if cast:
+                    shot["cast"] = normalize_cast(cast, script or shot.get("script", ""))
                 if script:
                     shot["script"] = script
                     shot["outline"] = script
@@ -2681,9 +2736,9 @@ def repair_story_continuity_ai(client: Any, model: str,
                         shot[key] = value
                 if log:
                     issues = item.get("issues") or []
-                    log("剧情连续性已由 AI 修正 shot %s: %s" % (
-                        shot.get("id", ""),
-                        "；".join(str(x) for x in issues)[:300]))
+                    log(_format_issue_log(
+                        "剧情连续性已修正 shot %s" % shot.get("id", ""),
+                        issues))
         except Exception as exc:
             if log:
                 log("AI 剧情连续性校验失败，保留原内容: %s" % exc)
@@ -2978,7 +3033,7 @@ def normalize_outline(raw: dict[str, Any] | list[Any], wanted: int,
             counter += 1
         used.add(name.lower())
         hinted = str(item.get("cast") or "").strip()
-        cast = forced_cast or hinted
+        cast = normalize_cast(forced_cast or hinted, text)
         shot = {"id": number, "name": name, "cast": cast, "outline": text}
         present = item.get("present_characters")
         if isinstance(present, list):
@@ -3169,7 +3224,7 @@ def normalize_acts(raw: dict[str, Any] | list[Any], total: int,
         cleaned.append({
             "title": str(item.get("title") or "第%d幕" % (index + 1)).strip(),
             "summary": summary,
-            "cast": str(item.get("cast") or "").strip(),
+            "cast": normalize_cast(str(item.get("cast") or ""), summary),
             "clothing": str(item.get("clothing") or "").strip(),
             "scene": str(item.get("scene") or "").strip(),
             "nsfw": str(item.get("nsfw") or "").strip(),
@@ -3426,7 +3481,7 @@ def normalize_scripts(raw: dict[str, Any] | list[Any], wanted: int,
             "id": number,
             "name": name,
             "script": script,
-            "cast": str(item.get("cast") or "").strip(),
+            "cast": normalize_cast(str(item.get("cast") or ""), script),
             "outline": "",
         }
         present = item.get("present_characters")
@@ -3466,7 +3521,8 @@ def normalize_tagged(raw: dict[str, Any] | list[Any],
             "name": script["name"],
             "prompt": prompt,
             "script": script["script"],
-            "cast": script.get("cast", ""),
+            "cast": normalize_cast(
+                script.get("cast", ""), script.get("script", "")),
             "phase": script.get("phase", ""),
             "outline": script.get("outline") or script["script"],
         }

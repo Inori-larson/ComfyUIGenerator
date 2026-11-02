@@ -162,6 +162,18 @@ def test_compose_prompts_drops_full_legwear_when_prompt_has_half_off(cfg):
     assert "(panties:1.2)" in tags
 
 
+def test_compose_prompts_keeps_colored_base_for_generic_half_off_state(cfg):
+    positive, _ = compose_prompts(cfg, {
+        "prompt": "1girl, solo, black bra, bra strap pulled down, "
+                  "black lace panties, panties aside",
+    })
+    tags = [tag.strip() for tag in positive.split(",")]
+    assert "black bra" in tags
+    assert "black lace panties" in tags
+    assert "bra strap pulled down" in tags
+    assert "panties aside" in tags
+
+
 def test_compose_prompts_boosts_all_clothing_tags(cfg):
     positive, _ = compose_prompts(cfg, {
         "prompt": "1girl, solo, beach",
