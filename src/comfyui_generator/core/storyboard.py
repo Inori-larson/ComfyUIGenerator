@@ -203,6 +203,10 @@ SCRIPT_SYSTEM = (
     "服装有层级：外衣在胸罩外，裤袜在内裤外；外层仍穿着时，手可以从外衣下伸入摸胸，"
     "或从裤袜腰口伸进内裤摸阴部；必须写清是隔着内裤/裤袜，还是手指已进入内层直接接触，"
     "并保留外衣、胸罩、裤袜、内裤的基础穿着状态；"
+    "外衣没有脱掉、打开、解开、掀起之前，不能写可见的胸罩、乳房、内裤、"
+    "拨开内裤等内衣状态；只能写外衣下的隐藏动作，等外衣明确打开或脱下后再露内衣；"
+    "如果外层明确是薄纱/透明/半透明，可以透过外层看到内层，但要写清是隔着外层可见，"
+    "不能把内衣写到外层外面；"
     "男主始终无服装、无脸、裸体，不写男主的衬衫、裤装、制服、外套、鞋、内衣等穿着；"
     "男主镜头优先近景、上半身或局部，只有动作确实需要时才写全身；"
     "script 里出现男主服装描述时视为错误，不要沿用，也不要让男主重新穿衣。"
@@ -279,7 +283,13 @@ TAG_SYSTEM = (
     "hand inside bra、hand inside pantyhose、hand inside panties；这只是层内动作，"
     "不等于外层半脱，不能因此删除 uniform/shirt/bra/pantyhose/panties 的基础穿着标签。"
     "隔着内裤/裤袜时写 rubbing through panties/pantyhose，直接接触才写 "
-    "fingers on labia/fingers on clitoris。\n"
+    "fingers on labia/fingers on clitoris。"
+    "外衣没有 removed/open/unbuttoned/lifted 时，禁止在 prompt 中出现可见的 "
+    "black bra、bra strap visible、one breast out、black lace panties、panties aside；"
+    "内衣只能保持隐藏，等外衣明确打开、掀起或脱掉后再出现。"
+    "如果外层是 sheer/transparent/see-through 的衬衣或裤袜，允许用 "
+    "bra visible through shirt、panties visible through pantyhose、sheer pantyhose "
+    "表现半透明下层，但不能写成 bra outside clothes 或 panties over pantyhose。\n"
     "4. 必须按 script 的 cast 写清人数与性别：单人 1girl, solo；女主+我 1girl, 1boy；"
     "每个镜头最多一个男性，永远禁止 2boys、multiple boys、extra boy、second male。"
     "女性默认 1girl, solo；只有用户明确输入两个女性角色时才允许 2girls 或 multiple girls，"
@@ -3022,6 +3032,152 @@ _BREAST_LAYER_RE = re.compile(
     r"[^。；;]{0,20}(?:胸|乳房|breast)", re.I)
 
 
+_UPPER_OUTERWEAR_KEYS = {
+    "uniform", "shirt", "jacket", "coat", "blouse", "sweater", "dress",
+    "leotard", "bodysuit",
+}
+_LOWER_OUTERWEAR_KEYS = {
+    "uniform", "skirt", "pants", "trousers", "shorts", "jeans", "dress",
+    "pantyhose", "stockings", "thighhigh", "legwear",
+}
+_OUTERWEAR_KEYS = _UPPER_OUTERWEAR_KEYS | _LOWER_OUTERWEAR_KEYS
+_SHEER_RE = re.compile(
+    r"\b(?:sheer|transparent|see[- ]through|translucent|thin|mesh)\b|"
+    r"薄|透明|半透明|薄纱|网纱", re.I)
+_UPPER_SHEER_RE = re.compile(
+    r"(?:薄|透明|半透明|sheer|transparent|see[- ]through|thin).{0,14}"
+    r"(?:衬衣|上衣|制服|衬衫|shirt|blouse|uniform|sweater)|"
+    r"(?:衬衣|上衣|制服|衬衫|shirt|blouse|uniform|sweater).{0,14}"
+    r"(?:薄|透明|半透明|sheer|transparent|see[- ]through|thin)", re.I)
+_LOWER_SHEER_RE = re.compile(
+    r"(?:薄|透明|半透明|sheer|transparent|see[- ]through|thin).{0,14}"
+    r"(?:裤袜|丝袜|pantyhose|stockings)|"
+    r"(?:裤袜|丝袜|pantyhose|stockings).{0,14}"
+    r"(?:薄|透明|半透明|sheer|transparent|see[- ]through|thin)", re.I)
+_OUTER_OPEN_RE = re.compile(
+    r"\b(?:open(?:ed)?|unbuttoned|unzipped|lifted|raised|hanging|removed|"
+    r"taken off|pulled (?:up|down|aside)|around (?:waist|thighs|knees)|"
+    r"off[- ]shoulder|sliding off|on (?:the )?(?:floor|sofa|cushion|chair|bed))",
+    re.I)
+_HAND_LAYER_RE = re.compile(
+    r"\b(?:hand|fingers?|finger)\s+(?:inside|under|in)\b", re.I)
+
+
+def ensure_clothing_layers(shots: list[dict[str, Any]]) -> None:
+    for shot in shots:
+        if not isinstance(shot, dict):
+            continue
+        tags = [tag.strip() for tag in str(shot.get("prompt") or "").split(",")
+                if tag.strip()]
+        keys = {_clothing_key(_tag_weight_key(tag)[0]) for tag in tags}
+        active_outer = any(
+            key in _OUTERWEAR_KEYS
+            and any(_clothing_key(_tag_weight_key(tag)[0]) == key
+                    and not _is_off_body_tag(tag) for tag in tags)
+            for key in keys)
+        additions = []
+        low = ", ".join(tag.lower() for tag in tags)
+        active_bra = any(
+            _clothing_key(_tag_weight_key(tag)[0]) == "bra"
+            and not _is_off_body_tag(tag) for tag in tags)
+        active_panties = any(
+            _clothing_key(_tag_weight_key(tag)[0]) == "panties"
+            and not _is_off_body_tag(tag) for tag in tags)
+        active_pantyhose = any(
+            _clothing_key(_tag_weight_key(tag)[0]) == "pantyhose"
+            and not _is_off_body_tag(tag) for tag in tags)
+        narrative = _shot_narrative_text(shot)
+        upper_sheer = any(
+            _SHEER_RE.search(tag)
+            and _clothing_key(_tag_weight_key(tag)[0])
+            in _UPPER_OUTERWEAR_KEYS for tag in tags) or bool(
+                _UPPER_SHEER_RE.search(narrative))
+        lower_sheer = any(
+            _SHEER_RE.search(tag)
+            and _clothing_key(_tag_weight_key(tag)[0])
+            in _LOWER_OUTERWEAR_KEYS for tag in tags) or bool(
+                _LOWER_SHEER_RE.search(narrative))
+        if active_outer and active_bra:
+            if upper_sheer:
+                if "bra visible through shirt" not in low:
+                    additions.append("bra visible through shirt")
+            elif "bra under clothes" not in low:
+                additions.append("bra under clothes")
+                if "uniform" in keys:
+                    additions.append("bra under uniform")
+                elif "shirt" in keys:
+                    additions.append("bra under shirt")
+        if active_panties and active_pantyhose:
+            if lower_sheer:
+                if "panties visible through pantyhose" not in low:
+                    additions.append("panties visible through pantyhose")
+                if "sheer pantyhose" not in low:
+                    additions.append("sheer pantyhose")
+            elif "panties under pantyhose" not in low:
+                additions.append("panties under pantyhose")
+        if additions:
+            shot["prompt"] = ", ".join(tags + additions)
+            trace_event("prompt.clothing_layers", {
+                "id": str(shot.get("id") or ""),
+                "added": additions,
+            })
+
+
+def ensure_outerwear_occlusion(shots: list[dict[str, Any]]) -> None:
+    for shot in shots:
+        if not isinstance(shot, dict):
+            continue
+        tags = [tag.strip() for tag in str(shot.get("prompt") or "").split(",")
+                if tag.strip()]
+        upper_active = any(
+            _clothing_key(_tag_weight_key(tag)[0]) in _UPPER_OUTERWEAR_KEYS
+            and not _is_off_body_tag(tag) for tag in tags)
+        lower_active = any(
+            _clothing_key(_tag_weight_key(tag)[0]) in _LOWER_OUTERWEAR_KEYS
+            and not _is_off_body_tag(tag) for tag in tags)
+        upper_open = any(
+            _OUTER_OPEN_RE.search(tag)
+            and (_clothing_key(_tag_weight_key(tag)[0])
+                 in _UPPER_OUTERWEAR_KEYS)
+            for tag in tags)
+        lower_open = any(
+            _OUTER_OPEN_RE.search(tag)
+            and (_clothing_key(_tag_weight_key(tag)[0])
+                 in _LOWER_OUTERWEAR_KEYS)
+            for tag in tags)
+        narrative = _shot_narrative_text(shot)
+        upper_sheer = any(
+            _SHEER_RE.search(tag)
+            and _clothing_key(_tag_weight_key(tag)[0])
+            in _UPPER_OUTERWEAR_KEYS for tag in tags) or bool(
+                _UPPER_SHEER_RE.search(narrative))
+        lower_sheer = any(
+            _SHEER_RE.search(tag)
+            and _clothing_key(_tag_weight_key(tag)[0])
+            in _LOWER_OUTERWEAR_KEYS for tag in tags) or bool(
+                _LOWER_SHEER_RE.search(narrative))
+        removed: list[str] = []
+        kept: list[str] = []
+        for tag in tags:
+            key = _clothing_key(_tag_weight_key(tag)[0])
+            low = tag.lower()
+            hide_bra = (upper_active and not upper_open and not upper_sheer
+                        and (key == "bra" or "one breast out" in low
+                             or "breast slip" in low or "nipples" in low))
+            hide_panties = (lower_active and not lower_open and not lower_sheer
+                            and key == "panties")
+            if (hide_bra or hide_panties) and not _HAND_LAYER_RE.search(tag):
+                removed.append(tag)
+                continue
+            kept.append(tag)
+        if removed:
+            shot["prompt"] = ", ".join(kept)
+            trace_event("prompt.outerwear_occlusion", {
+                "id": str(shot.get("id") or ""),
+                "removed": removed,
+            })
+
+
 def ensure_layered_breast_contact(shots: list[dict[str, Any]]) -> None:
     for shot in shots:
         if not isinstance(shot, dict):
@@ -3189,6 +3345,8 @@ def finalize_generated_story(shots: list[dict[str, Any]], premise: str,
     sync_clothing_state_to_prompt(shots, profiles)
     enforce_weighted_core(shots, profiles)
     enforce_final_wardrobe(shots, profiles)
+    ensure_clothing_layers(shots)
+    ensure_outerwear_occlusion(shots)
     ensure_layered_masturbation(shots)
     ensure_layered_breast_contact(shots)
     enforce_premise_masturbation_layers(shots, premise)

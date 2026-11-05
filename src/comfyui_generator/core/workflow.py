@@ -665,6 +665,11 @@ _MALE_FACE_NEGATIVE = (
     "sharp male face, male face focus, handsome male, male facial features, "
     "beard, necktie"
 )
+_LAYER_NEGATIVE = (
+    "bra over clothes, bra outside clothes, bra on top of clothes, "
+    "bra over uniform, bra over shirt, underwear over clothes, "
+    "panties over pantyhose"
+)
 _MALE_CLOTHING_NEGATIVE = (
     "male clothes, clothed male, male wearing clothes, male in clothes, "
     "male shirt, male pants, male jeans, male underwear, male uniform, "
@@ -1132,6 +1137,7 @@ def compose_prompts(cfg: dict[str, Any], shot: dict[str, Any]) -> tuple[str, str
     if state_text and not any(
             word in state_text for word in _DAMAGE_SCRIPT_WORDS):
         negative = join_tags(negative, _DAMAGE_NEGATIVE)
+    negative = join_tags(negative, _LAYER_NEGATIVE)
     positive = sanitize_render_prompt(positive)
     return _apply_uncensored(positive, negative)
 

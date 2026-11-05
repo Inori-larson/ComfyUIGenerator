@@ -20,9 +20,11 @@ from comfyui_generator.core.storyboard import (
     enforce_final_wardrobe,
     enforce_weighted_core,
     enforce_premise_masturbation_layers,
+    ensure_clothing_layers,
     ensure_final_afterglow,
     ensure_layered_breast_contact,
     ensure_layered_masturbation,
+    ensure_outerwear_occlusion,
     wardrobe_weight_policy,
     stabilize_clothing_sequence,
     repair_clothing_sequence,
@@ -2208,6 +2210,67 @@ def test_layer_action_keeps_base_clothing_when_hand_is_inside():
                 "hand inside panties", "hand inside pantyhose",
                 "fingers on labia"):
         assert tag in result
+
+
+def test_outerwear_closed_hides_innerwear_but_keeps_hand_action():
+    shots = [{
+        "id": "01",
+        "prompt": ("1girl, military uniform, military skirt, black bra, "
+                   "black lace panties, black pantyhose, hand under clothes, "
+                   "hand inside bra, hand inside panties, fingers on labia"),
+    }]
+    ensure_outerwear_occlusion(shots)
+    prompt = shots[0]["prompt"]
+    assert "black bra" not in prompt
+    assert "black lace panties" not in prompt
+    assert "hand under clothes" in prompt
+    assert "hand inside bra" in prompt
+    assert "hand inside panties" in prompt
+
+
+def test_outerwear_open_allows_innerwear_visibility():
+    shots = [{
+        "id": "10",
+        "prompt": ("1girl, military uniform, military skirt, open shirt, "
+                   "black bra, black lace panties"),
+    }]
+    ensure_outerwear_occlusion(shots)
+    assert "black bra" in shots[0]["prompt"]
+    assert "black lace panties" not in shots[0]["prompt"]
+    open_skirt = [{
+        "id": "11",
+        "prompt": ("1girl, military uniform, military skirt, skirt lifted, "
+                   "black bra, black lace panties"),
+    }]
+    ensure_outerwear_occlusion(open_skirt)
+    assert "black lace panties" in open_skirt[0]["prompt"]
+
+
+def test_sheer_blouse_allows_bra_visible_through_layer():
+    shots = [{
+        "id": "12",
+        "prompt": "1girl, sheer blouse, black bra, black lace panties",
+    }]
+    ensure_clothing_layers(shots)
+    prompt = shots[0]["prompt"]
+    assert "bra visible through shirt" in prompt
+    ensure_outerwear_occlusion(shots)
+    assert "black bra" in shots[0]["prompt"]
+    assert "bra visible through shirt" in shots[0]["prompt"]
+
+
+def test_sheer_pantyhose_shows_panties_underneath():
+    shots = [{
+        "id": "06",
+        "prompt": ("1girl, military skirt, sheer pantyhose, "
+                   "black lace panties"),
+    }]
+    ensure_clothing_layers(shots)
+    prompt = shots[0]["prompt"]
+    assert "panties visible through pantyhose" in prompt
+    assert "sheer pantyhose" in prompt
+    ensure_outerwear_occlusion(shots)
+    assert "black lace panties" in shots[0]["prompt"]
 
 
 def test_layered_breast_contact_adds_under_outerwear_tags():
