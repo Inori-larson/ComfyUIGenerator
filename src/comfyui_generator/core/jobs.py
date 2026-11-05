@@ -17,6 +17,7 @@ from comfyui_generator.core.pose import (
     generate_pose_skeleton, pose_preset_for_shot, pose_should_apply,
 )
 from comfyui_generator.core.preview import PreviewFrame
+from comfyui_generator.core.trace import trace_event
 from comfyui_generator.core.workflow import (
     build_workflow,
     compose_prompts,
@@ -73,6 +74,7 @@ def build_tasks(cfg: dict[str, Any], shots: list[dict[str, Any]], variants: int,
     tasks: list[Task] = []
     variants = max(1, int(variants))
     expansions = max(0, int(expansions))
+    task_counter = 0
     for index, shot in enumerate(shots):
         label = "%s_%s" % (shot.get("id", index), shot.get("name", "shot"))
         next_shot = shots[index + 1] if index + 1 < len(shots) else None
@@ -87,8 +89,9 @@ def build_tasks(cfg: dict[str, Any], shots: list[dict[str, Any]], variants: int,
             elif seed_mode == "random":
                 seed = random.randint(0, 2 ** 31 - 1)
             else:
-                seed = int(base_seed) + shot_counter
+                seed = int(base_seed) + task_counter
             shot_counter += 1
+            task_counter += 1
             suffix = label + (("_v%02d" % (variant + 1)) if variants > 1 else "")
             keyframe_shot = shot
             if str(shot.get("keyframe_prompt") or "").strip():
@@ -108,9 +111,10 @@ def build_tasks(cfg: dict[str, Any], shots: list[dict[str, Any]], variants: int,
                 elif shot.get("seed") is not None:
                     expand_seed = int(shot["seed"]) + shot_counter
                     shot_counter += 1
+                    task_counter += 1
                 else:
-                    expand_seed = int(base_seed) + shot_counter
-                    shot_counter += 1
+                    expand_seed = int(base_seed) + task_counter
+                    task_counter += 1
                 expanded = dict(shot)
                 expanded["id"] = "%s_e%02d" % (shot.get("id", ""), step)
                 expanded["name"] = "%s_expand_%02d" % (
@@ -297,8 +301,6 @@ class TaskRunner:
         else:
             denoise = max(base, 0.65) + 0.20 * progress
             limit = 0.85
-        if str(task.shot.get("phase") or "") == "sex":
-            denoise += 0.02
         return max(0.15, min(limit, denoise))
 
     def _chain_image(self, client: ComfyClient, task: Task) -> str:
@@ -451,8 +453,17 @@ class TaskRunner:
                 self.hires if hires is None else hires, prefix)
         except Exception as exc:
             task.error = "Workflow error: %s" % exc
+            trace_event("render.workflow_error", {
+                "label": task.label, "seed": task.seed, "error": repr(exc),
+            })
             self.log("Task %s failed: %s" % (task.label, exc))
             return None
+        trace_event("render.workflow", {
+            "label": task.label,
+            "shot_id": task.shot_id,
+            "seed": task.seed,
+            "workflow": workflow,
+        })
         self._set_state(task, "submitted", stage=stage, step=0, total=0)
         try:
             prompt_id = self.client.queue_prompt(workflow)
@@ -546,20 +557,42 @@ class TaskRunner:
         if task.kind != "expand" and is_double_shot(shot):
             self._attach_pose(task, shot, ("girl", "boy"))
         positive, negative = compose_prompts(self.cfg, shot)
-        self.log("Task %s effective positive: %s" % (task.label, positive))
-        self.log("Task %s effective negative: %s" % (task.label, negative))
+        trace_event("render.prompt", {
+            "label": task.label,
+            "shot_id": task.shot_id,
+            "seed": task.seed,
+            "positive": positive,
+            "negative": negative,
+            "shot": shot,
+        })
+        self.log("Task %s prompt ready (%d/%d chars)" % (
+            task.label, len(positive), len(negative)))
         image = self._execute_workflow(
             task, shot, positive, negative, prefix, stage="base")
+        if (not image and not self._cancel.is_set()
+                and task.error and "Timed out" not in task.error):
+            self.log("Task %s retrying once after workflow error" % task.label)
+            task.error = ""
+            image = self._execute_workflow(
+                task, shot, positive, negative, prefix, stage="base")
         if self._cancel.is_set():
             return
         if image:
             self._set_state(task, "done", image=image, stage="",
                             step=task.total or task.step)
+            trace_event("render.done", {
+                "label": task.label, "shot_id": task.shot_id,
+                "seed": task.seed, "image": image,
+            })
             self.log("Task %s done: %s" % (task.label, image))
             return
-        self._set_state(task, "failed", error=task.error or "ComfyUI returned no image")
-        self.log("Task %s failed: %s" % (
-            task.label, task.error or "ComfyUI returned no image"))
+        error = task.error or "ComfyUI returned no image"
+        self._set_state(task, "failed", error=error)
+        trace_event("render.failed", {
+            "label": task.label, "shot_id": task.shot_id,
+            "seed": task.seed, "error": error,
+        })
+        self.log("Task %s failed: %s" % (task.label, error))
 
 
 def _saved_images(entry: dict[str, Any]) -> list[str]:

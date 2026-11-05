@@ -1,0 +1,48 @@
+{
+  "loader": "checkpoint",
+  "model": "NoobAI-XL\\noobaiXLNAIXL_epsilonPred11Version.safetensors",
+  "clip_skip": -2,
+  "v_prediction": false,
+  "server": "http://127.0.0.1:8000",
+  "prefix": "anime_story/yixuan",
+  "loras": [
+    {
+      "name": "角色\\绝区零\\仪玄\\Char-ZZZ-Yixuan-V2-IL.safetensors",
+      "strength": 0.9
+    }
+  ],
+  "character": {
+    "name": "仪玄",
+    "tags": "yixuan \\(zenless zone zero\\), solo, hairclip, halter shirt, yellow cropped jacket, black high-waist shorts, single fingerless glove, single elbow glove, armlet, black single thighhigh, thigh strap, platform boots",
+    "use_ipadapter": false
+  },
+  "style": {
+    "positive": "masterpiece, best quality, newest, absurdres, highres, very aesthetic, ultra-detailed, extremely detailed, sharp focus, official art, beautiful detailed eyes, beautiful detailed face, volumetric lighting",
+    "negative": "worst quality, old, early, low quality, lowres, signature, username, logo, bad hands, mutated hands, mammal, anthro, furry, ambiguous form, feral, semi-anthro"
+  },
+  "settings": {
+    "width": 832,
+    "height": 1216,
+    "steps": 30,
+    "cfg": 5.5,
+    "sampler": "euler",
+    "scheduler": "normal",
+    "seed_mode": "increment",
+    "base_seed": 934787951,
+    "hires": {
+      "enabled": true,
+      "scale": 1.5,
+      "steps": 20,
+      "denoise": 0.35,
+      "upscale_model": "RealESRGAN_x4plus_anime_6B.pth",
+      "model_scale": 4.0
+    }
+  },
+  "variants": 1,
+  "wildcards": {
+    "enabled": false,
+    "dir": ""
+  },
+  "detailers": [],
+  "shots": []
+}

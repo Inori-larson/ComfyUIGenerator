@@ -14,7 +14,9 @@ from typing import Any
 from comfyui_generator.core.continuity import (
     continuity_negative, continuity_positive, strip_shot_grammar,
 )
-from comfyui_generator.core.storyboard import _clothing_key
+from comfyui_generator.core.storyboard import (
+    _clothing_key, _drop_male_visibility_conflicts, sanitize_render_prompt,
+)
 from comfyui_generator.core.style_profile import apply_style_profile
 
 
@@ -658,18 +660,16 @@ _MALE_HEAD_NEGATIVE = (
     "male face, male head, man's face, masculine face, full male body, "
     "second person, extra person"
 )
-_MALE_NUDE_POLICY = (
-    "1boy, nude male, faceless male, male head out of frame, "
-    "male face out of frame, male body"
-)
 _MALE_FACE_NEGATIVE = (
-    "detailed male face, sharp male face, male face focus, handsome male, "
-    "male facial features, beard, necktie"
+    "male face, male head, male eyes, male portrait, detailed male face, "
+    "sharp male face, male face focus, handsome male, male facial features, "
+    "beard, necktie"
 )
 _MALE_CLOTHING_NEGATIVE = (
     "male clothes, clothed male, male wearing clothes, male in clothes, "
     "male shirt, male pants, male jeans, male underwear, male uniform, "
-    "male vest, male dress, male skirt, male in female clothes, "
+    "male vest, male dress, male skirt, male shirt, male pants, male shoes, "
+    "male boots, male socks, male in female clothes, "
     "male wearing female clothes, male with shirt, male with vest"
 )
 _MALE_FEMININE_NEGATIVE = (
@@ -685,6 +685,7 @@ _MALE_CLOTHING_REMOVE = (
     "boxers", "briefs", "necktie", "male underwear", "male shirt",
     "male pants", "open fly", "unzipped pants", "zipper", "belt buckle",
     "unbuckling belt", "hands on belt", "belt undone", "open belt", "belt",
+    "shoes", "boots", "sneakers", "loafers", "socks",
     "undressing another", "hand on clothes", "hands on clothes",
     "pulling clothes", "male undressing", "male dressing",
 )
@@ -692,13 +693,52 @@ _MALE_CLOTHING_REMOVE = (
 
 def _strip_male_clothing(text: str, keep: str = "") -> str:
     tags = [tag.strip() for tag in str(text or "").split(",") if tag.strip()]
+    keep_tags = {
+        _unweighted_tag(tag) for tag in str(keep or "").split(",") if tag.strip()}
     kept: list[str] = []
     for tag in tags:
-        if (_contains_any(tag, _MALE_CLOTHING_REMOVE)
-                and not _contains_any(keep, (tag,))):
+        low = _unweighted_tag(tag)
+        if _contains_any(tag, _MALE_CLOTHING_REMOVE):
+            if keep_tags and low in keep_tags:
+                kept.append(tag)
             continue
         kept.append(tag)
     return ", ".join(kept)
+
+
+_FULL_BODY_TAGS = {
+    "full body", "full-body", "full_body", "wide shot", "long shot",
+    "from head to toe", "head to toe",
+}
+
+
+def _requires_full_body(shot: dict[str, Any]) -> bool:
+    text = " ".join((
+        str(shot.get("beat") or ""),
+        str(shot.get("script") or ""),
+        str(shot.get("outline") or ""),
+    ))
+    return bool(re.search(r"全身|从头到脚|full body|wide shot|long shot|head to toe",
+                          text, re.I))
+
+
+def _drop_unneeded_full_body(positive: str, shot: dict[str, Any]) -> str:
+    if _requires_full_body(shot):
+        return positive
+    return ", ".join(
+        tag.strip() for tag in str(positive or "").split(",")
+        if tag.strip() and _unweighted_tag(tag.strip()) not in _FULL_BODY_TAGS)
+
+
+def _female_clothing_context(shot: dict[str, Any]) -> str:
+    parts = [str(shot.get("clothing") or "")]
+    for key, value in (shot.get("character_states") or {}).items():
+        if str(key).lower() in ("char_01", "girl", "female"):
+            parts.append(str(value or ""))
+    for key, value in (shot.get("clothing_details") or {}).items():
+        if str(key).lower() in ("char_01", "girl", "female"):
+            parts.append(str(value or ""))
+    return ", ".join(part for part in parts if part.strip())
 
 
 _FUTA_NEGATIVE = ", ".join(_FUTA_WORDS)
@@ -972,6 +1012,7 @@ def compose_pass_prompts(cfg: dict[str, Any], shot: dict[str, Any],
         _gender_negative(gender, text),
         continuity_negative(cfg.get("continuity")),
     )
+    positive = sanitize_render_prompt(positive)
     return _apply_uncensored(positive, negative)
 
 
@@ -1051,14 +1092,19 @@ def compose_prompts(cfg: dict[str, Any], shot: dict[str, Any]) -> tuple[str, str
     if not allow_two_females:
         negative = join_tags(negative, _NO_EXTRA_FEMALE)
     if is_double_shot(shot):
-        positive = join_tags(
-            _MALE_NUDE_POLICY,
-            _strip_male_clothing(positive, str(shot.get("clothing") or "")))
+        negative = join_tags(
+            negative, _FUTA_NEGATIVE, _MALE_FEMININE_NEGATIVE,
+            _MALE_DUPLICATE_NEGATIVE)
+        positive = _strip_male_clothing(
+            positive, _female_clothing_context(shot))
+        positive = join_tags(positive, "nude male, faceless male")
+        positive = _drop_male_visibility_conflicts(
+            [tag.strip() for tag in positive.split(",") if tag.strip()])
+        positive = ", ".join(positive)
         positive = _without_orphan_male_parts(positive)
         negative = join_tags(
-            negative, _FUTA_NEGATIVE, _MALE_FACE_NEGATIVE,
-            _MALE_CLOTHING_NEGATIVE, _MALE_FEMININE_NEGATIVE,
-            _MALE_DUPLICATE_NEGATIVE)
+            negative, _MALE_CLOTHING_NEGATIVE, _MALE_FACE_NEGATIVE)
+        positive = _drop_unneeded_full_body(positive, shot)
     prompt_text = str(prompt or "")
     if re.search(
             r"(?:pantyhose|stockings|thighhigh|legwear).{0,30}"
@@ -1070,10 +1116,23 @@ def compose_prompts(cfg: dict[str, Any], shot: dict[str, Any]) -> tuple[str, str
             r"(?:around one leg|one leg out|one leg removed)",
             prompt_text, re.I):
         negative = join_tags(negative, _ONE_LEG_LEGWEAR_NEGATIVE)
+    if (re.search(r"\bpanties\b", prompt_text, re.I)
+            and re.search(
+                r"(?:pantyhose|stockings|thighhigh|legwear)", prompt_text,
+                re.I)):
+        negative = join_tags(
+            negative, "two panties, second panties, extra panties, "
+                      "panties around ankle")
     script_text = str(shot.get("script") or "").lower()
-    if script_text and not any(
-            word in script_text for word in _DAMAGE_SCRIPT_WORDS):
+    details_text = " ".join(
+        str(value) for value in (shot.get("clothing_details") or {}).values())
+    state_text = " ".join((
+        prompt_text.lower(), script_text,
+        str(shot.get("clothing") or "").lower(), details_text.lower()))
+    if state_text and not any(
+            word in state_text for word in _DAMAGE_SCRIPT_WORDS):
         negative = join_tags(negative, _DAMAGE_NEGATIVE)
+    positive = sanitize_render_prompt(positive)
     return _apply_uncensored(positive, negative)
 
 

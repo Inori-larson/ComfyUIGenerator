@@ -232,6 +232,8 @@ class AppConfig:
     models: ModelListsConfig = field(default_factory=ModelListsConfig)
     ui: UIConfig = field(default_factory=UIConfig)
     storage_root: str = ""
+    projects_root: str = ""
+    single_projects_root: str = ""
 
     @property
     def root(self) -> Path:
@@ -239,7 +241,21 @@ class AppConfig:
 
     @property
     def projects_dir(self) -> Path:
+        if self.projects_root:
+            return Path(self.projects_root)
+        output_dir = str(getattr(self.comfy, "output_dir", "") or "").strip()
+        if output_dir:
+            return Path(output_dir) / "story"
         return self.root / "projects"
+
+    @property
+    def single_projects_dir(self) -> Path:
+        if self.single_projects_root:
+            return Path(self.single_projects_root)
+        output_dir = str(getattr(self.comfy, "output_dir", "") or "").strip()
+        if output_dir:
+            return Path(output_dir) / "single"
+        return self.root / "single"
 
     @property
     def profiles_dir(self) -> Path:
@@ -254,7 +270,8 @@ class AppConfig:
         return self.root / "cache"
 
     def ensure_dirs(self) -> None:
-        for path in (self.root, self.projects_dir, self.profiles_dir, self.logs_dir, self.cache_dir):
+        for path in (self.root, self.projects_dir, self.single_projects_dir,
+                     self.profiles_dir, self.logs_dir, self.cache_dir):
             path.mkdir(parents=True, exist_ok=True)
 
     def to_dict(self) -> dict[str, Any]:
@@ -292,6 +309,8 @@ def default_config() -> AppConfig:
         cfg.comfy.input_dir = str(base / "input")
         cfg.comfy.output_dir = str(base / "output")
         cfg.comfy.user_dir = str(base / "user")
+        cfg.projects_root = str(base / "output" / "story")
+        cfg.single_projects_root = str(base / "output" / "single")
         cfg.lora.character_dir = str(base / "models" / "loras" / "角色")
         cfg.lora.style_dir = str(base / "models" / "loras" / "风格")
         cfg.lora.body_dir = str(base / "models" / "loras" / "身体部位")

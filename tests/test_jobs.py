@@ -39,6 +39,27 @@ def test_variants_and_expansions_get_unique_increment_seeds():
     assert seeds == list(range(100, 109))
 
 
+def test_increment_seeds_continue_across_shots():
+    shots = [
+        {"id": "01", "name": "a", "prompt": "p"},
+        {"id": "02", "name": "b", "prompt": "q"},
+        {"id": "03", "name": "c", "prompt": "r"},
+    ]
+    tasks = build_tasks({}, shots, variants=1, seed_mode="increment",
+                        base_seed=100)
+    assert [task.seed for task in tasks] == [100, 101, 102]
+
+
+def test_increment_expansion_seeds_continue_across_shots():
+    shots = [
+        {"id": "01", "name": "a", "prompt": "p", "ai_expansions": ["e1"]},
+        {"id": "02", "name": "b", "prompt": "q", "ai_expansions": ["e2"]},
+    ]
+    tasks = build_tasks({}, shots, variants=1, seed_mode="increment",
+                        base_seed=100, expansions=1)
+    assert [task.seed for task in tasks] == [100, 101, 102, 103]
+
+
 def test_fixed_seed():
     tasks = build_tasks({}, [SHOTS[0]], variants=3, seed_mode="fixed", base_seed=777)
     assert {task.seed for task in tasks} == {777}

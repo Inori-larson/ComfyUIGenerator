@@ -21,7 +21,7 @@ from comfyui_generator.core.jobs import TaskRunner, build_tasks
 from comfyui_generator.core.ollama import OllamaClient, OllamaError
 from comfyui_generator.core.preview import PreviewFrame
 from comfyui_generator.core.project import (
-    new_project, save_profile, save_project,
+    configure_projects_dir, new_project, save_profile, save_project,
 )
 from comfyui_generator.core.services import ComfyService, OllamaService, ServiceError
 from comfyui_generator.core.single import SingleOptions, generate_single_prompt
@@ -199,6 +199,8 @@ def _ensure_comfy(cfg: AppConfig, restart: bool, no_auto_start: bool) -> tuple[C
 
 def cmd_story(args: argparse.Namespace) -> int:
     cfg = load_config()
+    configure_projects_dir(
+        cfg.root, cfg.projects_dir, cfg.single_projects_dir)
     if args.no_auto_start:
         cfg.comfy.auto_start = False
 
@@ -262,6 +264,8 @@ def cmd_story(args: argparse.Namespace) -> int:
 
 def cmd_image(args: argparse.Namespace) -> int:
     cfg = load_config()
+    configure_projects_dir(
+        cfg.root, cfg.projects_dir, cfg.single_projects_dir)
     if args.no_auto_start:
         cfg.comfy.auto_start = False
 
@@ -330,6 +334,8 @@ def cmd_image(args: argparse.Namespace) -> int:
 
 def cmd_expand(args: argparse.Namespace) -> int:
     cfg = load_config()
+    configure_projects_dir(
+        cfg.root, cfg.projects_dir, cfg.single_projects_dir)
     if args.no_auto_start:
         cfg.comfy.auto_start = False
     path = Path(args.config)
@@ -410,6 +416,8 @@ def _expand_from_project(cfg: AppConfig, source: dict[str, Any],
 
 def cmd_run(args: argparse.Namespace) -> int:
     cfg = load_config()
+    configure_projects_dir(
+        cfg.root, cfg.projects_dir, cfg.single_projects_dir)
     path = Path(args.config)
     if not path.is_file():
         raise SystemExit("Config not found: %s" % path)
@@ -511,6 +519,8 @@ def _render(cfg: AppConfig, data: dict[str, Any], hires: bool, args: argparse.Na
 
 def cmd_doctor(args: argparse.Namespace) -> int:
     cfg = load_config()
+    configure_projects_dir(
+        cfg.root, cfg.projects_dir, cfg.single_projects_dir)
     _print("%s %s" % (APP_NAME, __version__))
     _print("config: %s" % default_config_path())
     _print("storage: %s" % cfg.root)

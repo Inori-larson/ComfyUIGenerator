@@ -51,6 +51,18 @@ def test_generate_single_prompt_passes_schema_and_keeps_model_output():
     assert kwargs["schema"]["required"] == ["prompt"]
 
 
+def test_generate_single_prompt_uses_structured_ai_cast():
+    client = FakeClient({
+        "prompt": "1girl, solo, standing",
+        "cast": "1girl 1boy",
+        "negative": "",
+    })
+    result = generate_single_prompt(client, "girl with man", SingleOptions(model="test-model"))
+    tags = [tag.strip() for tag in result["prompt"].split(",")]
+    assert "1boy" in tags
+    assert "solo" not in tags
+
+
 def test_generate_single_prompt_keeps_quality_tags():
     client = FakeClient({"prompt": "masterpiece, best quality, standing", "negative": ""})
     result = generate_single_prompt(client, "girl", SingleOptions(model="test-model"))
@@ -92,20 +104,41 @@ def test_framing_table():
 
 def test_sanitize_single_prompt_removes_multiple_males_and_solo_conflict():
     prompt = sanitize_single_prompt(
-        "1girl, solo, male, 2boys, couple, penis in pussy, standing")
+        "1girl, solo, male, 2boys, couple, penis in pussy, standing",
+        cast="1girl 1boy")
     tags = [tag.strip() for tag in prompt.split(",")]
     assert "2boys" not in tags
     assert "solo" not in tags
     assert "male" not in tags
     assert "1boy" in tags
-    assert "nude male" in tags
+    assert "nude male" not in tags
     assert "penis in pussy" in tags
+
+
+def test_sanitize_single_prompt_preserves_male_clothing_state():
+    prompt = sanitize_single_prompt(
+        "1girl, 1boy, dark coat, shirt, pants, standing",
+        cast="1girl 1boy")
+    tags = [tag.strip() for tag in prompt.split(",")]
+    assert "dark coat" in tags
+    assert "shirt" in tags
+    assert "pants" in tags
+    assert "nude male" not in tags
 
 
 def test_sanitize_single_prompt_keeps_true_solo_female_fluid_scene():
     prompt = sanitize_single_prompt(
-        "1girl, solo, cum on body, wet pussy, masturbation")
+        "1girl, solo, cum on body, wet pussy, masturbation",
+        cast="1girl solo")
     tags = [tag.strip() for tag in prompt.split(",")]
     assert "solo" in tags
     assert "1boy" not in tags
     assert "cum on body" in tags
+
+
+def test_sanitize_single_prompt_does_not_guess_without_ai_cast():
+    prompt = sanitize_single_prompt(
+        "1girl, solo, penis in pussy, standing")
+    tags = [tag.strip() for tag in prompt.split(",")]
+    assert "1boy" not in tags
+    assert "penis in pussy" in tags

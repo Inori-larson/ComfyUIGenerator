@@ -29,6 +29,9 @@ from comfyui_generator.core.single import SingleOptions, generate_single_prompt
 from comfyui_generator.core.tag_cache import load_tag_cache, update_tag_cache
 from comfyui_generator.core.translate import translate_prompts, translate_tag_list, translate_to_tags
 from comfyui_generator.core.storyboard import StoryboardOptions, generate_storyboard
+from comfyui_generator.core.trace import (
+    TracedClient, start_trace, stop_trace, trace_event,
+)
 
 
 class ConnectWorker(QThread):
@@ -148,6 +151,26 @@ class PromptWorker(QThread):
             if self.story_options is not None:
                 self.story_options.model = model
         try:
+            trace, trace_token = start_trace(
+                self.cfg.single_projects_dir.parent / "log", self.kind, {
+                    "kind": self.kind,
+                    "model": model,
+                    "use_external": self.use_external,
+                    "text": self.text,
+                    "initial_shots": len(self.initial_shots or []),
+                    "options": (
+                        self.story_options.__dict__
+                        if self.story_options is not None
+                        else self.single_options.__dict__
+                        if self.single_options is not None else {}),
+                })
+        except Exception as exc:
+            trace, trace_token = None, None
+            self.log.emit("日志初始化失败：%s" % exc)
+        client = TracedClient(client, self.kind)
+        trace_event("request", {"kind": self.kind, "text": self.text,
+                                "model": model})
+        try:
             if self._canceled():
                 raise InterruptedError
             if self.kind == "single":
@@ -162,6 +185,7 @@ class PromptWorker(QThread):
                     result["prompt_zh"] = "，".join(tags)
                 if self._canceled():
                     raise InterruptedError
+                trace_event("single.result", result)
                 self.single_ready.emit(result)
             elif self.kind == "rewrite":
                 prompt = rewrite_shot_prompt(
@@ -178,6 +202,10 @@ class PromptWorker(QThread):
                     prompt_zh = prompt
                 if self._canceled():
                     raise InterruptedError
+                trace_event("rewrite.result", {
+                    "prompt": prompt, "prompt_zh": prompt_zh,
+                    "instruction": self.instruction,
+                })
                 self.rewritten.emit({"prompt": prompt, "prompt_zh": prompt_zh})
             else:
                 shots = generate_storyboard(
@@ -194,10 +222,13 @@ class PromptWorker(QThread):
                 for shot in shots:
                     zh_tags = [mapping.get(tag, tag) for tag in self._split_tags(shot.get("prompt", ""))]
                     shot["prompt_zh"] = "，".join(zh_tags)
+                trace_event("story.result", shots)
                 self.story_ready.emit(shots)
         except InterruptedError:
+            trace_event("canceled", {"kind": self.kind})
             self.canceled.emit("已打断生成")
         except Exception as exc:
+            trace_event("failed", {"kind": self.kind, "error": repr(exc)})
             self.failed.emit(str(exc))
         finally:
             try:
@@ -209,6 +240,8 @@ class PromptWorker(QThread):
                     local_client.unload(local_model)
                 except Exception:
                     pass
+            if trace is not None:
+                stop_trace(trace, trace_token)
 
     @staticmethod
     def _split_tags(text: str) -> list[str]:
@@ -259,6 +292,21 @@ class ExpansionWorker(QThread):
             client = OllamaClient(self.cfg.ollama.base_url)
             model = self.model or self.cfg.ollama.default_model
         try:
+            trace, trace_token = start_trace(
+                self.cfg.single_projects_dir.parent / "log", "expand", {
+                    "shots": len(self.shots),
+                    "count": self.count,
+                    "model": model,
+                    "use_external": self.use_external,
+                    "sequence": self.sequence,
+                })
+        except Exception as exc:
+            trace, trace_token = None, None
+            self.log.emit("日志初始化失败：%s" % exc)
+        client = TracedClient(client, "expand")
+        trace_event("expand.request", {"count": self.count,
+                                       "sequence": self.sequence})
+        try:
             if self.isInterruptionRequested():
                 self.canceled.emit("AI expansion canceled")
                 return
@@ -268,14 +316,18 @@ class ExpansionWorker(QThread):
             if self.isInterruptionRequested():
                 self.canceled.emit("AI expansion canceled")
                 return
+            trace_event("expand.result", result)
             self.done.emit(result)
         except Exception as exc:
+            trace_event("failed", {"kind": "expand", "error": repr(exc)})
             self.failed.emit(str(exc))
         finally:
             try:
                 client.unload(model)
             except Exception:
                 pass
+            if trace is not None:
+                stop_trace(trace, trace_token)
 
 
 class RenderWorker(QThread):
@@ -296,6 +348,18 @@ class RenderWorker(QThread):
 
     def run(self) -> None:
         try:
+            trace, trace_token = start_trace(
+                self.cfg.single_projects_dir.parent / "log", "render", {
+                    "project_id": self.project.get("id"),
+                    "project_name": self.project.get("name"),
+                    "tasks": len(self.tasks),
+                    "hires": self.hires,
+                    "settings": self.project.get("settings") or {},
+                })
+        except Exception as exc:
+            trace, trace_token = None, None
+            self.log.emit("日志初始化失败：%s" % exc)
+        try:
             client = ComfyClient(self.cfg.comfy.base_url)
             self._prepare_refs(client)
             runner = TaskRunner(
@@ -307,13 +371,22 @@ class RenderWorker(QThread):
             )
             self.runner = runner
             runner.run()
+            trace_event("render.finished", [
+                {"id": task.id, "label": task.label, "state": task.state,
+                 "image": task.image, "error": task.error, "seed": task.seed}
+                for task in self.tasks
+            ])
             self.finished_ok.emit([
                 {"id": task.id, "label": task.label, "state": task.state,
                  "image": task.image, "error": task.error, "seed": task.seed}
                 for task in self.tasks
             ])
         except Exception as exc:
+            trace_event("render.failed", {"error": repr(exc)})
             self.failed.emit(str(exc))
+        finally:
+            if trace is not None:
+                stop_trace(trace, trace_token)
 
     def cancel(self) -> None:
         if self.runner is not None:

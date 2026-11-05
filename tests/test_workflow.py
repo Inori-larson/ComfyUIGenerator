@@ -137,6 +137,11 @@ def test_compose_prompts_blocks_damage_when_script_has_none(cfg):
         "script": "她的丝袜被撕破。",
     })
     assert "torn pantyhose" not in negative
+    _, negative = compose_prompts(cfg, {
+        "prompt": "1girl, solo, torn pantyhose, sitting",
+        "script": "她坐在长椅上休息。",
+    })
+    assert "torn pantyhose" not in negative
 
 
 def test_compose_prompts_blocks_intact_legwear_when_half_off(cfg):
@@ -172,6 +177,14 @@ def test_compose_prompts_keeps_colored_base_for_generic_half_off_state(cfg):
     assert "black lace panties" in tags
     assert "bra strap pulled down" in tags
     assert "panties aside" in tags
+
+
+def test_compose_prompts_blocks_second_panties_when_legwear_is_pulled_down(cfg):
+    _, negative = compose_prompts(cfg, {
+        "prompt": "1girl, solo, black lace panties, pantyhose around ankles",
+    })
+    assert "two panties" in negative
+    assert "panties around ankle" in negative
 
 
 def test_compose_prompts_boosts_all_clothing_tags(cfg):
@@ -611,7 +624,30 @@ def test_prompt_groups_can_disable_unreliable_fallback():
     assert prompt_groups(shot, allow_fallback=False) == []
 
 
-def test_compose_prompts_makes_male_nude_and_faceless(cfg):
+def test_compose_prompts_drops_half_off_when_pantyhose_is_torn(cfg):
+    positive, negative = compose_prompts(cfg, {
+        "prompt": ("1girl, solo, black pantyhose, torn pantyhose, "
+                   "pantyhose pulled aside, panties aside"),
+        "clothing_details": {"char_01": "torn pantyhose, pantyhose pulled aside"},
+    })
+    tags = [tag.strip() for tag in positive.split(",")]
+    assert "torn pantyhose" in tags
+    assert "pantyhose pulled aside" not in tags
+    assert "torn pantyhose" not in negative
+
+
+def test_compose_prompts_drops_half_off_when_pantyhose_has_crotch_hole(cfg):
+    positive, _ = compose_prompts(cfg, {
+        "prompt": ("1girl, solo, black pantyhose, crotch hole, "
+                   "pantyhose pulled aside"),
+        "clothing_details": {"char_01": "crotch hole, pantyhose pulled aside"},
+    })
+    tags = [tag.strip() for tag in positive.split(",")]
+    assert "crotch hole" in tags
+    assert "pantyhose pulled aside" not in tags
+
+
+def test_compose_prompts_forces_male_nude_and_faceless(cfg):
     positive, negative = compose_prompts(cfg, {
         "prompt": "1girl, 1boy, clothed male, casual shirt, pants, "
                   "black pantyhose, uniform",
@@ -621,13 +657,65 @@ def test_compose_prompts_makes_male_nude_and_faceless(cfg):
     assert "pants" not in positive
     assert "nude male" in positive
     assert "faceless male" in positive
-    assert "male head out of frame" in positive
-    assert "black pantyhose" in positive
-    assert positive.startswith("1boy")
+    assert "male clothes" in negative
     assert "futanari" in negative
     assert "penis on female" in negative
     assert "female head on male" in negative
     assert "long-haired male" in negative
+
+
+def test_compose_prompts_strips_male_clothing_when_prompt_requests_nude(cfg):
+    positive, negative = compose_prompts(cfg, {
+        "prompt": "1girl, 1boy, nude male, faceless male, casual shirt, pants",
+        "cast": "1girl 1boy"})
+    assert "nude male" in positive
+    assert "faceless male" in positive
+    assert "casual shirt" not in positive
+    assert "pants" not in positive
+    assert "male clothes" in negative
+
+
+def test_compose_prompts_forces_male_nude_faceless_and_no_full_body(cfg):
+    positive, negative = compose_prompts(cfg, {
+        "prompt": ("1girl, 1boy, full body, wide shot, casual shirt, pants, "
+                   "standing, bed"),
+        "cast": "1girl 1boy"})
+    tags = [tag.strip() for tag in positive.split(",")]
+    assert "full body" not in tags
+    assert "wide shot" not in tags
+    assert "casual shirt" not in tags
+    assert "pants" not in tags
+    assert "nude male" in tags
+    assert "faceless male" in tags
+    assert "male clothes" in negative
+
+
+def test_compose_prompts_keeps_full_body_when_script_requires_it(cfg):
+    positive, _ = compose_prompts(cfg, {
+        "prompt": "1girl, 1boy, full body, standing",
+        "script": "全身镜头，两人站在房间中央",
+        "cast": "1girl 1boy"})
+    tags = [tag.strip() for tag in positive.split(",")]
+    assert "full body" in tags
+
+
+def test_compose_prompts_drops_displaced_base_and_faceless_conflict(cfg):
+    positive, _ = compose_prompts(cfg, {
+        "prompt": ("1girl, 1boy, black lace panties, panties around ankles, "
+                   "red cape, cape on floor, military uniform, "
+                   "military uniform around waist, cunnilingus, "
+                   "male face between legs, faceless male, nude male"),
+        "clothing": "military uniform around waist, panties around ankles",
+        "cast": "1girl 1boy"})
+    tags = [tag.strip() for tag in positive.split(",")]
+    assert "black lace panties" not in tags
+    assert "panties around ankles" in tags
+    assert "red cape" not in tags
+    assert "cape on floor" not in tags
+    assert "military uniform" not in tags
+    assert "military uniform around waist" in tags
+    assert "male face between legs" not in tags
+    assert "faceless male" in tags
 
 
 def test_compose_prompts_never_allows_multiple_males(cfg):
@@ -679,7 +767,7 @@ def test_compose_prompts_strips_male_clothing_actions_from_double(cfg):
     assert "undressing another" not in positive
     assert "hand on clothes" not in positive
     assert "pulling clothes" not in positive
-    assert "nude male" in positive
+    assert "nude_male" in positive
     assert "white_shirt" in positive
 
 

@@ -73,6 +73,32 @@ def test_external_client_retries_with_larger_budget_on_length(monkeypatch):
     assert bodies[1]["max_tokens"] == 8192
 
 
+def test_external_client_retries_after_read_timeout(monkeypatch):
+    cfg = SimpleNamespace(base_url="https://example.test/v1", api_key="",
+                          model="test-model", timeout=30)
+    client = ExternalLLMClient(cfg)
+    attempts = []
+
+    class TimeoutResponse(FakeResponse):
+        def read(self):
+            raise TimeoutError("The read operation timed out")
+
+    def fake_urlopen(req, timeout):
+        attempts.append(timeout)
+        if len(attempts) == 1:
+            return TimeoutResponse({})
+        return FakeResponse({
+            "choices": [{"message": {"content": "{\"shots\": []}"}}]
+        })
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    result = client.chat_json(
+        "test-model", [{"role": "user", "content": "x"}],
+        timeout=12, retries=1)
+    assert result == {"shots": []}
+    assert len(attempts) == 2
+
+
 def test_external_client_accepts_array_root(monkeypatch):
     cfg = SimpleNamespace(base_url="https://example.test/v1", api_key="",
                           model="test-model", timeout=30)

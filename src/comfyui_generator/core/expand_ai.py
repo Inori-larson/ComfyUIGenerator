@@ -3,35 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 
-from comfyui_generator.core.expand import (
-    _expression_slots, _is_pose_tag, _limb_slots, _state_slots,
-    apply_expansion_delta,
-)
-
-_DEPTH_WORDS = ("deep penetration", "shallow penetration", "deeper penetration")
-_FLUID_WORDS = ("cum", "semen", "creampie", "ejaculat", "pussy juice")
-_ACTION_WORDS = (
-    "penetrat", "thrust", "hips", "riding", "straddl", "grinding",
-    "leg", "legs", "thigh", "thighs", "knee", "knees", "foot", "feet",
-    "toe", "toes", "hand", "hands", "arm", "arms", "elbow", "wrist",
-    "finger", "fingers", "grab", "gripping", "holding", "spread", "bend",
-    "bending", "lean", "arching", "arching back", "lifting", "moving",
-    "pose", "poses", "sitting", "standing", "lying", "kneeling",
-    "walking", "running", "turning", "reaching", "pulling", "pushing",
-    "pressing", "straddle",
-)
-_EXPRESSION_WORDS = (
-    "closed eyes", "half closed eyes", "open eyes", "teary eyes",
-    "rolling eyes", "empty eyes", "wide eyes", "eye contact",
-    "mouth", "lip", "lips", "tongue", "blush", "smile",
-    "tear", "tears", "moan", "breath", "breathing", "sweat", "trembl",
-)
-_CLOTHING_WORDS = (
-    "shirt", "blouse", "jacket", "coat", "sweater", "bra", "dress",
-    "uniform", "hoodie", "vest", "robe", "kimono", "qipao", "camisole",
-    "panties", "pantyhose", "stockings", "thighhighs", "skirt", "pants",
-    "jeans", "shorts", "clothes", "clothing", "lingerie", "underwear",
-)
+from comfyui_generator.core.expand import apply_expansion_delta
 
 EXPANSION_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -188,70 +160,6 @@ def _as_list(value: Any) -> list[str]:
     if isinstance(value, str) and value.strip():
         return [item.strip() for item in value.split(",") if item.strip()]
     return []
-
-
-def _pose_tags(keys: set[str]) -> set[str]:
-    return {key for key in keys if _is_pose_tag(key)}
-
-
-def _hand_tags(keys: set[str]) -> set[str]:
-    return {
-        key for key in keys
-        if _limb_slots(key) & {"hands", "arms"}
-    }
-
-
-def _expression_tags(keys: set[str]) -> set[str]:
-    return {key for key in keys if _expression_slots(key)}
-
-
-def _body_action_tags(keys: set[str]) -> set[str]:
-    return {
-        key for key in keys
-        if _is_pose_tag(key) or _limb_slots(key) or _state_slots(key)
-    }
-
-
-def _penetration_tags(keys: set[str]) -> set[str]:
-    return {
-        key for key in keys
-        if _state_slots(key) & {"depth", "pullout"}
-    }
-
-
-def _sequence_reset_tags(prompt: str) -> list[str]:
-    tags = [tag.strip() for tag in str(prompt or "").split(",") if tag.strip()]
-    reset: list[str] = []
-    for tag in tags:
-        low = tag.lower()
-        if any(word in low for word in _FLUID_WORDS):
-            reset.append(tag)
-        elif _state_slots(tag) & {"depth", "pullout"}:
-            reset.append(tag)
-    return reset
-
-
-def _sequence_can_reset(shot: dict[str, Any],
-                        previous_shot: dict[str, Any] | None) -> bool:
-    if not previous_shot:
-        return True
-    previous_prompt = str(previous_shot.get("prompt") or "")
-    return not _sequence_reset_tags(previous_prompt)
-
-
-def _categories(keys: set[str]) -> set[str]:
-    categories: set[str] = set()
-    for key in keys:
-        low = key.lower().replace("_", " ").replace("-", " ")
-        if any(word in low for word in _ACTION_WORDS):
-            categories.add("action")
-        if any(word in low for word in _EXPRESSION_WORDS):
-            categories.add("expression")
-        if any(word in low for word in _FLUID_WORDS):
-            categories.add("fluid")
-        if any(word in low for word in _CLOTHING_WORDS):
-            categories.add("clothing")
-    return categories
 
 
 def _cleaned_batch(raw: Any, batch: list[dict[str, Any]],

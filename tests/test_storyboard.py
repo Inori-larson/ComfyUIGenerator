@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from comfyui_generator.core.storyboard import (
@@ -9,7 +11,19 @@ from comfyui_generator.core.storyboard import (
     _script_has_half_off,
     _script_resets_to_full,
     _global_story_state,
+    _action_audit_messages,
+    _intimacy_regressions,
+    _intimacy_stage,
+    _pacing_audit_messages,
+    _phase_backtracks,
     _story_progress_ledger,
+    enforce_final_wardrobe,
+    enforce_weighted_core,
+    enforce_premise_masturbation_layers,
+    ensure_final_afterglow,
+    ensure_layered_breast_contact,
+    ensure_layered_masturbation,
+    wardrobe_weight_policy,
     stabilize_clothing_sequence,
     repair_clothing_sequence,
     repair_clothing_sequence_ai,
@@ -18,6 +32,7 @@ from comfyui_generator.core.storyboard import (
     SCRIPT_SYSTEM,
     TAG_SYSTEM,
     apply_character_state,
+    apply_focus_weights,
     apply_story_state,
     build_outline_messages,
     character_prompt_groups,
@@ -29,6 +44,12 @@ from comfyui_generator.core.storyboard import (
     filter_locked_appearance,
     normalize_acts,
     normalize_cast,
+    normalize_shot_casts,
+    renumber_shots,
+    sync_clothing_state_to_prompt,
+    repair_missing_actions_ai,
+    repair_story_pacing_ai,
+    repetitive_shot_groups,
     normalize_character_profiles,
     normalize_outline,
     parse_character_profiles,
@@ -54,6 +75,20 @@ def test_tagged_shots_use_the_generated_script_as_outline():
     tagged = normalize_tagged({"shots": [
         {"id": "01", "prompt": "1girl, standing"}]}, scripts)
     assert tagged[0]["outline"] == script
+
+
+def test_normalize_scripts_falls_back_to_structured_fields():
+    scripts = normalize_scripts({"shots": [{
+        "id": "11",
+        "cast": "1girl 1boy",
+        "beat": "男主停在门口",
+        "clothing": "军装半脱",
+        "pose": "女主拉裙摆遮腿",
+        "nsfw": "私处半露",
+    }]}, 1, "fallback")
+    assert scripts[0]["id"] == "01"
+    assert "男主停在门口" in scripts[0]["script"]
+    assert "军装半脱" in scripts[0]["script"]
 
 
 def test_tag_prompt_requires_fluid_interactions():
@@ -83,6 +118,26 @@ def test_prompt_templates_share_priority_and_avoid_foreign_examples():
         assert "统一优先级" in prompt
     assert "yixuan" not in TAG_SYSTEM
     assert "black blazer" not in TAG_SYSTEM
+
+
+def test_prompt_templates_require_pose_diversity():
+    for prompt in (STORY_SYSTEM, OUTLINE_SYSTEM, SCRIPT_SYSTEM,
+                   TAG_SYSTEM, ACT_PLAN_SYSTEM):
+        assert "5-7 种不同姿势" in prompt
+        assert "展示女主正面" in prompt
+
+
+def test_story_templates_require_requested_act_coverage():
+    for prompt in (STORY_SYSTEM, OUTLINE_SYSTEM, SCRIPT_SYSTEM,
+                   ACT_PLAN_SYSTEM):
+        assert "男主对女主口交" in prompt
+        assert "吞精" in prompt
+        assert "不能循环前戏" in prompt
+        assert "不得再加入陌生男人" in prompt
+        assert "第一次射精后不得再次完整重复" in prompt
+        assert "连续事后、整理、走路不得无新信息地堆叠" in prompt
+        assert "扩展当前动作的微节拍" in prompt
+    assert "每幕 title 必须概括" in ACT_PLAN_SYSTEM
 
 
 def test_scene_instructions_allow_natural_detail_expansion():
@@ -217,6 +272,398 @@ def test_finalize_clears_half_off_when_script_explicitly_redresses():
     _finalize_shot_prompt(shot, "(black pantyhose:1.2)")
     assert _script_resets_to_full("连裤袜仍完整穿着")
     assert "around ankles" not in shot["prompt"]
+
+
+def test_finalize_keeps_carried_damage_without_current_damage_script():
+    shot = {
+        "prompt": "1girl, black pantyhose, torn pantyhose",
+        "script": "她靠在门边休息，呼吸逐渐平稳。",
+        "clothing_details": {"char_01": "torn pantyhose"},
+    }
+    _finalize_shot_prompt(shot, "black pantyhose")
+    assert "torn pantyhose" in shot["prompt"]
+
+
+def test_sync_clothing_state_keeps_torn_and_restores_base():
+    premise = "角色：女主\n初始服装：black pantyhose, black lace panties, black bra"
+    profiles = parse_character_profiles(premise)
+    key = profiles[0].key
+    worn = "black pantyhose, black lace panties, black bra"
+    shots = [{
+        "prompt": ("1girl, black bra pulled down, breasts out, "
+                   "black lace panties, black pantyhose"),
+        "character_states": {key: worn},
+        "clothing_details": {key: "torn pantyhose"},
+    }]
+    sync_clothing_state_to_prompt(shots, profiles)
+    assert "torn pantyhose" in shots[0]["prompt"]
+    assert "black bra" in shots[0]["prompt"]
+    assert "black bra pulled down" not in shots[0]["prompt"]
+
+
+def test_ai_clothing_state_updates_generic_sync():
+    premise = "角色：女主\n初始服装：black pantyhose, black lace panties, black bra"
+    profiles = parse_character_profiles(premise)
+    key = profiles[0].key
+
+    class Fake:
+        def chat_json(self, model, messages, **kwargs):
+            return {"shots": [{
+                "id": "01", "valid": False,
+                "prompt": "1girl, black bra, black pantyhose, torn pantyhose",
+                "clothing_state": "torn pantyhose",
+            }]}
+
+    shots = [{
+        "id": "01",
+        "prompt": "1girl, black bra pulled down, breasts out",
+        "character_states": {key: "black bra, black pantyhose"},
+        "clothing_details": {key: ""},
+    }]
+    repair_clothing_sequence_ai(Fake(), "m", shots, profiles)
+    json.dumps(shots[0]["clothing_details"])
+    sync_clothing_state_to_prompt(shots, profiles)
+    assert "black bra pulled down" not in shots[0]["prompt"]
+    assert "breasts out" not in shots[0]["prompt"]
+    assert "black bra" in shots[0]["prompt"]
+    assert "torn pantyhose" in shots[0]["prompt"]
+
+
+def test_ai_off_body_state_removes_unkeyed_cape():
+    premise = "角色：少女\n初始服装：military uniform, red cape, black bra"
+    profiles = parse_character_profiles(premise)
+    key = profiles[0].key
+
+    class Fake:
+        def chat_json(self, model, messages, **kwargs):
+            return {"shots": [{
+                "id": "01", "valid": True,
+                "clothing_state": "cape removed, military uniform removed",
+            }]}
+
+    shots = [{
+        "id": "01",
+        "prompt": ("1girl, red cape, military uniform, cape on seat, "
+                   "black bra"),
+        "character_states": {key: "red cape, military uniform, black bra"},
+        "clothing_details": {key: ""},
+    }]
+    repair_clothing_sequence_ai(Fake(), "m", shots, profiles)
+    assert "cape removed" in shots[0]["clothing_details"][key]
+    sync_clothing_state_to_prompt(shots, profiles)
+    assert "red cape" not in shots[0]["prompt"]
+    assert "cape on seat" not in shots[0]["prompt"]
+    assert "cape removed" not in shots[0]["prompt"]
+    assert "uniform" not in shots[0]["prompt"]
+    assert "black bra" in shots[0]["prompt"]
+    assert "red cape" not in shots[0]["character_states"][key]
+    assert "uniform" not in shots[0]["character_states"][key]
+
+
+def test_male_off_body_state_does_not_strip_female_clothing():
+    premise = "角色：少女\n初始服装：white gloves, military uniform"
+    profiles = parse_character_profiles(premise)
+    key = profiles[0].key
+    shots = [{
+        "id": "01",
+        "prompt": ("1girl, white gloves, military uniform, "
+                   "white gloves slipped off male wrist"),
+        "character_states": {key: "white gloves, military uniform"},
+        "clothing_details": {key: ""},
+    }]
+    sync_clothing_state_to_prompt(shots, profiles)
+    assert "white gloves" in shots[0]["prompt"]
+    assert "military uniform" in shots[0]["prompt"]
+
+
+def test_removed_cape_stays_removed_for_later_shots():
+    premise = "角色：少女\n初始服装：military uniform, red cape, black bra"
+    profiles = parse_character_profiles(premise)
+    key = profiles[0].key
+    shots = [
+        {
+            "id": "01",
+            "prompt": "1girl, red cape, military uniform, black bra",
+            "character_states": {key: "red cape, military uniform, black bra"},
+            "clothing_details": {key: ""},
+        },
+        {
+            "id": "02",
+            "prompt": "1girl, red cape, cape removed, black bra",
+            "character_states": {key: "red cape, military uniform, black bra"},
+            "clothing_details": {key: ""},
+        },
+        {
+            "id": "03",
+            "prompt": "1girl, red cape, military uniform, black bra",
+            "character_states": {key: "red cape, military uniform, black bra"},
+            "clothing_details": {key: ""},
+        },
+    ]
+    sync_clothing_state_to_prompt(shots, profiles)
+    assert "red cape" not in shots[1]["prompt"]
+    assert "red cape" not in shots[2]["prompt"]
+    assert "red cape" not in shots[2]["character_states"][key]
+    assert "military uniform" in shots[2]["prompt"]
+
+
+def test_ai_none_state_clears_stale_clothing_details():
+    premise = "角色：女主\n初始服装：black pantyhose, black lace panties, black bra"
+    profiles = parse_character_profiles(premise)
+    key = profiles[0].key
+
+    class Fake:
+        def chat_json(self, model, messages, **kwargs):
+            return {"shots": [{
+                "id": "01", "valid": True, "clothing_state": "none",
+            }]}
+
+    shots = [{
+        "id": "01",
+        "prompt": "1girl, black bra pulled down, breasts out",
+        "character_states": {key: "black bra, black pantyhose"},
+        "clothing_details": {key: "bra pull"},
+    }]
+    repair_clothing_sequence_ai(Fake(), "m", shots, profiles)
+    sync_clothing_state_to_prompt(shots, profiles)
+    assert "bra pull" not in shots[0]["prompt"]
+    assert "breasts out" not in shots[0]["prompt"]
+    assert "black bra" in shots[0]["prompt"]
+
+
+def test_sync_uses_displaced_state_as_single_source_for_base():
+    premise = ("角色：少女\n初始服装：black pantyhose, black lace panties, "
+               "black bra")
+    profiles = parse_character_profiles(premise)
+    key = profiles[0].key
+    shots = [{
+        "prompt": ("1girl, black pantyhose, torn pantyhose, "
+                   "black lace panties, panties around one thigh, black bra"),
+        "character_states": {key: "black pantyhose, black lace panties, black bra"},
+        "clothing_details": {key: "torn pantyhose, panties around one thigh"},
+    }]
+    sync_clothing_state_to_prompt(shots, profiles)
+    assert "black pantyhose" not in shots[0]["prompt"]
+    assert "torn pantyhose" in shots[0]["prompt"]
+    assert "black lace panties" not in shots[0]["prompt"]
+    assert "panties around one thigh" in shots[0]["prompt"]
+    assert "black bra" in shots[0]["prompt"]
+    assert "black pantyhose" not in shots[0]["character_states"][key]
+    assert "black lace panties" not in shots[0]["character_states"][key]
+    assert "black bra" in shots[0]["character_states"][key]
+
+
+def test_sync_restores_intimate_half_off_only_with_explicit_cue():
+    premise = ("角色：少女\n初始服装：black pantyhose, black lace panties, "
+               "black bra")
+    profiles = parse_character_profiles(premise)
+    key = profiles[0].key
+    shots = [
+        {
+            "id": "01",
+            "prompt": ("1girl, black pantyhose, pantyhose pulled aside, "
+                       "black lace panties, panties aside, black bra"),
+            "character_states": {key: "black pantyhose, black lace panties, black bra"},
+            "clothing_details": {key: "pantyhose pulled aside, panties aside"},
+            "script": "她把内裤拨到一侧继续自慰",
+        },
+        {
+            "id": "02",
+            "prompt": ("1girl, black pantyhose, pantyhose pulled aside, "
+                       "black lace panties, black bra"),
+            "character_states": {key: "black pantyhose, black lace panties, black bra"},
+            "clothing_details": {key: "pantyhose pulled aside, panties aside"},
+            "script": "她把内裤拉回整理好",
+        },
+    ]
+    sync_clothing_state_to_prompt(shots, profiles)
+    assert "panties aside" not in shots[1]["prompt"]
+    assert "black lace panties" in shots[1]["prompt"]
+    assert "pantyhose pulled aside" in shots[1]["prompt"]
+    assert "black pantyhose" in shots[1]["prompt"]
+
+
+def test_sync_restores_removed_intimate_with_explicit_cue():
+    premise = "角色：少女\n初始服装：black lace panties, black bra"
+    profiles = parse_character_profiles(premise)
+    key = profiles[0].key
+    shots = [
+        {
+            "id": "01",
+            "prompt": "1girl, black lace panties removed, panties on seat, black bra",
+            "character_states": {key: "black lace panties, black bra"},
+            "clothing_details": {key: "panties removed, panties on seat"},
+            "script": "她把内裤脱下放在座椅上",
+        },
+        {
+            "id": "02",
+            "prompt": "1girl, black lace panties, black bra",
+            "character_states": {key: "black lace panties, black bra"},
+            "clothing_details": {key: "panties removed, panties on seat"},
+            "script": "她把内裤穿回",
+        },
+    ]
+    sync_clothing_state_to_prompt(shots, profiles)
+    assert "black lace panties" in shots[1]["prompt"]
+    assert "panties removed" not in shots[1]["prompt"]
+    assert "panties on seat" not in shots[1]["prompt"]
+
+
+def test_sync_does_not_restore_negated_cue():
+    premise = "角色：少女\n初始服装：black lace panties, black bra"
+    profiles = parse_character_profiles(premise)
+    key = profiles[0].key
+    shots = [
+        {
+            "id": "01",
+            "prompt": "1girl, black lace panties, panties aside, black bra",
+            "character_states": {key: "black lace panties, black bra"},
+            "clothing_details": {key: "panties aside"},
+            "script": "她把内裤拨到一侧",
+        },
+        {
+            "id": "02",
+            "prompt": "1girl, black lace panties, black bra",
+            "character_states": {key: "black lace panties, black bra"},
+            "clothing_details": {key: "panties aside"},
+            "script": "内裤仍被拨开未整理",
+        },
+    ]
+    sync_clothing_state_to_prompt(shots, profiles)
+    assert "panties aside" in shots[1]["prompt"]
+    assert "black lace panties" in shots[1]["prompt"]
+
+
+def test_wardrobe_weight_policy_keeps_weighted_and_removes_plain():
+    premise = (
+        "角色：少女\n"
+        "初始服装：uniform, red cape, (black bra:1.2), "
+        "black pantyhose(1.2), black platform heels")
+    policy = wardrobe_weight_policy(premise)
+    assert "带权重服装是保留核心" in policy
+    assert "(black bra:1.2)" in policy
+    assert "uniform" in policy
+    assert "最后一镜前全部脱完" in policy
+
+
+def test_wardrobe_weight_policy_ignores_unweighted_wardrobe():
+    assert wardrobe_weight_policy("初始服装：uniform, belt, shoes") == ""
+
+
+def test_sync_damage_supersedes_half_off_on_same_key():
+    premise = ("角色：少女\n初始服装：black pantyhose, black lace panties, "
+               "black bra")
+    profiles = parse_character_profiles(premise)
+    key = profiles[0].key
+    shots = [{
+        "id": "01",
+        "prompt": ("1girl, black pantyhose, torn pantyhose, "
+                   "pantyhose pulled aside, black lace panties, "
+                   "panties aside, black bra"),
+        "character_states": {key: "black pantyhose, black lace panties, black bra"},
+        "clothing_details": {
+            key: "torn pantyhose, pantyhose pulled aside, panties aside"},
+        "script": "裤袜被撕破，内裤拨到一侧，从破洞继续自慰",
+    }]
+    sync_clothing_state_to_prompt(shots, profiles)
+    assert "torn pantyhose" in shots[0]["prompt"]
+    assert "pantyhose pulled aside" not in shots[0]["prompt"]
+    assert "panties aside" in shots[0]["prompt"]
+    assert "pantyhose pulled aside" not in shots[0]["clothing_details"][key]
+
+
+def test_sync_does_not_restore_regular_clothing():
+    premise = "角色：少女\n初始服装：military uniform, black bra"
+    profiles = parse_character_profiles(premise)
+    key = profiles[0].key
+    shots = [
+        {
+            "id": "01",
+            "prompt": "1girl, military uniform removed, clothes on floor",
+            "character_states": {key: "military uniform, black bra"},
+            "clothing_details": {key: "military uniform removed"},
+            "script": "她脱下军装",
+        },
+        {
+            "id": "02",
+            "prompt": "1girl, military uniform, black bra",
+            "character_states": {key: "military uniform, black bra"},
+            "clothing_details": {key: "military uniform removed"},
+            "script": "她拉回军装",
+        },
+    ]
+    sync_clothing_state_to_prompt(shots, profiles)
+    assert "military uniform" not in shots[1]["prompt"]
+    assert "black bra" in shots[1]["prompt"]
+
+
+def test_sync_does_not_restore_damaged_clothing():
+    premise = "角色：少女\n初始服装：black pantyhose, black bra"
+    profiles = parse_character_profiles(premise)
+    key = profiles[0].key
+    shots = [
+        {
+            "id": "01",
+            "prompt": "1girl, black pantyhose, torn pantyhose, black bra",
+            "character_states": {key: "black pantyhose, black bra"},
+            "clothing_details": {key: "torn pantyhose"},
+            "script": "连裤袜被撕破",
+        },
+        {
+            "id": "02",
+            "prompt": "1girl, black pantyhose, black bra",
+            "character_states": {key: "black pantyhose, black bra"},
+            "clothing_details": {key: "torn pantyhose"},
+            "script": "她把连裤袜拉回穿好",
+        },
+    ]
+    sync_clothing_state_to_prompt(shots, profiles)
+    assert "black pantyhose" not in shots[1]["prompt"]
+    assert "torn pantyhose" in shots[1]["prompt"]
+
+
+def test_sync_does_not_jump_from_half_off_to_worn_without_cue():
+    premise = "角色：少女\n初始服装：black lace panties, black bra"
+    profiles = parse_character_profiles(premise)
+    key = profiles[0].key
+    shots = [
+        {
+            "id": "01",
+            "prompt": "1girl, black lace panties, panties around ankles, black bra",
+            "character_states": {key: "black lace panties, black bra"},
+            "clothing_details": {key: "panties around ankles"},
+            "script": "内裤褪到脚踝",
+        },
+        {
+            "id": "02",
+            "prompt": "1girl, black lace panties, black bra",
+            "character_states": {key: "black lace panties, black bra"},
+            "clothing_details": {key: ""},
+            "script": "她继续自慰",
+        },
+    ]
+    sync_clothing_state_to_prompt(shots, profiles)
+    assert "black lace panties" not in shots[1]["prompt"]
+    assert "panties around ankles" in shots[1]["prompt"]
+
+
+def test_sync_clothing_state_removes_unrequested_and_male_tags():
+    premise = "角色：女主\n初始服装：black pantyhose, black lace panties, black bra"
+    profiles = parse_character_profiles(premise)
+    key = profiles[0].key
+    shots = [{
+        "prompt": ("1girl, 1boy, black skirt, hand on male collar, "
+                   "male face partially visible, male face visible, "
+                   "male face out of frame, black pantyhose"),
+        "character_states": {key: "black pantyhose"},
+        "clothing_details": {key: ""},
+    }]
+    sync_clothing_state_to_prompt(shots, profiles)
+    assert "skirt" not in shots[0]["prompt"]
+    assert "collar" not in shots[0]["prompt"]
+    assert "male face partially visible" not in shots[0]["prompt"]
+    assert "male face visible" not in shots[0]["prompt"]
+    assert "male face out of frame" in shots[0]["prompt"]
 
 
 def test_clothing_details_use_current_state_and_dedupe_synonyms():
@@ -786,26 +1233,37 @@ def test_beach_scene_recognizes_sea_breeze_sand_and_rocks():
     assert states[1][0] == "beach"
 
 
-def test_story_progress_ledger_records_stages_and_no_loop_rule():
+def test_story_progress_ledger_uses_structured_phases():
     shots = [
-        {"id": "01", "outline": "她独自自慰，手指碰到自己"},
-        {"id": "02", "outline": "你出现，她慌张停下"},
-        {"id": "03", "outline": "你插入她，她仰头呻吟"},
+        {"id": "01", "phase": "自慰", "outline": "她独自自慰"},
+        {"id": "02", "phase": "初遇", "outline": "他出现"},
+        {"id": "03", "phase": "插入", "outline": "他开始插入"},
     ]
     ledger = _story_progress_ledger(shots)
     assert "自慰" in ledger
-    assert "初遇/男主出现" in ledger
+    assert "初遇" in ledger
     assert "插入" in ledger
     assert "同一镜只能有一个主节拍" in ledger
     assert "不得无理由重复" in ledger
 
 
-def test_story_progress_ledger_blocks_redress_then_undress_loop():
-    ledger = _story_progress_ledger([
-        {"id": "01", "outline": "她整理好衣物，把胸罩和连裤袜穿回去"},
-    ])
-    assert "整理/事后阶段" in ledger
-    assert "禁止重新脱衣" in ledger
+def test_story_progress_ledger_warns_on_long_repeated_phase():
+    shots = [
+        {"id": "%02d" % index, "phase": "同一阶段", "outline": "继续"}
+        for index in range(1, 16)
+    ]
+    ledger = _story_progress_ledger(shots)
+    assert "连续 15 镜" in ledger
+    assert "必须推进到新事件" in ledger
+
+
+def test_act_plan_uses_configurable_max_act_shots():
+    from comfyui_generator.core.storyboard import build_premise_act_plan_messages
+    messages = build_premise_act_plan_messages(
+        "剧情", 50, max_act_shots=10)
+    content = messages[1]["content"]
+    assert "5 幕" in content
+    assert "每幕最多 10 格" in content
 
 
 def test_premise_act_plan_messages_reject_instruction_fragments():
@@ -818,8 +1276,8 @@ def test_premise_act_plan_messages_reject_instruction_fragments():
 
 def test_global_story_state_contains_progress_ledger():
     state = _global_story_state("story", [
-        {"id": "01", "outline": "她自慰"},
-        {"id": "02", "outline": "你出现"},
+        {"id": "01", "phase": "自慰", "outline": "她自慰"},
+        {"id": "02", "phase": "初遇", "outline": "他出现"},
     ])
     assert "剧情进度账本" in state
     assert "当前阶段" in state
@@ -827,8 +1285,8 @@ def test_global_story_state_contains_progress_ledger():
 
 def test_outline_progress_appends_completed_stages():
     state = _with_outline_progress("全局状态表：剧情开始", [
-        {"id": "01", "outline": "她自慰"},
-        {"id": "02", "outline": "你出现"},
+        {"id": "01", "phase": "自慰", "outline": "她自慰"},
+        {"id": "02", "phase": "初遇", "outline": "他出现"},
     ])
     assert "全局状态表：剧情开始" in state
     assert "已完成阶段" in state
@@ -1268,6 +1726,18 @@ def test_unknown_clothing_is_removed_on_nude_but_accessories_survive():
     assert "hairclip" in accessory_states[1][accessory.key]
 
 
+def test_appearance_lock_keeps_eye_expression_and_removes_wrong_color():
+    profile = parse_character_profiles(
+        "角色：少女\n外貌：purple eyes")[0]
+    prompt = apply_character_state(
+        "1girl, half-closed eyes, unfocused eyes, blue eyes, purple eyes",
+        [profile], {profile.key: set()}, [profile])
+    assert "half-closed eyes" in prompt
+    assert "unfocused eyes" in prompt
+    assert "blue eyes" not in prompt
+    assert "purple eyes" in prompt
+
+
 def test_appearance_lock_removes_conflicting_hair_style():
     profile = parse_character_profiles(
         "角色：男主：short black hair, golden eyes")[0]
@@ -1308,6 +1778,7 @@ def test_full_story_pipeline_uses_locked_male_character_state():
             if schema is storyboard.OUTLINE_SCHEMA:
                 return {"shots": [
                     {"id": "01", "name": "a", "cast": "1girl 1boy",
+                     "phase": "开场",
                      "outline": "两人站在卧室，女主穿着黑裙，男主穿着白衬衫和黑西裤"},
                     {"id": "02", "name": "b", "cast": "1girl 1boy",
                      "outline": "女主脱下黑裙，全裸，男主还穿着白衬衫和黑西裤"},
@@ -1330,14 +1801,15 @@ def test_full_story_pipeline_uses_locked_male_character_state():
         storyboard.StoryboardOptions(model="test", shots=3, chunk=3,
                                      full_story=True))
     assert len(shots) == 3
+    assert shots[0]["phase"] == "第一幕"
     for shot in shots:
         assert "silver hair" in shot["prompt"]
         assert "black hair" not in shot["prompt"]
     assert "white shirt" not in shots[0]["prompt"]
     assert "white shirt" not in shots[1]["prompt"]
     assert "white shirt" not in shots[2]["prompt"]
-    assert "nude male" in shots[0]["prompt"]
-    assert "nude male" in shots[1]["prompt"]
+    assert "nude male" not in shots[0]["prompt"]
+    assert "nude male" not in shots[1]["prompt"]
     assert "black dress" not in shots[1]["prompt"]
     assert "completely nude" in shots[1]["prompt"]
     assert "completely nude" in shots[2]["prompt"]
@@ -1426,7 +1898,7 @@ def test_generate_with_initial_shot_keeps_it():
     assert len(shots) == 3
     assert shots[0] == initial[0]
     assert [shot["id"] for shot in shots] == ["01", "02", "03"]
-    assert len(client.calls) == 5
+    assert len(client.calls) == 6
     assert "本次生成镜头数：2" in client.calls[1][0][1]["content"]
 
 
@@ -1640,6 +2112,361 @@ def test_cast_normalization_handles_nonstandard_forms():
     assert normalize_cast("1boy solo", "") == "1boy solo"
 
 
+def test_cast_normalization_prefers_explicit_solo_script():
+    script = "角色/cast：少女（1girl solo）；服装：black bra；动作：自慰；无男性参与。"
+    assert normalize_cast("1girl 1boy", script) == "1girl solo"
+
+
+def test_final_wardrobe_removes_unweighted_but_keeps_weighted():
+    premise = (
+        "角色：女主\n"
+        "初始服装：uniform, red cape, white gloves, black platform heels, "
+        "(black bra:1.2), (black lace panties:1.2), (black pantyhose:1.2)")
+    profiles = parse_character_profiles(premise)
+    shot = {
+        "id": "50",
+        "prompt": ("1girl, uniform, red cape, white gloves, black platform heels, "
+                   "skirt around thighs, (black bra:1.2), "
+                   "(black lace panties:1.2), torn pantyhose, cum on face"),
+        "character_states": {
+            profiles[0].key: ("uniform, red cape, white gloves, black platform heels, "
+                              "skirt around thighs, (black bra:1.2), "
+                              "(black lace panties:1.2), torn pantyhose")},
+        "clothing_details": {
+            profiles[0].key: "cape removed, red cape on sofa, skirt around thighs, "
+                             "torn pantyhose"},
+    }
+    enforce_final_wardrobe([shot], profiles)
+    assert "uniform" not in shot["prompt"]
+    assert "red cape" not in shot["prompt"]
+    assert "white gloves" not in shot["prompt"]
+    assert "black platform heels" not in shot["prompt"]
+    assert "skirt" not in shot["prompt"]
+    assert "(black bra:1.2)" in shot["prompt"]
+    assert "(black lace panties:1.2)" in shot["prompt"]
+    assert "torn pantyhose" in shot["prompt"]
+    assert "uniform" not in shot["character_states"][profiles[0].key]
+    assert "red cape" not in shot["clothing_details"][profiles[0].key]
+
+
+def test_final_climax_gets_afterglow_and_script():
+    shots = [{
+        "id": "50",
+        "phase": "正面冲刺顶点",
+        "prompt": "1girl, 1boy, cum on stomach, orgasm",
+        "script": "男主体外射精，女主到达顶点。",
+    }]
+    ensure_final_afterglow(shots)
+    assert "afterglow" in shots[0]["prompt"]
+    assert "after sex" in shots[0]["prompt"]
+    assert "事后余韵" in shots[0]["phase"]
+    assert "事后余韵" in shots[0]["script"]
+
+
+def test_premise_layered_masturbation_fills_missing_inside_contact():
+    premise = "剧情：先隔着裤袜和内裤自慰，然后手伸进内裤里摸阴唇自慰"
+    shots = [
+        {"id": "06", "script": "她隔着内裤揉按自慰",
+         "prompt": "1girl, solo, rubbing through panties"},
+        {"id": "07", "script": "她把裤袜拉低，继续隔着内裤自慰",
+         "prompt": "1girl, solo, pantyhose pulled down, through panties"},
+        {"id": "08", "script": "她高潮了",
+         "prompt": "1girl, solo, orgasm"},
+    ]
+    enforce_premise_masturbation_layers(shots, premise)
+    assert "hand inside panties" in shots[1]["prompt"]
+    assert "hand inside pantyhose" in shots[1]["prompt"]
+    assert "fingers on labia" in shots[1]["prompt"]
+    assert "through panties" not in shots[1]["prompt"]
+    assert "直接接触阴唇" in shots[1]["script"]
+
+
+def test_layered_masturbation_adds_inside_layers_and_labia():
+    shots = [{
+        "id": "06",
+        "script": "她把手伸进黑色裤袜和内裤里，指尖直接摸阴唇自慰",
+        "prompt": "1girl, solo, hand between legs, rubbing through pantyhose",
+    }]
+    ensure_layered_masturbation(shots)
+    prompt = shots[0]["prompt"]
+    assert "hand inside pantyhose" in prompt
+    assert "hand inside panties" in prompt
+    assert "fingers on labia" in prompt
+    assert "直接接触阴唇" in shots[0]["script"]
+
+
+def test_layer_action_keeps_base_clothing_when_hand_is_inside():
+    prompt = ("1girl, military uniform, black bra, black lace panties, "
+              "black pantyhose, hand under clothes, hand inside bra, "
+              "hand inside panties, hand inside pantyhose, fingers on labia")
+    worn = {
+        "military uniform", "black bra", "black lace panties",
+        "black pantyhose"}
+    result = apply_story_state(prompt, worn, worn)
+    for tag in ("military uniform", "black bra", "black lace panties",
+                "black pantyhose", "hand under clothes", "hand inside bra",
+                "hand inside panties", "hand inside pantyhose",
+                "fingers on labia"):
+        assert tag in result
+
+
+def test_layered_breast_contact_adds_under_outerwear_tags():
+    shots = [{
+        "id": "03",
+        "script": "她从军装外衣下伸手进去，探进胸罩里摸乳房",
+        "prompt": "1girl, military uniform, black bra, sitting",
+    }]
+    ensure_layered_breast_contact(shots)
+    prompt = shots[0]["prompt"]
+    assert "hand under clothes" in prompt
+    assert "hand inside bra" in prompt
+    assert "breast grab" in prompt
+    assert "从外衣下伸入胸罩" in shots[0]["script"]
+
+
+def test_layered_masturbation_does_not_add_inside_for_through_clothes():
+    shots = [{
+        "id": "02",
+        "script": "她隔着裤袜和内裤轻轻揉阴唇",
+        "prompt": "1girl, solo, rubbing through pantyhose, through panties",
+    }]
+    ensure_layered_masturbation(shots)
+    prompt = shots[0]["prompt"]
+    assert "hand inside pantyhose" not in prompt
+    assert "hand inside panties" not in prompt
+    assert "fingers on labia" in prompt
+
+
+def test_weighted_clothing_allows_half_off_but_not_removal():
+    premise = (
+        "角色：女主\n"
+        "初始服装：uniform, white gloves, (black bra:1.2), "
+        "(black lace panties:1.2), (torn pantyhose:1.2), "
+        "(black platform heels:1.2)")
+    profiles = parse_character_profiles(premise)
+    shot = {
+        "id": "47",
+        "prompt": ("1girl, 1boy, uniform, white gloves, bra removed, "
+                   "panties aside, pantyhose pulled down, barefoot, "
+                   "right black platform heel on floor, sex"),
+        "cast": "1girl 1boy",
+        "character_states": {},
+        "clothing_details": {},
+    }
+    enforce_weighted_core([shot], profiles)
+    assert "(black bra:1.2)" in shot["prompt"]
+    assert "(black platform heels:1.2)" in shot["prompt"]
+    assert "bra removed" not in shot["prompt"]
+    assert "barefoot" not in shot["prompt"]
+    assert "panties aside" in shot["prompt"]
+    assert "pantyhose pulled down" in shot["prompt"]
+
+
+def test_weighted_clothing_keeps_half_off_without_adding_base():
+    premise = (
+        "角色：女主\n"
+        "初始服装：(black bra:1.2), (black lace panties:1.2), "
+        "(black platform heels:1.2)")
+    profiles = parse_character_profiles(premise)
+    shot = {
+        "id": "20",
+        "prompt": "1girl, 1boy, bra pull, panties aside, one heel off",
+        "cast": "1girl 1boy",
+    }
+    enforce_weighted_core([shot], profiles)
+    assert shot["prompt"].count("(black bra:1.2)") == 0
+    assert shot["prompt"].count("(black platform heels:1.2)") == 0
+    assert "bra pull" in shot["prompt"]
+    assert "one heel off" in shot["prompt"]
+
+
+def test_intimacy_stage_detects_post_sex_regression():
+    shots = [
+        {"id": "01", "prompt": "1girl, 1boy, vaginal sex, penis in pussy"},
+        {"id": "02", "prompt": "1girl, 1boy, afterglow, cum on face"},
+        {"id": "03", "prompt": "1girl, 1boy, standing, masturbation"},
+        {"id": "04", "prompt": "1girl, 1boy, fellatio"},
+    ]
+    assert _intimacy_stage(shots[0]) == 3
+    assert _intimacy_stage(shots[1]) == 4
+    regressions = _intimacy_regressions(shots)
+    assert [item["id"] for item in regressions] == ["03", "04"]
+
+
+def test_focus_tags_get_weight_but_plain_tags_do_not():
+    shots = [{
+        "prompt": "1girl, hand between legs, panties aside, night, close-up",
+        "focus_tags": ["hand between legs", "panties aside"],
+    }]
+    apply_focus_weights(shots)
+    assert "(hand between legs:1.2)" in shots[0]["prompt"]
+    assert "(panties aside:1.2)" in shots[0]["prompt"]
+    assert "1girl," in shots[0]["prompt"]
+    assert "night," in shots[0]["prompt"]
+
+
+def test_normalize_tagged_keeps_focus_tags():
+    scripts = [{"id": "01", "name": "a", "script": "她自慰",
+                "cast": "1girl solo", "phase": "自慰"}]
+    shots = normalize_tagged({"shots": [{
+        "id": "01", "prompt": "1girl, masturbation",
+        "focus": ["masturbation"],
+    }]}, scripts)
+    assert shots[0]["focus_tags"] == ["masturbation"]
+
+
+def test_normalize_tagged_falls_back_phase_from_outline():
+    scripts = [{
+        "id": "01", "name": "a", "script": "她坐在车里",
+        "cast": "1girl solo", "phase": "", "outline": "前戏：车内等待",
+    }]
+    shots = normalize_tagged({"shots": [{"id": "01", "prompt": "1girl"}]}, scripts)
+    assert shots[0]["phase"] == "前戏：车内等待"
+
+
+def test_shots_from_json_keeps_phase_and_beat():
+    shot = shots_from_json({"shots": [{
+        "id": "01", "prompt": "1girl, solo", "phase": "前戏",
+        "beat": "车内等待", "outline": "等待",
+    }]})[0]
+    assert shot["phase"] == "前戏"
+    assert shot["beat"] == "车内等待"
+
+
+def test_normalize_shot_casts_uses_script_presence():
+    shots = [
+        {"id": "01", "cast": "1girl solo", "script": "她独自坐着"},
+        {"id": "02", "cast": "1girl solo", "script": "陌生男人走到她面前"},
+    ]
+    normalize_shot_casts(shots)
+    assert shots[0]["cast"] == "1girl solo"
+    assert shots[1]["cast"] == "1girl 1boy"
+
+
+def test_renumber_shots_fills_gaps_and_removes_duplicates():
+    shots = [{"id": "01"}, {"id": "02"}, {"id": "04"}, {"id": "04"}]
+    renumber_shots(shots)
+    assert [shot["id"] for shot in shots] == ["01", "02", "03", "04"]
+
+
+def test_repair_missing_actions_updates_phase_from_label():
+    class FakeClient:
+        def chat_json(self, model, messages, **kwargs):
+            return {"actions": [{
+                "id": "sex",
+                "label": "sex",
+                "shot_id": "02",
+                "script": "they have vaginal sex",
+                "prompt": "1girl, 1boy, vaginal sex, penis in pussy",
+            }]}
+
+    shots = [
+        {"id": "01", "phase": "自慰", "prompt": "1girl, masturbation"},
+        {"id": "02", "phase": "自慰", "prompt": "1girl, 1boy, standing"},
+        {"id": "03", "phase": "余韵", "prompt": "1girl, 1boy, afterglow"},
+    ]
+    repair_missing_actions_ai(FakeClient(), "model", shots, "story")
+    assert shots[1]["phase"] == "sex"
+    assert "vaginal sex" in shots[1]["prompt"]
+
+
+def test_repair_missing_actions_uses_ai_action_ledger():
+    premise = "补上女主自慰，补上口交（男、女都要有），补上呑精镜头"
+
+    class FakeClient:
+        def chat_json(self, model, messages, **kwargs):
+            return {"actions": [{
+                "id": "male_oral_female",
+                "label": "男主对女主口交",
+                "shot_id": "03",
+                "cast": "1girl 1boy",
+                "script": "男人跪在女主腿间，用舌头舔弄她的阴部。",
+                "prompt": ("1boy, 1girl, cunnilingus, licking pussy, "
+                           "male between female legs, pussy juice"),
+            }]}
+
+    shots = [
+        {"id": "01", "script": "她自慰", "prompt": "1girl, masturbation"},
+        {"id": "02", "script": "她给男主口交并吞精",
+         "prompt": "1girl, 1boy, fellatio, cum swallowing"},
+        {"id": "03", "script": "男主站在她面前", "prompt": "1girl, 1boy"},
+        {"id": "04", "script": "男主插入",
+         "prompt": "1girl, 1boy, penis in pussy"},
+    ]
+    repair_missing_actions_ai(FakeClient(), "model", shots, premise)
+    assert "cunnilingus" in shots[2]["prompt"]
+
+
+def test_action_audit_mentions_clothing_destruction_requirements():
+    messages = _action_audit_messages("撕开裤袜", [])
+    assert "服装破坏" in messages[0]["content"]
+    assert "pulled aside" in messages[0]["content"]
+
+
+def test_phase_backtracks_detects_non_contiguous_stage_return():
+    shots = [
+        {"id": "01", "phase": "自慰"},
+        {"id": "02", "phase": "自慰"},
+        {"id": "03", "phase": "口交"},
+        {"id": "04", "phase": "自慰"},
+    ]
+    backtracks = _phase_backtracks(shots)
+    assert backtracks == [{"phase": "自慰", "first": "01", "again": "04"}]
+
+
+def test_repetitive_shot_groups_catches_near_duplicate_below_old_threshold():
+    shots = [
+        {"id": "01", "script": "male standing outside car leaning in commanding"},
+        {"id": "02", "script": "male standing outside car leaning in watching"},
+        {"id": "03", "script": "completely different action"},
+    ]
+    assert ["01", "02"] in repetitive_shot_groups(shots)
+
+
+def test_repetitive_shot_groups_detects_near_duplicates():
+    shots = [
+        {"id": "01", "script": "男人把她抱起来，双腿M字悬空，插入。"},
+        {"id": "02", "script": "男人把她抱起来，双腿M字悬空，插入。"},
+        {"id": "03", "script": "她独自坐在长椅上喘息。"},
+    ]
+    groups = repetitive_shot_groups(shots)
+    assert ["01", "02"] in groups
+
+
+def test_pacing_audit_payload_is_trimmed_for_long_batches():
+    shots = [{
+        "id": "%02d" % i,
+        "phase": "自慰",
+        "script": "长" * 2000,
+        "prompt": "tag, " * 500,
+    } for i in range(1, 51)]
+    messages = _pacing_audit_messages(shots, "剧情", [], [])
+    payload = messages[1]["content"]
+    assert len(payload) < 60000
+    assert "长" * 2000 not in payload
+
+
+def test_repair_story_pacing_rewrites_duplicate_as_variation():
+    shots = [
+        {"id": "01", "phase": "口交", "script": "她跪着吞吐，头部前后移动。",
+         "prompt": "1girl, 1boy, fellatio"},
+        {"id": "02", "phase": "口交", "script": "她跪着吞吐，头部前后移动。",
+         "prompt": "1girl, 1boy, fellatio"},
+    ]
+
+    class Fake:
+        def chat_json(self, model, messages, **kwargs):
+            return {"shots": [{
+                "id": "02", "valid": False,
+                "script": "她放慢吞吐，只含住前端，舌尖绕弄，唾液拉丝，眼神上抬。",
+                "prompt": "1girl, 1boy, licking tip, tongue, saliva, eye contact",
+            }]}
+
+    repair_story_pacing_ai(Fake(), "m", shots, "口交")
+    assert shots[1]["script"] != shots[0]["script"]
+    assert "licking tip" in shots[1]["prompt"]
+
+
 def test_outline_output_does_not_require_name_and_keeps_structured_fields():
     outline = normalize_outline({"shots": [{
         "id": "01", "cast": "1girl solo", "phase": "前戏",
@@ -1667,3 +2494,15 @@ def test_act_plan_uses_ai_start_end_and_beats():
     assert acts[0]["end"] == 15
     assert acts[0]["beats"] == ["试探", "第一次触碰"]
     assert acts[1]["start"] == 16
+
+
+def test_normalize_acts_fills_gaps_and_covers_total():
+    acts = normalize_acts({"acts": [
+        {"title": "A", "start": 1, "end": 37, "summary": "a"},
+        {"title": "B", "start": 39, "end": 50, "summary": "b"},
+    ]}, 50, "story")
+    assert acts[0]["start"] == 1
+    assert acts[0]["end"] == 37
+    assert acts[1]["start"] == 38
+    assert acts[1]["end"] == 50
+    assert acts[-1]["end"] == 50

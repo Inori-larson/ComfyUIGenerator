@@ -37,6 +37,14 @@ def test_save_load_roundtrip(tmp_path):
     assert loaded.storage_root == str(tmp_path / "data")
 
 
+def test_projects_dir_defaults_to_output_story(tmp_path):
+    cfg = AppConfig()
+    cfg.comfy.output_dir = str(tmp_path / "output")
+    assert cfg.projects_dir == tmp_path / "output" / "story"
+    cfg.projects_root = str(tmp_path / "custom")
+    assert cfg.projects_dir == tmp_path / "custom"
+
+
 def test_resolved_paths_follow_base_dir():
     cfg = ComfyConfig(base_dir=r"H:\ComfyUIData")
     paths = cfg.resolved_paths()

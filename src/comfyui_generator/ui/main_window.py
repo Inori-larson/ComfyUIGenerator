@@ -18,7 +18,8 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QAction, QBrush, QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
-    QDoubleSpinBox, QFileDialog, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
+    QDoubleSpinBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout,
+    QHeaderView, QInputDialog, QLabel,
     QLineEdit, QListView, QListWidget, QListWidgetItem, QMainWindow, QMenu,
     QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea,
     QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QTableWidget,
@@ -38,14 +39,17 @@ from comfyui_generator.core.detailers import build_detailer_choices, filter_dete
 from comfyui_generator.core.jobs import Task, build_tasks
 from comfyui_generator.core.lora_info import is_style_lora, lora_tag_info
 from comfyui_generator.core.lora_sources import lora_display_label, lora_entries
+from comfyui_generator.core.model_configs import (
+    find_model_config, load_model_configs,
+)
 from comfyui_generator.core.ollama import OllamaClient
 from comfyui_generator.core.pose import (
     CLASSIC_POSE_LABELS, POSE_PRESET_LABELS, load_pose_presets,
     save_pose_presets,
 )
 from comfyui_generator.core.project import (
-    clear_story_partial, list_projects, load_project, load_session,
-    load_story_partial, move_to_trash, new_project, save_project,
+    clear_story_partial, configure_projects_dir, list_projects, load_project,
+    load_session, load_story_partial, move_to_trash, new_project, save_project,
     save_session, save_story_partial,
 )
 from comfyui_generator.core.quality import check_project, format_report, repair_project
@@ -56,8 +60,10 @@ from comfyui_generator.core.style_profile import (
     normalize_style_profile, style_profile_apply_settings,
 )
 from comfyui_generator.core.storyboard import (
-    StoryboardOptions, extract_premise_beats, filter_locked_appearance,
+    StoryboardOptions, backfill_clothing_details, extract_premise_beats,
+    filter_locked_appearance, normalize_shot_casts, parse_character_profiles,
     premise_from_json, shots_from_json, slugify,
+    sync_clothing_state_to_prompt,
 )
 from comfyui_generator.core.tag_cache import load_tag_cache, update_tag_cache
 from comfyui_generator.core.tags import append_tags, estimate_tokens
@@ -169,7 +175,8 @@ OUTLINE_ROLE = PROMPT_ZH_ROLE + 1
 CAST_ROLE = OUTLINE_ROLE + 1
 SCRIPT_ROLE = CAST_ROLE + 1
 PHASE_ROLE = SCRIPT_ROLE + 1
-CLOTHING_ROLE = PHASE_ROLE + 1
+BEAT_ROLE = PHASE_ROLE + 1
+CLOTHING_ROLE = BEAT_ROLE + 1
 CHARACTERS_ROLE = CLOTHING_ROLE + 1
 CHARACTER_STATES_ROLE = CHARACTERS_ROLE + 1
 SCENE_ROLE = CHARACTER_STATES_ROLE + 1
@@ -179,6 +186,119 @@ CONTINUITY_STATE_ROLE = PROMPT_GROUPS_ROLE + 1
 CONTINUITY_SCENE_ROLE = CONTINUITY_STATE_ROLE + 1
 KEYFRAME_PROMPT_ROLE = CONTINUITY_SCENE_ROLE + 1
 AI_EXPANSIONS_ROLE = KEYFRAME_PROMPT_ROLE + 1
+GALLERY_PATH_ROLE = AI_EXPANSIONS_ROLE + 1
+GALLERY_TASK_ROLE = GALLERY_PATH_ROLE + 1
+GALLERY_IMAGE_ROLE = GALLERY_TASK_ROLE + 1
+GALLERY_META_ROLE = GALLERY_IMAGE_ROLE + 1
+GALLERY_FAVORITE_ROLE = GALLERY_META_ROLE + 1
+GALLERY_INDEX_ROLE = GALLERY_FAVORITE_ROLE + 1
+
+
+class GalleryViewerDialog(QDialog):
+    def __init__(self, path: Path, metadata: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("画廊预览 - %s" % path.name)
+        self.resize(1100, 820)
+        self._fullscreen = False
+        self._pixmap = QPixmap(str(path))
+        layout = QVBoxLayout(self)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.image = QLabel()
+        self.image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        if not self._pixmap.isNull():
+            self.image.setPixmap(self._pixmap)
+        else:
+            self.image.setText("无法读取图片")
+        self.scroll.setWidget(self.image)
+        layout.addWidget(self.scroll, 1)
+        self.info = QPlainTextEdit()
+        self.info.setReadOnly(True)
+        self.info.setMaximumHeight(160)
+        self.info.setPlainText(metadata)
+        layout.addWidget(self.info)
+        self.button_bar = QWidget()
+        buttons = QHBoxLayout(self.button_bar)
+        buttons.setContentsMargins(0, 0, 0, 0)
+        self.btn_fullscreen = QPushButton("全屏")
+        self.btn_fullscreen.clicked.connect(self._toggle_fullscreen)
+        open_folder = QPushButton("打开文件夹")
+        open_folder.clicked.connect(
+            lambda: os.startfile(str(path.parent)))  # noqa: S606
+        close = QPushButton("关闭")
+        close.clicked.connect(self.accept)
+        buttons.addStretch(1)
+        buttons.addWidget(self.btn_fullscreen)
+        buttons.addWidget(open_folder)
+        buttons.addWidget(close)
+        layout.addWidget(self.button_bar)
+        QTimer.singleShot(0, self._fit_image)
+
+    def _fit_image(self) -> None:
+        if self._pixmap.isNull():
+            return
+        size = self.scroll.viewport().size()
+        if size.width() < 10 or size.height() < 10:
+            return
+        self.image.setPixmap(self._pixmap.scaled(
+            size, Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation))
+
+    def _toggle_fullscreen(self) -> None:
+        self._fullscreen = not self._fullscreen
+        self.info.setVisible(not self._fullscreen)
+        self.button_bar.setVisible(not self._fullscreen)
+        if self._fullscreen:
+            self.showFullScreen()
+            self.btn_fullscreen.setText("退出全屏")
+        else:
+            self.showNormal()
+            self.resize(1100, 820)
+            self.btn_fullscreen.setText("全屏")
+        QTimer.singleShot(0, self._fit_image)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._fit_image()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.key() == Qt.Key.Key_F11 or (
+                event.key() == Qt.Key.Key_Escape and self._fullscreen):
+            self._toggle_fullscreen()
+            return
+        super().keyPressEvent(event)
+
+
+class GalleryCompareDialog(QDialog):
+    def __init__(self, entries: list[dict[str, Any]], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("画廊对比")
+        self.resize(1200, 800)
+        layout = QVBoxLayout(self)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        inner = QWidget()
+        grid = QGridLayout(inner)
+        for index, entry in enumerate(entries):
+            card = QWidget()
+            card_layout = QVBoxLayout(card)
+            image = QLabel()
+            pixmap = QPixmap(str(entry["path"]))
+            if not pixmap.isNull():
+                image.setPixmap(pixmap.scaled(
+                    360, 360, Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation))
+            image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            card_layout.addWidget(image)
+            label = QLabel(str(entry.get("label") or entry["path"].name))
+            label.setWordWrap(True)
+            card_layout.addWidget(label)
+            grid.addWidget(card, index // 3, index % 3)
+        scroll.setWidget(inner)
+        layout.addWidget(scroll, 1)
+        close = QPushButton("关闭")
+        close.clicked.connect(self.accept)
+        layout.addWidget(close)
 
 
 def _label(text: str, name: str = "Section") -> QLabel:
@@ -196,6 +316,8 @@ class MainWindow(QMainWindow):
         self.resize(1480, 940)
         self.cfg: AppConfig = load_config()
         self.cfg.ensure_dirs()
+        configure_projects_dir(
+            self.cfg.root, self.cfg.projects_dir, self.cfg.single_projects_dir)
         self.template_path = resolve_template(self.cfg)
         self.template = load_template(self.cfg)
         self.comfy_service = ComfyService(self.cfg)
@@ -220,6 +342,8 @@ class MainWindow(QMainWindow):
         self._icon_last: dict[str, float] = {}
         self._lora_info_cache: dict[str, dict] = {}
         self._selected_shot_ids: list[str] = []
+        self.model_configs = load_model_configs()
+        self._loading_model_config = False
         self._reference_tags: list[str] = []
         self._lora_paths: dict[str, str] = {}
         self._online_tried: set[str] = set()
@@ -290,6 +414,9 @@ class MainWindow(QMainWindow):
         self._init_defaults()
         self._setup_auto_translate()
         self._restore_ui_state()
+        self._apply_model_preset_migration()
+        self._sync_model_config_to_checkpoint(apply=True)
+        self._ensure_window_on_screen()
         self._loading_style_profile = False
         self._update_partial_button()
         self._state_timer = QTimer(self)
@@ -318,7 +445,7 @@ class MainWindow(QMainWindow):
         vsplit.addWidget(split)
         vsplit.addWidget(self._build_bottom())
         vsplit.setStretchFactor(0, 1)
-        vsplit.setSizes([700, 230])
+        vsplit.setSizes([780, 160])
         self.main_split = split
         self.main_vsplit = vsplit
         root.addWidget(vsplit, 1)
@@ -416,9 +543,14 @@ class MainWindow(QMainWindow):
         self.left_stack.addWidget(self._build_single_panel())
         self.left_stack.addWidget(self._build_story_panel())
         layout.addWidget(self.left_stack, 1)
-        panel.setMinimumWidth(390)
-        panel.setMaximumWidth(580)
-        return panel
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(panel)
+        scroll.setMinimumWidth(390)
+        scroll.setMaximumWidth(580)
+        return scroll
 
     def _build_single_panel(self) -> QWidget:
         page = QWidget()
@@ -495,6 +627,17 @@ class MainWindow(QMainWindow):
         hint = _label("只显示中文；点“生成图片”时自动映射为英文 Danbooru 标签。没有提示词时可直接用激活标签出图", "Hint")
         hint.setWordWrap(True)
         layout.addWidget(hint)
+
+        count_row = QHBoxLayout()
+        count_row.addWidget(_label("图生图张数", "Hint"))
+        self.single_expand_spin = QSpinBox()
+        self.single_expand_spin.setRange(0, 50)
+        self.single_expand_spin.setValue(3)
+        self.single_expand_spin.setToolTip("单图最多可连续生成 1 + 这个数量的图")
+        count_row.addWidget(self.single_expand_spin)
+        count_row.addWidget(_label("0 = 只出关键帧", "Hint"))
+        count_row.addStretch(1)
+        layout.addLayout(count_row)
 
         self.btn_single_render = QPushButton("② 生成图片")
         self.btn_single_render.setObjectName("Primary")
@@ -732,7 +875,21 @@ class MainWindow(QMainWindow):
         form.addWidget(self.llm_combo)
         form.addWidget(_label("底模（Checkpoint，可输入）"))
         self.ckpt_combo = SearchComboBox(placeholder="选择或输入 Checkpoint 名", allow_free_text=True)
+        self.ckpt_combo.currentIndexChanged.connect(
+            self._on_checkpoint_changed)
         form.addWidget(self.ckpt_combo)
+        form.addWidget(_label("配置选择（自动套用推荐参数）"))
+        self.model_config_combo = SearchComboBox(
+            placeholder="选择底模推荐配置", allow_free_text=False)
+        self.model_config_combo.currentIndexChanged.connect(
+            self._on_model_config_changed)
+        self.model_config_combo.activated.connect(
+            self._on_model_config_activated)
+        form.addWidget(self.model_config_combo)
+        self.btn_apply_model_config = QPushButton("应用配置")
+        self.btn_apply_model_config.clicked.connect(
+            self._on_model_config_changed)
+        form.addWidget(self.btn_apply_model_config)
         row = QHBoxLayout()
         row.addWidget(_label("CLIP skip", "Hint"))
         self.clip_skip = QSpinBox()
@@ -1064,14 +1221,16 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(_label("骨架微调", "Section"))
         for label, prefix in (("女主", "pose_girl"), ("男主", "pose_boy")):
-            row = QHBoxLayout()
-            row.addWidget(_label(label, "Hint"))
-            for text, suffix, low, high, step, value, width in (
+            grid = QGridLayout()
+            grid.setHorizontalSpacing(8)
+            grid.setVerticalSpacing(2)
+            grid.addWidget(_label(label, "Hint"), 0, 0)
+            for column, (text, suffix, low, high, step, value, width) in enumerate((
                     ("X", "%", -30.0, 30.0, 1.0, 0.0, 68),
                     ("Y", "%", -30.0, 30.0, 1.0, 0.0, 68),
                     ("缩放", "", 0.5, 1.8, 0.05, 1.0, 68),
-                    ("旋转", "°", -180.0, 180.0, 5.0, 0.0, 74)):
-                row.addWidget(QLabel(text))
+                    ("旋转", "°", -180.0, 180.0, 5.0, 0.0, 74)), 1):
+                grid.addWidget(QLabel(text), 0, column)
                 spin = QDoubleSpinBox()
                 spin.setRange(low, high)
                 spin.setSingleStep(step)
@@ -1081,9 +1240,8 @@ class MainWindow(QMainWindow):
                 setattr(self, "%s_%s" % (prefix, "scale" if text == "缩放"
                                         else "rotation" if text == "旋转"
                                         else text.lower()), spin)
-                row.addWidget(spin)
-            row.addStretch(1)
-            layout.addLayout(row)
+                grid.addWidget(spin, 1, column)
+            layout.addLayout(grid)
 
         self.img2img_check = QCheckBox("启用单镜图生图细节扩展")
         self.img2img_check.setChecked(True)
@@ -1091,9 +1249,15 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         row.addWidget(_label("每镜扩展张数", "Hint"))
         self.expand_spin = QSpinBox()
-        self.expand_spin.setRange(0, 8)
+        self.expand_spin.setRange(0, 50)
         self.expand_spin.setValue(3)
         row.addWidget(self.expand_spin)
+        if hasattr(self, "single_expand_spin"):
+            self.expand_spin.valueChanged.connect(
+                self.single_expand_spin.setValue)
+            self.single_expand_spin.valueChanged.connect(
+                self.expand_spin.setValue)
+            self.single_expand_spin.setValue(self.expand_spin.value())
         self.expand_external = QCheckBox("扩展使用外部 AI（更稳，可能计费）")
         self.expand_external.setToolTip("使用配置的外部 OpenAI 兼容 API 生成扩展提示词")
         row.addWidget(self.expand_external)
@@ -1370,20 +1534,49 @@ class MainWindow(QMainWindow):
 
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
-        self.log_view.setMaximumBlockCount(3000)
+        self.log_view.setMaximumBlockCount(1500)
+        self.log_view.clear()
         self.bottom_tabs.addTab(self.log_view, "日志")
+
+        gallery_panel = QWidget()
+        gallery_layout = QVBoxLayout(gallery_panel)
+        gallery_layout.setContentsMargins(0, 0, 0, 0)
+        gallery_tools = QHBoxLayout()
+        self.gallery_filter = QComboBox()
+        self.gallery_filter.addItem("全部", "all")
+        self.gallery_filter.addItem("仅收藏", "favorite")
+        self.gallery_filter.addItem("未收藏", "plain")
+        self.gallery_filter.currentIndexChanged.connect(
+            self._apply_gallery_filter)
+        gallery_tools.addWidget(self.gallery_filter)
+        self.gallery_sort = QComboBox()
+        self.gallery_sort.addItem("按镜头", "index")
+        self.gallery_sort.addItem("按名称", "name")
+        self.gallery_sort.addItem("收藏优先", "favorite")
+        self.gallery_sort.currentIndexChanged.connect(self._sort_gallery)
+        gallery_tools.addWidget(self.gallery_sort)
+        gallery_tools.addStretch(1)
+        self.gallery_count = QLabel("0 张")
+        gallery_tools.addWidget(self.gallery_count)
+        gallery_layout.addLayout(gallery_tools)
 
         self.gallery = QListWidget()
         self.gallery.setViewMode(QListView.ViewMode.IconMode)
-        self.gallery.setIconSize(QSize(150, 150))
-        self.gallery.setGridSize(QSize(170, 185))
+        self.gallery.setIconSize(QSize(110, 110))
+        self.gallery.setGridSize(QSize(128, 136))
         self.gallery.setResizeMode(QListView.ResizeMode.Adjust)
         self.gallery.setMovement(QListView.Movement.Static)
         self.gallery.setSpacing(6)
+        self.gallery.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.gallery.setMinimumHeight(90)
+        gallery_panel.setMinimumHeight(0)
+        self.bottom_tabs.setMinimumHeight(120)
         self.gallery.itemDoubleClicked.connect(self._open_gallery_item)
         self.gallery.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.gallery.customContextMenuRequested.connect(self._gallery_menu)
-        self.bottom_tabs.addTab(self.gallery, "画廊")
+        gallery_layout.addWidget(self.gallery, 1)
+        self.bottom_tabs.addTab(gallery_panel, "画廊")
         return self.bottom_tabs
 
     # ---------------------------------------------------------------- defaults
@@ -1447,6 +1640,7 @@ class MainWindow(QMainWindow):
         self._sync_action_watcher()
         self._sync_clothing_watcher()
         self._apply_custom_models()
+        self._populate_model_configs()
 
     @staticmethod
     def _merge_values(*groups: list[str]) -> list[str]:
@@ -1515,6 +1709,97 @@ class MainWindow(QMainWindow):
         index = combo.findText(current)
         if index >= 0:
             combo.setCurrentIndex(index)
+
+    def _populate_model_configs(self) -> None:
+        self._model_config_by_id = {
+            str(config.get("id") or ""): config
+            for config in self.model_configs}
+        self._loading_model_config = True
+        self.model_config_combo.blockSignals(True)
+        try:
+            self.model_config_combo.clear()
+            self.model_config_combo.addItem("自定义 / 手动参数", "")
+            for config in self.model_configs:
+                config_id = str(config.get("id") or "")
+                if not config_id:
+                    continue
+                self.model_config_combo.addItem(
+                    str(config.get("label") or config_id), config_id)
+        finally:
+            self.model_config_combo.blockSignals(False)
+            self._loading_model_config = False
+
+    def _sync_model_config_to_checkpoint(self, *_args, apply: bool = False) -> None:
+        if getattr(self, "_loading_model_config", False):
+            return
+        checkpoint = self.ckpt_combo.currentValue()
+        config = find_model_config(self.model_configs, checkpoint)
+        config_id = str(config.get("id") or "") if config else ""
+        self._loading_model_config = True
+        self.model_config_combo.blockSignals(True)
+        try:
+            self.model_config_combo.selectValue(config_id)
+        finally:
+            self.model_config_combo.blockSignals(False)
+            self._loading_model_config = False
+        if apply and config:
+            self._apply_model_config(config)
+
+    def _on_model_config_activated(self, *_args) -> None:
+        self._on_model_config_changed()
+
+    def _on_checkpoint_changed(self, *_args) -> None:
+        if getattr(self, "_loading_model_config", False):
+            return
+        config = find_model_config(
+            self.model_configs, self.ckpt_combo.currentValue())
+        if config:
+            self._apply_model_config(config)
+        else:
+            self._sync_model_config_to_checkpoint()
+
+    def _on_model_config_changed(self, *_args) -> None:
+        if getattr(self, "_loading_model_config", False):
+            return
+        config_id = str(self.model_config_combo.currentData() or "")
+        config = getattr(self, "_model_config_by_id", {}).get(config_id)
+        if config:
+            self._apply_model_config(config)
+
+    def _apply_model_config(self, config: dict[str, Any]) -> None:
+        self._loading_model_config = True
+        try:
+            config_id = str(config.get("id") or "")
+            if config_id:
+                self.model_config_combo.selectValue(config_id)
+            self._ensure_combo_value(
+                self.ckpt_combo, str(config.get("model") or ""))
+            self.clip_skip.setValue(int(config.get("clip_skip", -2)))
+            width = int(config.get("width", 832))
+            height = int(config.get("height", 1216))
+            self.width_spin.setValue(width)
+            self.height_spin.setValue(height)
+            res_index = self.res_combo.findData((width, height))
+            if res_index >= 0:
+                self.res_combo.setCurrentIndex(res_index)
+            self.steps_spin.setValue(int(config.get("steps", 28)))
+            self.cfg_spin.setValue(float(config.get("cfg", 5.0)))
+            self.sampler_combo.selectValue(
+                str(config.get("sampler") or "euler_ancestral"))
+            self.scheduler_combo.selectValue(
+                str(config.get("scheduler") or "normal"))
+            hires = config.get("hires") or {}
+            self.hires_check.setChecked(bool(hires.get("enabled", False)))
+            self.hires_scale.setValue(float(hires.get("scale", 1.5)))
+            self.hires_steps.setValue(int(hires.get("steps", 20)))
+            self.hires_denoise.setValue(float(hires.get("denoise", 0.4)))
+            upscaler = str(config.get("upscaler") or "").strip()
+            if upscaler:
+                self.upscaler_combo.selectValue(upscaler)
+        finally:
+            self._loading_model_config = False
+        self.append_log("已加载模型配置：%s" % (
+            config.get("label") or config.get("id") or config.get("model")))
 
     def _apply_resolution(self) -> None:
         value = self.res_combo.currentData()
@@ -3087,6 +3372,7 @@ class MainWindow(QMainWindow):
         project["prefix"] = "anime_story/" + name
         project["server"] = self.cfg.comfy.base_url
         project["output_dir"] = self.cfg.comfy.output_dir
+        backfill_clothing_details(project["shots"], text)
         return project
 
     # ---------------------------------------------------------------- prompt generation
@@ -3379,6 +3665,7 @@ class MainWindow(QMainWindow):
             prompt_item.setData(CAST_ROLE, str(shot.get("cast", "")))
             prompt_item.setData(SCRIPT_ROLE, str(shot.get("script", "")))
             prompt_item.setData(PHASE_ROLE, str(shot.get("phase", "")))
+            prompt_item.setData(BEAT_ROLE, str(shot.get("beat", "")))
             prompt_item.setData(CLOTHING_ROLE, str(shot.get("clothing", "")))
             prompt_item.setData(CHARACTERS_ROLE, str(shot.get("characters", "")))
             states = shot.get("character_states") or {}
@@ -3741,6 +4028,7 @@ class MainWindow(QMainWindow):
             "cast": (prompt_item.data(CAST_ROLE) or "") if prompt_item else "",
             "script": (prompt_item.data(SCRIPT_ROLE) or "") if prompt_item else "",
             "phase": (prompt_item.data(PHASE_ROLE) or "") if prompt_item else "",
+            "beat": (prompt_item.data(BEAT_ROLE) or "") if prompt_item else "",
             "clothing": (prompt_item.data(CLOTHING_ROLE) or "") if prompt_item else "",
             "characters": (prompt_item.data(CHARACTERS_ROLE) or "") if prompt_item else "",
             "character_states": states,
@@ -3964,6 +4252,9 @@ class MainWindow(QMainWindow):
                 "prompt_zh": item["prompt_zh"] or item["prompt"] or "",
                 "outline": item.get("outline", ""),
                 "cast": item.get("cast", ""),
+                "script": item.get("script", ""),
+                "phase": item.get("phase", ""),
+                "beat": item.get("beat", ""),
                 "shot_size": item.get("shot_size", ""),
                 "camera_angle": item.get("camera_angle", ""),
                 "continuity_state": item.get("continuity_state", ""),
@@ -4206,14 +4497,24 @@ class MainWindow(QMainWindow):
 
     def _selected_shot_rows(self) -> list[int]:
         ids = set(self._selected_shot_ids)
+        rows: list[int] = []
         if ids:
             rows = [
                 row for row in range(self.shot_table.rowCount())
                 if (self.shot_table.item(row, 1)
                     and self.shot_table.item(row, 1).text().strip() in ids)]
-            if rows:
-                return rows
-        return sorted({index.row() for index in self.shot_table.selectedIndexes()})
+        if not rows:
+            rows = sorted({
+                index.row() for index in self.shot_table.selectedIndexes()})
+        if getattr(self, "chk_selected", None) is not None \
+                and self.chk_selected.isChecked():
+            checked = [
+                row for row in range(self.shot_table.rowCount())
+                if (self.shot_table.item(row, 0)
+                    and self.shot_table.item(row, 0).checkState()
+                    == Qt.CheckState.Checked)]
+            rows = sorted(set(rows) | set(checked))
+        return rows
 
     def _collect_shots(self, selected_only: bool, allow_empty: bool = False) -> list[dict[str, Any]]:
         rows = self._selected_shot_rows() if selected_only \
@@ -4233,13 +4534,14 @@ class MainWindow(QMainWindow):
                               "prompt_zh": "",
                               "outline": data.get("outline", ""),
                               "cast": data.get("cast", ""),
-                              "script": data.get("script", ""),
-                              "phase": data.get("phase", ""),
-                              "clothing": data.get("clothing", ""),
-                              "characters": data.get("characters", ""),
-                              "character_states": data.get("character_states") or {},
-                              "clothing_details": data.get("clothing_details") or {},
-                              "prompt_groups": data.get("prompt_groups") or [],
+                "script": data.get("script", ""),
+                "phase": data.get("phase", ""),
+                "beat": data.get("beat", ""),
+                "clothing": data.get("clothing", ""),
+                "characters": data.get("characters", ""),
+                "character_states": data.get("character_states") or {},
+                "clothing_details": data.get("clothing_details") or {},
+                "prompt_groups": data.get("prompt_groups") or [],
                               "scene": data.get("scene", ""),
                               "continuity_state": data.get("continuity_state", ""),
                               "continuity_scene": data.get("continuity_scene", ""),
@@ -4262,6 +4564,7 @@ class MainWindow(QMainWindow):
                           "cast": data.get("cast", ""),
                           "script": data.get("script", ""),
                           "phase": data.get("phase", ""),
+                          "beat": data.get("beat", ""),
                           "clothing": data.get("clothing", ""),
                           "characters": data.get("characters", ""),
                           "character_states": data.get("character_states") or {},
@@ -4316,31 +4619,55 @@ class MainWindow(QMainWindow):
                       "prompt": prompt, "prompt_zh": prompt_zh or prompt}]
             text = self._single_input_text() or prompt_zh or prompt or "activation"
         else:
-            shots = self._collect_shots(self.chk_selected.isChecked(), allow_empty=activation)
+            all_shots = self._collect_shots(False, allow_empty=activation)
+            selected_only = self.chk_selected.isChecked()
+            if selected_only:
+                selected_ids = {
+                    self.shot_table.item(row, 1).text().strip()
+                    for row in self._selected_shot_rows()
+                    if self.shot_table.item(row, 1)
+                    and self.shot_table.item(row, 1).text().strip()}
+                shots = [
+                    shot for shot in all_shots
+                    if str(shot.get("id") or "").strip() in selected_ids]
+            else:
+                shots = all_shots
             if not shots and activation:
                 shots = [{"id": "01", "name": "activation", "prompt": "", "prompt_zh": ""}]
             if not shots:
                 QMessageBox.information(self, "提示", "没有可生成的镜头，请先生成或填写分镜。")
                 return
-            if self.chk_selected.isChecked():
-                self.append_log("仅生成选中镜头：%s" % ", ".join(
-                    str(shot.get("id") or "") for shot in shots))
-            text = self._story_premise_text() or shots[0]["prompt"] or "activation"
+            if selected_only:
+                self.append_log("仅生成选中镜头：%d 个（%s）" % (
+                    len(shots), ", ".join(
+                        str(shot.get("id") or "") for shot in shots)))
+            text = self._story_premise_text() or all_shots[0]["prompt"] or "activation"
 
-        project = self._build_project(mode, shots, text)
+        project = self._build_project(mode, all_shots if mode != "single" else shots, text)
+        previous_prefix = str((self.project or {}).get("prefix") or "")
         self._reuse_project_identity(project)
         if self.auto_continuity_check.isChecked():
             project, repairs = repair_project(project)
             if repairs:
                 self._apply_repaired_project(project, replace_table=False)
-                shots = list(project.get("shots") or shots)
+                if mode != "single" and selected_only:
+                    ids = {str(shot.get("id") or "") for shot in shots}
+                    shots = [
+                        shot for shot in (project.get("shots") or [])
+                        if str(shot.get("id") or "") in ids]
+                else:
+                    shots = list(project.get("shots") or shots)
             for change in repairs:
                 self.append_log("自动连贯修复 · " + change)
         if not self._preflight_quality(project):
             return
         prefix = self._run_prefix_for(mode, text)
         project["prefix"] = prefix
+        if prefix != previous_prefix:
+            project["outputs"] = []
         self.project = project
+        if prefix != previous_prefix:
+            self._load_gallery(project)
         output_dir = self.cfg.comfy.output_dir.strip()
         if output_dir:
             folder = Path(output_dir) / Path(prefix)
@@ -4597,8 +4924,8 @@ class MainWindow(QMainWindow):
         self.final_bytes[task_id] = data
         self._set_row_icon(task_id, data)
         self._add_gallery(task, data, local)
-        if self.project is not None:
-            self.project.setdefault("outputs", []).append(task.image)
+        if self.project is not None and task.image:
+            self._append_project_output(task.image)
             save_project(self.project, self.cfg.root)
         if task_id == self.current_task_id or self.chk_follow.isChecked():
             self._paint(data)
@@ -4618,31 +4945,196 @@ class MainWindow(QMainWindow):
         client = ComfyClient(self.cfg.comfy.base_url)
         return client.view(filename, subfolder, "output"), None
 
-    def _add_gallery(self, task: Any, data: bytes, local: Path | None) -> None:
+    def _gallery_metadata(self, *, task: Any = None, shot: dict[str, Any] | None = None,
+                          image: str = "", label: str = "",
+                          path: str = "") -> dict[str, Any]:
+        project = self.project or {}
+        settings = project.get("settings") or {}
+        shot = shot or {}
+        return {
+            "label": label or str(shot.get("name") or ""),
+            "image": image,
+            "path": path,
+            "shot_id": str(shot.get("id") or getattr(task, "shot_id", "") or ""),
+            "phase": str(shot.get("phase") or ""),
+            "cast": str(shot.get("cast") or ""),
+            "script": str(shot.get("script") or shot.get("outline") or ""),
+            "prompt": str(shot.get("prompt") or ""),
+            "negative": str(shot.get("negative") or ""),
+            "model": str(project.get("model") or ""),
+            "seed": str(getattr(task, "seed", "") or shot.get("seed") or ""),
+            "width": str(settings.get("width") or ""),
+            "height": str(settings.get("height") or ""),
+            "created": str(project.get("updated") or project.get("created") or ""),
+        }
+
+    def _gallery_metadata_text(self, meta: dict[str, Any]) -> str:
+        rows = [
+            ("镜头", meta.get("shot_id")),
+            ("标签", meta.get("label")),
+            ("阶段", meta.get("phase")),
+            ("Cast", meta.get("cast")),
+            ("Seed", meta.get("seed")),
+            ("模型", meta.get("model")),
+            ("尺寸", "%sx%s" % (meta.get("width"), meta.get("height"))),
+            ("时间", meta.get("created")),
+            ("文件", meta.get("path")),
+            ("图片引用", meta.get("image")),
+            ("Script", meta.get("script")),
+            ("Prompt", meta.get("prompt")),
+            ("Negative", meta.get("negative")),
+        ]
+        return "\n".join("%s: %s" % (key, value)
+                         for key, value in rows if value)
+
+    def _append_project_output(self, image: str) -> None:
+        if self.project is None or not image:
+            return
+        outputs = list(self.project.get("outputs") or [])
+        normalized = image.replace("\\", "/")
+        if normalized not in {str(item).replace("\\", "/") for item in outputs}:
+            outputs.append(image)
+            self.project["outputs"] = outputs
+
+    def _make_gallery_item(self, data: bytes, meta: dict[str, Any],
+                           task_id: str = "", favorite: bool = False) -> QListWidgetItem:
         image = QImage.fromData(data)
         pixmap = QPixmap.fromImage(image).scaled(
             150, 150, Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation)
         item = QListWidgetItem()
         item.setIcon(QIcon(pixmap))
-        item.setText(task.label)
-        item.setToolTip(task.image or "")
+        item.setText(meta.get("label") or Path(str(meta.get("path"))).stem)
+        item.setToolTip(meta.get("path") or meta.get("image") or "")
+        item.setData(GALLERY_PATH_ROLE, meta.get("path") or "")
+        item.setData(GALLERY_TASK_ROLE, task_id)
+        item.setData(GALLERY_IMAGE_ROLE, meta.get("image") or "")
+        item.setData(GALLERY_META_ROLE, meta)
+        item.setData(GALLERY_FAVORITE_ROLE, bool(favorite))
+        try:
+            index = int(str(meta.get("shot_id") or "0"))
+        except ValueError:
+            index = 0
+        item.setData(GALLERY_INDEX_ROLE, index)
+        if favorite:
+            item.setText("★ " + item.text())
+        return item
+
+    def _add_gallery(self, task: Any, data: bytes, local: Path | None) -> None:
+        image_ref = str(getattr(task, "image", "") or "")
+        if image_ref and self._gallery_has_image(image_ref):
+            return
         if local is None:
             cache = self.cfg.cache_dir / "gallery"
             cache.mkdir(parents=True, exist_ok=True)
-            local = cache / (task.label + ".png")
+            local = cache / ("%s_%s.png" % (task.label, task.id))
             local.write_bytes(data)
-        item.setData(Qt.ItemDataRole.UserRole, str(local))
-        item.setData(Qt.ItemDataRole.UserRole + 1, task.id)
-        self.gallery.addItem(item)
+        meta = self._gallery_metadata(
+            task=task, shot=getattr(task, "shot", None) or {},
+            image=image_ref, label=str(getattr(task, "label", "") or ""),
+            path=str(local))
+        favorite = image_ref in set((self.project or {}).get(
+            "gallery_favorites") or [])
+        self.gallery.addItem(self._make_gallery_item(
+            data, meta, task_id=str(getattr(task, "id", "") or ""),
+            favorite=favorite))
+        self._sort_gallery()
+        self._refresh_gallery_count()
+
+    def _gallery_has_image(self, image_ref: str) -> bool:
+        normalized = image_ref.replace("\\", "/")
+        for index in range(self.gallery.count()):
+            item = self.gallery.item(index)
+            if str(item.data(GALLERY_IMAGE_ROLE) or "").replace(
+                    "\\", "/") == normalized:
+                return True
+        return False
+
+    def _load_gallery(self, project: dict[str, Any] | None = None) -> None:
+        project = project or self.project or {}
+        self.gallery.clear()
+        favorites = set(project.get("gallery_favorites") or [])
+        shots = list(project.get("shots") or [])
+        outputs = list(project.get("outputs") or [])
+        prefix = str(project.get("prefix") or "").replace("\\", "/").strip("/")
+        prefix_scope = prefix + "/" if prefix else ""
+        seen: set[str] = set()
+        for index, image in enumerate(outputs):
+            normalized = str(image).replace("\\", "/")
+            if prefix_scope and not normalized.startswith(prefix_scope):
+                continue
+            if normalized in seen:
+                continue
+            path = self._resolve_output_image(image)
+            if path is None:
+                continue
+            seen.add(normalized)
+            shot = shots[index] if index < len(shots) else {}
+            meta = self._gallery_metadata(
+                shot=shot, image=str(image),
+                label=path.stem or str(shot.get("name") or ""),
+                path=str(path))
+            try:
+                data = path.read_bytes()
+            except Exception:
+                continue
+            self.gallery.addItem(self._make_gallery_item(
+                data, meta, favorite=normalized in {
+                    str(item).replace("\\", "/") for item in favorites}))
+        self._sort_gallery()
+        self._refresh_gallery_count()
+
+    def _refresh_gallery_count(self) -> None:
+        visible = sum(1 for index in range(self.gallery.count())
+                      if not self.gallery.item(index).isHidden())
+        self.gallery_count.setText("%d / %d 张" % (
+            visible, self.gallery.count()))
+
+    def _apply_gallery_filter(self, *_args) -> None:
+        mode = self.gallery_filter.currentData()
+        for index in range(self.gallery.count()):
+            item = self.gallery.item(index)
+            favorite = bool(item.data(GALLERY_FAVORITE_ROLE))
+            hidden = (mode == "favorite" and not favorite) or (
+                mode == "plain" and favorite)
+            item.setHidden(hidden)
+        self._refresh_gallery_count()
+
+    def _sort_gallery(self, *_args) -> None:
+        mode = self.gallery_sort.currentData() if hasattr(
+            self, "gallery_sort") else "index"
+        items = [self.gallery.takeItem(0) for _ in range(self.gallery.count())]
+        if mode == "name":
+            items.sort(key=lambda item: item.text().lower())
+        elif mode == "favorite":
+            items.sort(key=lambda item: (
+                not bool(item.data(GALLERY_FAVORITE_ROLE)),
+                int(item.data(GALLERY_INDEX_ROLE) or 0)))
+        else:
+            items.sort(key=lambda item: int(item.data(GALLERY_INDEX_ROLE) or 0))
+        for item in items:
+            self.gallery.addItem(item)
+        self._apply_gallery_filter()
+
+    def _gallery_item_path(self, item: QListWidgetItem) -> Path | None:
+        resolved = self._resolve_output_image(item.data(GALLERY_IMAGE_ROLE))
+        if resolved is not None:
+            return resolved
+        path = Path(str(item.data(GALLERY_PATH_ROLE) or ""))
+        return path if path.is_file() else None
 
     def _open_gallery_item(self, item: QListWidgetItem) -> None:
-        path = item.data(Qt.ItemDataRole.UserRole)
-        if path and Path(path).is_file():
-            os.startfile(str(Path(path).parent))  # noqa: S606
-            os.startfile(path)  # noqa: S606
-        else:
+        path = self._gallery_item_path(item)
+        if path is None:
             QMessageBox.information(self, "提示", "找不到图片文件。")
+            return
+        meta = item.data(GALLERY_META_ROLE) or {}
+        GalleryViewerDialog(path, self._gallery_metadata_text(meta), self).exec()
+
+    def _gallery_selected_items(self) -> list[QListWidgetItem]:
+        selected = self.gallery.selectedItems()
+        return selected or ([self.gallery.currentItem()]
+                            if self.gallery.currentItem() else [])
 
     # ---------------------------------------------------------------- M2: project / trash / compare
 
@@ -4693,6 +5185,7 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 return
         self.project = None
+        self._load_gallery(None)
         clear_story_partial(self.cfg.root)
         self._update_partial_button()
         self._run_prefix = ""
@@ -4723,6 +5216,7 @@ class MainWindow(QMainWindow):
         self._update_shot_stats()
         self.queue_table.setRowCount(0)
         self.gallery.clear()
+        self._refresh_gallery_count()
         self.previews.clear()
         self.final_bytes.clear()
         self.tasks_by_id.clear()
@@ -4830,6 +5324,13 @@ class MainWindow(QMainWindow):
 
     def _apply_project(self, project: dict[str, Any]) -> None:
         self.project = project
+        premise = str(project.get("premise") or "")
+        normalize_shot_casts(project.get("shots") or [])
+        backfill_clothing_details(project.get("shots") or [], premise)
+        profiles = parse_character_profiles(premise)
+        if profiles:
+            sync_clothing_state_to_prompt(
+                project.get("shots") or [], profiles)
         self._run_prefix = ""
         self._run_signature = ""
         mode = project.get("mode", "story")
@@ -4939,7 +5440,7 @@ class MainWindow(QMainWindow):
         self.wildcard_dir.setText(str(wildcards.get("dir", "")))
         self.output_name.setText(project.get("name", ""))
 
-        self.gallery.clear()
+        self._load_gallery(project)
         self.previews.clear()
         self.final_bytes.clear()
         self.tasks_by_id.clear()
@@ -4966,56 +5467,313 @@ class MainWindow(QMainWindow):
         item = self.gallery.itemAt(pos)
         if item is None:
             return
-        self.gallery.setCurrentItem(item)
+        if not item.isSelected():
+            self.gallery.clearSelection()
+            item.setSelected(True)
+        items = self._gallery_selected_items()
+        favorite = bool(item.data(GALLERY_FAVORITE_ROLE))
         menu = QMenu(self)
-        act_open = menu.addAction("打开文件")
+        act_open = menu.addAction("预览")
+        act_folder = menu.addAction("打开文件夹")
+        act_favorite = menu.addAction("取消收藏" if favorite else "收藏")
+        redraw_label = ("重绘选中 %d 张（新 seed）" % len(items)
+                        if len(items) > 1 else "重绘此图（新 seed）")
+        expand_label = ("扩展选中 %d 张" % len(items)
+                        if len(items) > 1 else "扩展此镜头")
+        act_redraw = menu.addAction(redraw_label)
+        act_expand = menu.addAction(expand_label)
+        act_compare = menu.addAction("对比选中")
+        act_compare.setEnabled(len(items) >= 2)
+        act_sheet = menu.addAction("生成拼接图")
         act_trash = menu.addAction("移到回收站")
         chosen = menu.exec(self.gallery.viewport().mapToGlobal(pos))
         if chosen is act_open:
             self._open_gallery_item(item)
+        elif chosen is act_folder:
+            path = self._gallery_item_path(item)
+            if path is not None:
+                os.startfile(str(path.parent))  # noqa: S606
+        elif chosen is act_favorite:
+            self._toggle_gallery_favorite(items)
+        elif chosen is act_redraw:
+            self._redraw_gallery_items(items)
+        elif chosen is act_expand:
+            self._expand_gallery_items(items)
+        elif chosen is act_compare:
+            self._compare_gallery(items)
+        elif chosen is act_sheet:
+            self._gallery_contact_sheet(items)
         elif chosen is act_trash:
-            self._trash_gallery_item(item)
+            self._trash_gallery_items(items)
 
-    def _remove_project_output(self, path: str | Path) -> None:
-        if not self.project:
+    def _gallery_shot(self, item: QListWidgetItem) -> dict[str, Any] | None:
+        meta = item.data(GALLERY_META_ROLE) or {}
+        shot_id = str(meta.get("shot_id") or "")
+        return next((shot for shot in (self.project or {}).get("shots") or []
+                     if str(shot.get("id") or "") == shot_id), None)
+
+    def _expand_gallery_items(self, items: list[QListWidgetItem]) -> None:
+        if (self.expansion_worker and self.expansion_worker.isRunning()) or (
+                self.render_worker and self.render_worker.isRunning()):
+            QMessageBox.information(self, "提示", "正在生成，请等待当前任务结束。")
             return
-        name = Path(str(path).replace("\\", "/")).name
-        outputs = self.project.get("outputs") or []
-        self.project["outputs"] = [o for o in outputs if Path(str(o).replace("\\", "/")).name != name]
+        if not self.project:
+            QMessageBox.information(self, "提示", "没有可用的项目。")
+            return
+        shots: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in items:
+            shot = self._gallery_shot(item)
+            if shot is None:
+                continue
+            shot_id = str(shot.get("id") or "")
+            if shot_id in seen:
+                continue
+            seen.add(shot_id)
+            shots.append(dict(shot))
+        if not shots:
+            QMessageBox.information(self, "提示", "找不到对应镜头。")
+            return
+        count = int(self.expand_spin.value())
+        if count <= 0:
+            QMessageBox.information(self, "提示", "请先设置扩展张数。")
+            return
+        external = self.cfg.external_llm
+        external_ready = bool(
+            external.base_url and external.api_key and external.model)
+        use_external = bool(self.expand_external.isChecked() and external_ready)
+        model = external.model if use_external else self._llm()
+        if not model:
+            QMessageBox.information(self, "提示", "没有可用的提示词模型。")
+            return
+        sequence = bool((self.project.get("settings") or {}).get(
+            "img2img", {}).get("sequence_mode", False))
+        self._pending_gallery_expand = (shots, count)
+        worker = ExpansionWorker(
+            self.cfg, shots, count, model=model,
+            use_external=use_external, sequence=sequence)
+        worker.done.connect(self._on_gallery_expansions_ready)
+        worker.failed.connect(self._on_gallery_expansions_failed)
+        worker.log.connect(self.append_log)
+        worker.finished.connect(lambda: setattr(self, "expansion_worker", None))
+        self.expansion_worker = worker
+        self._set_generation_enabled(False)
+        self.btn_cancel.setEnabled(True)
+        self.append_log("画廊扩展：%d 镜，每镜 %d 张" % (len(shots), count))
+        worker.start()
+
+    def _on_gallery_expansions_ready(self, expansions: dict[str, list[str]]) -> None:
+        pending = getattr(self, "_pending_gallery_expand", None)
+        self._pending_gallery_expand = None
+        if not pending or not self.project:
+            self._set_generation_enabled(True)
+            return
+        shots, count = pending
+        tasks = []
+        for shot in shots:
+            prompts = list(
+                expansions.get(str(shot.get("id") or "")) or [])[:count]
+            for index, prompt in enumerate(prompts, 1):
+                expanded = dict(shot)
+                expanded["prompt"] = prompt
+                task = Task(
+                    shot_id=str(shot.get("id") or ""),
+                    shot_name=str(shot.get("name") or ""),
+                    variant=index, seed=random.randint(0, 2 ** 31 - 1),
+                    shot=expanded,
+                    label="%s_gallery_e%02d_%s" % (
+                        shot.get("id"), index, uuid.uuid4().hex[:4]))
+                self.tasks_by_id[task.id] = task
+                tasks.append(task)
+        if not tasks:
+            self.append_log("画廊扩展没有返回可用提示词。")
+            self._set_generation_enabled(True)
+            return
+        hires = bool((self.project.get("settings") or {}).get(
+            "hires", {}).get("enabled", True))
+        worker = RenderWorker(self.cfg, self.project, tasks, hires)
+        worker.log.connect(self.append_log)
+        worker.finished_ok.connect(self._on_gallery_redraw_finished)
+        worker.failed.connect(self._on_render_failed)
+        worker.finished.connect(lambda: self._set_generation_enabled(True))
+        self.render_worker = worker
+        self.btn_cancel.setEnabled(True)
+        self.append_log("画廊扩展渲染：%d 张" % len(tasks))
+        worker.start()
+
+    def _on_gallery_expansions_failed(self, message: str) -> None:
+        self._pending_gallery_expand = None
+        self._set_generation_enabled(True)
+        self.append_log("画廊扩展失败：%s" % message)
+
+    def _redraw_gallery_items(self, items: list[QListWidgetItem]) -> None:
+        if self.render_worker and self.render_worker.isRunning():
+            QMessageBox.information(self, "提示", "正在生成，请等待当前任务结束。")
+            return
+        if not self.project:
+            QMessageBox.information(self, "提示", "没有可用的项目。")
+            return
+        tasks = []
+        for item in items:
+            shot = self._gallery_shot(item)
+            if shot is None:
+                continue
+            shot_id = str(shot.get("id") or "")
+            seed = random.randint(0, 2 ** 31 - 1)
+            task = Task(
+                shot_id=shot_id, shot_name=str(shot.get("name") or ""),
+                variant=1, seed=seed, shot=dict(shot),
+                label="%s_gallery_%s" % (shot_id, uuid.uuid4().hex[:4]))
+            self.tasks_by_id[task.id] = task
+            tasks.append(task)
+        if not tasks:
+            QMessageBox.information(self, "提示", "找不到对应镜头。")
+            return
+        hires = bool((self.project.get("settings") or {}).get(
+            "hires", {}).get("enabled", True))
+        worker = RenderWorker(self.cfg, self.project, tasks, hires)
+        worker.task_updated.connect(self._on_task_update)
+        worker.log.connect(self.append_log)
+        worker.finished_ok.connect(self._on_gallery_redraw_finished)
+        worker.failed.connect(self._on_render_failed)
+        worker.finished.connect(lambda: self._set_generation_enabled(True))
+        self.render_worker = worker
+        self._set_generation_enabled(False)
+        self.btn_cancel.setEnabled(True)
+        self.append_log("画廊重绘：%d 张，seed %s" % (
+            len(tasks), ", ".join(str(task.seed) for task in tasks)))
+        worker.start()
+
+    def _on_gallery_redraw_finished(self, results: list[dict[str, Any]]) -> None:
+        for result in results:
+            if result.get("state") == "done":
+                self._on_task_done(str(result.get("id") or ""))
+
+    def _save_gallery_favorites(self) -> None:
+        if self.project is None:
+            return
+        favorites = []
+        for index in range(self.gallery.count()):
+            item = self.gallery.item(index)
+            if item.data(GALLERY_FAVORITE_ROLE):
+                image = str(item.data(GALLERY_IMAGE_ROLE) or "")
+                if image:
+                    favorites.append(image)
+        self.project["gallery_favorites"] = favorites
         save_project(self.project, self.cfg.root)
 
-    def _trash_gallery_item(self, item: QListWidgetItem) -> None:
+    def _toggle_gallery_favorite(self, items: list[QListWidgetItem]) -> None:
+        if not items:
+            return
+        target = not bool(items[0].data(GALLERY_FAVORITE_ROLE))
+        for item in items:
+            item.setData(GALLERY_FAVORITE_ROLE, target)
+            text = item.text()
+            if target and not text.startswith("★ "):
+                item.setText("★ " + text)
+            elif not target and text.startswith("★ "):
+                item.setText(text[2:])
+        self._save_gallery_favorites()
+        self._sort_gallery()
+
+    def _compare_gallery(self, items: list[QListWidgetItem]) -> None:
+        entries = []
+        for item in items:
+            path = self._gallery_item_path(item)
+            if path is not None:
+                entries.append({"path": path, "label": item.text()})
+        if len(entries) < 2:
+            QMessageBox.information(self, "提示", "至少选择两张图片。")
+            return
+        GalleryCompareDialog(entries, self).exec()
+
+    def _gallery_contact_sheet(self, items: list[QListWidgetItem]) -> None:
+        paths = [path for path in (self._gallery_item_path(item)
+                                  for item in items) if path is not None]
+        if not paths:
+            QMessageBox.information(self, "提示", "没有可用的图片。")
+            return
+        project_id = str((self.project or {}).get("id") or "")
+        folder = (self.cfg.root / "projects" / project_id / "contact_sheets"
+                  if project_id else self.cfg.root / "contact_sheets")
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / ("gallery_%s_%s.png" % (
+            time.strftime("%Y%m%d_%H%M%S"), uuid.uuid4().hex[:4]))
+        title = "%s - Gallery" % ((self.project or {}).get("name") or "Project")
+        try:
+            build_contact_sheet(paths, target, title=title)
+            self.append_log("画廊拼接图：%s" % target)
+            os.startfile(str(target))  # noqa: S606
+        except Exception as exc:
+            QMessageBox.warning(self, "生成失败", str(exc))
+
+    def _remove_project_output(self, image: str | Path) -> None:
+        if not self.project:
+            return
+        target = str(image).replace("\\", "/")
+        target_path = Path(target)
+        target_resolved = (str(target_path.resolve()).replace("\\", "/")
+                           if target_path.is_file() else "")
+
+        def matches(item: str) -> bool:
+            value = str(item).replace("\\", "/")
+            if value == target:
+                return True
+            resolved = self._resolve_output_image(item)
+            return bool(target_resolved and resolved and
+                        str(resolved.resolve()).replace("\\", "/") == target_resolved)
+
+        outputs = self.project.get("outputs") or []
+        self.project["outputs"] = [item for item in outputs if not matches(item)]
+        favorites = self.project.get("gallery_favorites") or []
+        self.project["gallery_favorites"] = [
+            item for item in favorites if not matches(item)]
+        save_project(self.project, self.cfg.root)
+
+    def _trash_gallery_items(self, items: list[QListWidgetItem]) -> None:
         if not self.project:
             QMessageBox.information(self, "提示", "先保存或打开一个项目。")
             return
-        path = item.data(Qt.ItemDataRole.UserRole)
-        if not path or not Path(path).is_file():
+        removed = 0
+        for item in list(items):
+            path = self._gallery_item_path(item)
+            if path is None:
+                continue
+            try:
+                dest = move_to_trash(path, self.project["id"], self.cfg.root)
+            except Exception as exc:
+                QMessageBox.warning(self, "移动失败", str(exc))
+                continue
+            image = str(item.data(GALLERY_IMAGE_ROLE) or "")
+            if image:
+                self._remove_project_output(image)
+            task_id = str(item.data(GALLERY_TASK_ROLE) or "")
+            if task_id:
+                task = self.tasks_by_id.get(task_id)
+                if task:
+                    task.state = "discarded"
+                self.final_bytes.pop(task_id, None)
+                self.previews.pop(task_id, None)
+                row = self.task_rows.get(task_id)
+                if row is not None:
+                    self.queue_table.item(row, 1).setText("已丢弃")
+            self.gallery.takeItem(self.gallery.row(item))
+            removed += 1
+            self.append_log("已移入回收站：%s" % dest.name)
+        self._save_gallery_favorites()
+        self._refresh_gallery_count()
+        if removed == 0:
             QMessageBox.information(self, "提示", "找不到图片文件。")
-            return
-        try:
-            dest = move_to_trash(path, self.project["id"], self.cfg.root)
-        except Exception as exc:
-            QMessageBox.warning(self, "移动失败", str(exc))
-            return
-        self._remove_project_output(path)
-        task_id = item.data(Qt.ItemDataRole.UserRole + 1)
-        if task_id:
-            task = self.tasks_by_id.get(task_id)
-            if task:
-                task.state = "discarded"
-            self.final_bytes.pop(task_id, None)
-            self.previews.pop(task_id, None)
-            row = self.task_rows.get(task_id)
-            if row is not None:
-                self.queue_table.item(row, 1).setText("已丢弃")
-        self.gallery.takeItem(self.gallery.row(item))
-        self.append_log("已移入回收站：%s" % dest.name)
+
+    def _trash_gallery_item(self, item: QListWidgetItem) -> None:
+        self._trash_gallery_items([item])
 
     def _remove_gallery_task(self, task_id: str) -> None:
         for index in range(self.gallery.count() - 1, -1, -1):
             item = self.gallery.item(index)
-            if item.data(Qt.ItemDataRole.UserRole + 1) == task_id:
+            if item.data(GALLERY_TASK_ROLE) == task_id:
                 self.gallery.takeItem(index)
+        self._refresh_gallery_count()
 
     def _discard_entry(self, entry: dict[str, Any]) -> None:
         path = entry.get("path") or ""
@@ -5269,7 +6027,10 @@ class MainWindow(QMainWindow):
 
     def append_log(self, message: str) -> None:
         stamp = time.strftime("%H:%M:%S")
-        self.log_view.appendPlainText("[%s] %s" % (stamp, message))
+        text = str(message or "")
+        if len(text) > 700:
+            text = text[:700].rstrip() + " …（完整内容见落盘日志）"
+        self.log_view.appendPlainText("[%s] %s" % (stamp, text))
 
     def open_pose_editor(self) -> None:
         from comfyui_generator.ui.pose_dialog import PoseEditorDialog
@@ -5587,7 +6348,11 @@ class MainWindow(QMainWindow):
                               (self.main_vsplit, "main_vsplit")):
             sizes = window.get(key)
             if isinstance(sizes, list) and len(sizes) == splitter.count():
-                splitter.setSizes([int(size) for size in sizes])
+                values = [int(size) for size in sizes]
+                if key == "main_vsplit":
+                    max_bottom = max(120, min(170, self.height() - 220))
+                    values[-1] = max(120, min(values[-1], max_bottom))
+                splitter.setSizes(values)
 
         loras = state.get("loras") or {}
         self._restore_lora_table(self.lora_table, loras.get("character") or {})
@@ -5673,6 +6438,7 @@ class MainWindow(QMainWindow):
             "cast": shot.get("cast", ""),
             "script": shot.get("script", ""),
             "phase": shot.get("phase", ""),
+            "beat": shot.get("beat", ""),
             "continuity_state": shot.get("continuity_state", ""),
             "continuity_scene": shot.get("continuity_scene", ""),
             "keyframe_prompt": shot.get("keyframe_prompt", ""),
@@ -5776,18 +6542,56 @@ class MainWindow(QMainWindow):
             self.bottom_tabs.setCurrentIndex(bottom)
         self._refresh_reference_tags()
 
+    def _apply_model_preset_migration(self) -> None:
+        checkpoint = self.ckpt_combo.currentValue()
+        if "noobaiXLNAIXL_epsilonPred11Version" not in checkpoint:
+            return
+        current = (
+            self.width_spin.value(), self.height_spin.value(),
+            self.steps_spin.value(), float(self.cfg_spin.value()),
+            self.clip_skip.value())
+        if current not in (
+                (1024, 1344, 30, 5.0, -2),
+                (832, 1216, 28, 5.0, -1)):
+            return
+        self.width_spin.setValue(832)
+        self.height_spin.setValue(1216)
+        res_index = self.res_combo.findData((832, 1216))
+        if res_index >= 0:
+            self.res_combo.setCurrentIndex(res_index)
+        self.steps_spin.setValue(30)
+        self.cfg_spin.setValue(5.5)
+        self.clip_skip.setValue(-2)
+        self.sampler_combo.selectValue("euler")
+        self.scheduler_combo.selectValue("normal")
+        self.hires_check.setChecked(True)
+        self.hires_scale.setValue(1.5)
+        self.hires_steps.setValue(20)
+        self.hires_denoise.setValue(0.35)
+        self._ensure_combo_value(self.upscaler_combo,
+                                 "RealESRGAN_x4plus_anime_6B.pth")
+        self.append_log(
+            "已应用 NoobAI-XL Epsilon 1.1 清晰化参数：832x1216 / 30 steps / "
+            "CFG 5.5 / Euler / clip skip 2 / Hires 1.5x")
+
     def _ensure_window_on_screen(self) -> None:
         screen = self.screen() or QApplication.primaryScreen()
         if screen is None:
             return
         available = screen.availableGeometry()
+        max_width = max(800, available.width() - 24)
+        max_height = max(600, available.height() - 56)
         frame = self.frameGeometry()
-        if frame.width() > available.width() or frame.height() > available.height():
-            self.resize(min(frame.width(), available.width()),
-                        min(frame.height(), available.height()))
+        if frame.width() > max_width or frame.height() > max_height:
+            self.resize(min(frame.width(), max_width),
+                        min(frame.height(), max_height))
             frame = self.frameGeometry()
-        if not available.intersects(frame):
-            self.move(available.center() - self.rect().center())
+        x = min(max(frame.x(), available.left()),
+                available.right() - frame.width() + 1)
+        y = min(max(frame.y(), available.top()),
+                available.bottom() - frame.height() + 1)
+        if x != frame.x() or y != frame.y():
+            self.move(x, y)
 
     def _restore_ui_state(self) -> None:
         state = load_session(self.cfg.root)

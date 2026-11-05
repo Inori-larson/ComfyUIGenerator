@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import time
 import urllib.error
 import urllib.request
@@ -69,6 +70,13 @@ class ExternalLLMClient:
                     time.sleep(3 + attempt * 4)
                     continue
                 raise ExternalLLMError("External LLM HTTP %s: %s" % (exc.code, detail)) from exc
+            except (TimeoutError, socket.timeout) as exc:
+                if attempt < retries:
+                    time.sleep(3 + attempt * 4)
+                    continue
+                raise ExternalLLMError(
+                    "External LLM request timed out after %.0fs: %s" % (
+                        effective_timeout, exc)) from exc
             except urllib.error.URLError as exc:
                 if attempt < retries:
                     time.sleep(3 + attempt * 4)

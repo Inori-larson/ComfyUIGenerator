@@ -12,6 +12,18 @@ from typing import Any
 PROJECT_VERSION = 1
 SESSION_FILE = "ui_session.json"
 PARTIAL_STORY_FILE = "story_partial.json"
+_CONFIGURED_ROOT: Path | None = None
+_CONFIGURED_PROJECTS: Path | None = None
+_CONFIGURED_SINGLE_PROJECTS: Path | None = None
+
+
+def configure_projects_dir(root: Path, projects: Path,
+                           single_projects: Path | None = None) -> None:
+    global _CONFIGURED_ROOT, _CONFIGURED_PROJECTS, _CONFIGURED_SINGLE_PROJECTS
+    _CONFIGURED_ROOT = Path(root)
+    _CONFIGURED_PROJECTS = Path(projects)
+    _CONFIGURED_SINGLE_PROJECTS = (
+        Path(single_projects) if single_projects is not None else Path(projects))
 
 
 def new_project(name: str, premise: str, template: dict[str, Any],
@@ -31,14 +43,23 @@ def new_project(name: str, premise: str, template: dict[str, Any],
     return project
 
 
-def projects_dir(root: Path) -> Path:
-    path = root / "projects"
+def projects_dir(root: Path, mode: str = "") -> Path:
+    path = Path(root)
+    if (_CONFIGURED_ROOT is not None and _CONFIGURED_PROJECTS is not None
+            and path == _CONFIGURED_ROOT):
+        if (mode == "single" and _CONFIGURED_SINGLE_PROJECTS is not None):
+            path = _CONFIGURED_SINGLE_PROJECTS
+        else:
+            path = _CONFIGURED_PROJECTS
+    else:
+        path = path / ("single" if mode == "single" else "projects")
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
 def project_file(root: Path, project: dict[str, Any]) -> Path:
-    return projects_dir(root) / ("%s.json" % project["id"])
+    return projects_dir(root, str(project.get("mode") or "")) / (
+        "%s.json" % project["id"])
 
 
 def save_project(project: dict[str, Any], root: Path) -> Path:
@@ -114,18 +135,24 @@ def clear_story_partial(root: Path) -> None:
 
 def list_projects(root: Path) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
-    for path in sorted(projects_dir(root).glob("*.json")):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        items.append({
-            "id": data.get("id", path.stem),
-            "name": data.get("name", path.stem),
-            "updated": data.get("updated", ""),
-            "shots": len(data.get("shots") or []),
-            "path": str(path),
-        })
+    seen: set[Path] = set()
+    for mode in ("story", "single"):
+        for path in sorted(projects_dir(root, mode).glob("*.json")):
+            if path in seen:
+                continue
+            seen.add(path)
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            items.append({
+                "id": data.get("id", path.stem),
+                "name": data.get("name", path.stem),
+                "mode": data.get("mode", ""),
+                "updated": data.get("updated", ""),
+                "shots": len(data.get("shots") or []),
+                "path": str(path),
+            })
     items.sort(key=lambda item: item.get("updated", ""), reverse=True)
     return items
 
@@ -134,7 +161,7 @@ def delete_project(project: dict[str, Any], root: Path) -> None:
     path = project_file(root, project)
     if path.is_file():
         path.unlink()
-    folder = projects_dir(root) / project["id"]
+    folder = projects_dir(root, str(project.get("mode") or "")) / project["id"]
     if folder.is_dir():
         shutil.rmtree(folder, ignore_errors=True)
 
