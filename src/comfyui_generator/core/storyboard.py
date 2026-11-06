@@ -6,7 +6,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from comfyui_generator.core.ollama import OllamaClient
-from comfyui_generator.core.ai_review import run_all_reviews
+from comfyui_generator.core.ai_review import (
+    ensure_clothing_gate, run_all_reviews)
 from comfyui_generator.core.mechanical import normalize_prompt_text
 from comfyui_generator.core.trace import trace_event
 
@@ -1468,6 +1469,10 @@ def generate_full_story_pipeline(client: OllamaClient, premise: str,
         batch_size=10, max_passes=2,
         timeout=max(options.timeout, 600.0), log=options.log,
         profiles=profiles)
+    ensure_clothing_gate(
+        client, review_model(options.model), result, premise,
+        timeout=max(options.timeout, 600.0), log=options.log,
+        profiles=profiles, max_passes=3)
     finalize_generated_story(result, premise)
     return result
 
@@ -1788,6 +1793,10 @@ def _generate_long_storyboard(client: OllamaClient, premise: str,
         batch_size=10, max_passes=2,
         timeout=max(options.timeout, 600.0), log=options.log,
         profiles=profiles)
+    ensure_clothing_gate(
+        client, review_model(options.model), result, premise,
+        timeout=max(options.timeout, 600.0), log=options.log,
+        profiles=profiles, max_passes=3)
     finalize_generated_story(result, premise)
     return result
 
@@ -1914,6 +1923,10 @@ def generate_storyboard(client: OllamaClient, premise: str,
         batch_size=10, max_passes=2,
         timeout=max(options.timeout, 600.0), log=options.log,
         profiles=profiles)
+    ensure_clothing_gate(
+        client, review_model(options.model), result, premise,
+        timeout=max(options.timeout, 600.0), log=options.log,
+        profiles=profiles, max_passes=3)
     finalize_generated_story(result, premise)
     return result
 

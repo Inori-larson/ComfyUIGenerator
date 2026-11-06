@@ -225,10 +225,25 @@ def _dominant_state(entry: dict[str, Any]) -> str:
     return "none"
 
 
-def clothing_gate_findings(shots: list[dict[str, Any]],
-                           premise: str = "") -> dict[str, list[str]]:
+def _joined(entry: dict[str, Any], *groups: str) -> list[str]:
+    out: list[str] = []
+    for group in groups:
+        out.extend(entry.get(group) or [])
+    return out
+
+
+def clothing_repair_plan(shots: list[dict[str, Any]],
+                         premise: str = "") -> dict[str, Any]:
+    """Structured, actionable repair plan + whole-film clothing ledger.
+
+    Returns:
+      {"weighted": [...], "ledger": {shot_id: {category: state}},
+       "fixes": [ {shot, category, weighted, kind, tags, expected, keep}, ... ]}
+
+    The caller feeds this to the AI; the software never edits tags itself.
+    """
     if not shots:
-        return {}
+        return {"weighted": [], "ledger": {}, "fixes": []}
     weighted_init = initial_weighted_categories(premise)
     parsed = [_category_states(shot) for shot in shots]
 
@@ -236,10 +251,26 @@ def clothing_gate_findings(shots: list[dict[str, Any]],
     for states in parsed:
         categories |= set(states)
 
-    findings: dict[str, list[str]] = {}
+    ledger: dict[str, dict[str, str]] = {}
+    for shot, states in zip(shots, parsed):
+        row = {category: _dominant_state(entry)
+               for category, entry in states.items()}
+        if row:
+            ledger[str(shot.get("id"))] = row
 
-    def add(shot_id: Any, message: str) -> None:
-        findings.setdefault(str(shot_id), []).append(message)
+    fixes: list[dict[str, Any]] = []
+
+    def record(shot_id: Any, category: str, is_weighted: bool, kind: str,
+               tags: list[str], expected: str, keep: list[str] | None = None) -> None:
+        fixes.append({
+            "shot": str(shot_id),
+            "category": category,
+            "weighted": bool(is_weighted),
+            "kind": kind,
+            "tags": sorted(set(tags)),
+            "expected": expected,
+            "keep": sorted(set(keep or [])),
+        })
 
     for category in sorted(categories):
         is_weighted = category in weighted_init
@@ -250,13 +281,15 @@ def clothing_gate_findings(shots: list[dict[str, Any]],
 
         if is_weighted:
             if _dominant_state(end_entry) == "off":
-                add(end_id,
-                    "带权重的 %s 已被完全脱下/移除；权重服装必须保留（允许 torn、pulled down、"
-                    "aside、one heel off 等 active 状态），不得全脱" % category)
+                record(end_id, category, True, "weighted_removed",
+                       _joined(end_entry, "off"),
+                       "恢复为 active：用 torn / pulled down / around / aside / "
+                       "one heel off 等状态，不得 removed/barefoot/on floor")
         elif category in _REMOVABLE_CATEGORIES and end_entry["active"]:
-            add(end_id,
-                "非权重服装 %s 到结尾仍穿着；常规服装须在最后一镜前完全脱下"
-                "（请安排明确脱除镜头）" % category)
+            record(end_id, category, False, "must_be_off",
+                   _joined(end_entry, "worn", "displaced", "torn"),
+                   "删除该品类所有穿着/移位标签，只保留一个 off-body 标签，"
+                   "并注明固定放置位置（如 discarded %s on floor）" % category)
 
         prev_state = "none"
         damaged = False
@@ -272,43 +305,69 @@ def clothing_gate_findings(shots: list[dict[str, Any]],
             if entry["damage"]:
                 damaged = True
             elif damaged and state == "worn":
-                add(shot_id,
-                    "%s 此前已有 torn/ripped 破损，破损永久保留，不得恢复为完整基础标签"
-                    % category)
+                record(shot_id, category, is_weighted, "damage_recovered",
+                       _joined(entry, "worn"),
+                       "保留 torn/ripped/hole 破损标签，破损永久，"
+                       "不得恢复为完整基础标签")
 
-            # base worn tag + displaced/off state in the same shot is a
-            # conflict for removable clothing; weighted garments may keep the
-            # base tag together with an allowed displaced (half-off) state.
             if entry["worn"] and state in ("displaced", "off") and not is_weighted:
-                add(shot_id,
-                    "%s 同一镜同时出现基础穿着标签与半脱/脱下标签；常规服装只能有一个有效状态"
-                    % category)
-            if len(entry["locations"]) > 1:
-                add(shot_id,
-                    "%s 同一镜出现多个放置位置（%s）；脱下的服装位置必须唯一"
-                    % (category, "/".join(sorted(entry["locations"]))))
+                tags = _joined(entry, "worn", "displaced", "off")
+                keep = _joined(entry, "displaced", "off")
+                record(shot_id, category, False, "conflicting_states",
+                       tags,
+                       "同一服装只能保留一个与剧情阶段相符的状态；"
+                       "删除冲突的基础穿着标签", keep=keep)
 
-            # state may not move backward without an explicit restore action
-            rank = {"worn": 2, "displaced": 1, "off": 0}
+            if len(entry["locations"]) > 1:
+                record(shot_id, category, is_weighted, "multiple_locations",
+                       _joined(entry, "off", "displaced"),
+                       "只保留一个放置位置，删除多余位置标签")
+
             if (prev_state == "off" and state in ("worn", "displaced")
                     and not restoring):
-                if is_weighted:
-                    add(shot_id,
-                        "%s 已完全脱下，又在无明确穿回动作的镜中回到穿着/半脱；"
-                        "权重服装不得全脱后再穿，半脱到穿回需明确非否定动作" % category)
-                else:
-                    add(shot_id,
-                        "常规服装 %s 脱下后不得无过渡穿回；请保持脱下状态" % category)
+                kind = "weighted_reworn" if is_weighted else "reworn"
+                expected = (
+                    "权重服装不得全脱后再穿；恢复为半脱/移位 active 状态"
+                    if is_weighted else "常规服装脱下后保持 OFF，删除穿回标签")
+                record(shot_id, category, is_weighted, kind,
+                       _joined(entry, "worn", "displaced"), expected)
 
             if entry["locations"]:
                 current = next(iter(entry["locations"]))
                 if location is not None and current != location and not restoring:
-                    add(shot_id,
-                        "已脱下的 %s 位置从 %s 跳变为 %s；脱后位置须全片保持一致"
-                        % (category, location, current))
+                    record(shot_id, category, is_weighted, "location_jump",
+                           _joined(entry, "off", "displaced"),
+                           "脱后位置全片统一为 %s，把位置标签改回 %s"
+                           % (location, location))
                 location = current
             if state != "none":
                 prev_state = state
+
+    return {"weighted": sorted(weighted_init), "ledger": ledger,
+            "fixes": fixes}
+
+
+_FIX_KIND_TEXT = {
+    "weighted_removed": "带权重服装被完全脱下；须恢复为 active 状态，不得全脱",
+    "must_be_off": "非权重服装到结尾仍穿着；须完全脱下并注明固定位置",
+    "damage_recovered": "破损被恢复；torn/ripped/hole 永久保留",
+    "conflicting_states": "同镜基础穿着与半脱/脱下标签冲突；只保留一个状态",
+    "multiple_locations": "同镜出现多个放置位置；位置须唯一",
+    "weighted_reworn": "权重服装全脱后又穿回；恢复为半脱/移位 active 状态",
+    "reworn": "常规服装脱后穿回；保持 OFF",
+    "location_jump": "脱后位置跳变；全片统一放置位置",
+}
+
+
+def clothing_gate_findings(shots: list[dict[str, Any]],
+                           premise: str = "") -> dict[str, list[str]]:
+    plan = clothing_repair_plan(shots, premise)
+    findings: dict[str, list[str]] = {}
+    for fix in plan["fixes"]:
+        message = "%s：%s（相关标签：%s）" % (
+            fix["category"], _FIX_KIND_TEXT.get(fix["kind"], fix["kind"]),
+            ", ".join(fix["tags"]))
+        findings.setdefault(fix["shot"], []).append(message)
     return findings
 
 

@@ -60,7 +60,7 @@ from comfyui_generator.core.style_profile import (
     normalize_style_profile, style_profile_apply_settings,
 )
 from comfyui_generator.core.storyboard import (
-    StoryboardOptions, extract_premise_beats,
+    StoryboardOptions, REVIEW_MODEL, extract_premise_beats,
     normalize_shot_casts, parse_character_profiles,
     premise_from_json, shots_from_json, slugify,
 )
@@ -80,7 +80,10 @@ from comfyui_generator.ui.settings_dialog import SettingsDialog
 from comfyui_generator.ui.vision_worker import VisionWorker
 from comfyui_generator.ui.wheel_guard import install_wheel_guard
 from comfyui_generator.ui.widgets import SearchComboBox, WrappingTabs
-from comfyui_generator.ui.workers import AssetsWorker, AutoTranslateWorker, ConnectWorker, ExpansionWorker, LoraTagsWorker, PromptWorker, RenderWorker, TagTranslateWorker
+from comfyui_generator.ui.workers import (
+    AssetsWorker, AutoTranslateWorker, ClothingRepairWorker, ConnectWorker,
+    ExpansionWorker, LoraTagsWorker, PromptWorker, RenderWorker,
+    TagTranslateWorker)
 
 RESOLUTIONS = [
     ("竖屏 832x1216", 832, 1216),
@@ -334,7 +337,10 @@ class MainWindow(QMainWindow):
         self.vision_worker: VisionWorker | None = None
         self.continuity_worker: ContinuityWorker | None = None
         self.expansion_worker: ExpansionWorker | None = None
+        self.clothing_repair_worker: ClothingRepairWorker | None = None
         self._pending_render: tuple[dict[str, Any], list[dict[str, Any]], int] | None = None
+        self._pending_clothing_repair: tuple[
+            dict[str, Any], list[dict[str, Any]], str, str] | None = None
         self.tasks_by_id: dict[str, Any] = {}
         self.task_rows: dict[str, int] = {}
         self.row_task_ids: dict[int, str] = {}
@@ -3980,28 +3986,41 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.No)
         return answer == QMessageBox.StandardButton.Yes
 
-    def _clothing_gate_pass(self, project: dict[str, Any],
-                            shots: list[dict[str, Any]]) -> bool:
+    def _evaluate_clothing_gate(self, project: dict[str, Any],
+                                shots: list[dict[str, Any]]) -> tuple[list[str], str]:
         evaluated: list[dict[str, Any]] = []
         for shot in shots:
             positive, _negative = compose_prompts(project, shot)
             tags = [part.strip() for part in positive.split(",") if part.strip()]
             evaluated.append({"id": shot.get("id"), "_positive_tags": tags})
         premise = self._story_premise_text() or str(project.get("premise") or "")
-        blockers = clothing_gate_blockers(evaluated, premise)
-        if not blockers:
-            return True
+        return clothing_gate_blockers(evaluated, premise), premise
+
+    def _ask_clothing_gate(self, blockers: list[str]) -> str:
         for message in blockers:
             self.append_log("服装闸门 · " + message)
         preview = "\n".join(blockers[:20])
         if len(blockers) > 20:
             preview += "\n... 另有 %d 条" % (len(blockers) - 20)
-        answer = QMessageBox.warning(
-            self, "服装结构闸门未通过（%d 项）" % len(blockers),
-            preview + "\n\n建议回到 AI 重写/补拍。仍要强行渲染吗？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No)
-        return answer == QMessageBox.StandardButton.Yes
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("服装结构闸门未通过（%d 项）" % len(blockers))
+        box.setText(preview)
+        btn_repair = box.addButton("让 AI 修复",
+                                   QMessageBox.ButtonRole.AcceptRole)
+        btn_force = box.addButton("强行渲染",
+                                  QMessageBox.ButtonRole.DestructiveRole)
+        btn_cancel = box.addButton("取消",
+                                   QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(btn_repair)
+        box.setEscapeButton(btn_cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is btn_repair:
+            return "repair"
+        if clicked is btn_force:
+            return "force"
+        return "cancel"
 
     def _row_data(self, row: int) -> dict[str, Any]:
         lock_item = self.shot_table.item(row, 0)
@@ -4686,8 +4705,22 @@ class MainWindow(QMainWindow):
                 self.append_log("自动连贯修复 · " + change)
         if not self._preflight_quality(project):
             return
-        if mode != "single" and not self._clothing_gate_pass(project, shots):
-            return
+        if mode != "single":
+            blockers, premise = self._evaluate_clothing_gate(project, shots)
+            if blockers:
+                choice = self._ask_clothing_gate(blockers)
+                if choice == "cancel":
+                    self._set_generation_enabled(True)
+                    return
+                if choice == "repair":
+                    self._start_clothing_repair(project, shots, text,
+                                                previous_prefix, premise)
+                    return
+        self._continue_render(mode, project, shots, text, previous_prefix)
+
+    def _continue_render(self, mode: str, project: dict[str, Any],
+                         shots: list[dict[str, Any]], text: str,
+                         previous_prefix: str) -> None:
         prefix = self._run_prefix_for(mode, text)
         project["prefix"] = prefix
         if prefix != previous_prefix:
@@ -4748,6 +4781,72 @@ class MainWindow(QMainWindow):
         if expansions > 0:
             self.append_log("No AI model available; skipping expansion.")
         self._start_render_tasks(self.project, shots, None)
+
+    def _start_clothing_repair(self, project: dict[str, Any],
+                               shots: list[dict[str, Any]], text: str,
+                               previous_prefix: str, premise: str) -> None:
+        external = self.cfg.external_llm
+        external_ready = bool(
+            external.base_url and external.api_key and external.model)
+        if not external_ready:
+            QMessageBox.information(
+                self, "提示",
+                "服装修复需使用外部 %s，请先在设置里填写外部 API。" % REVIEW_MODEL)
+            self._set_generation_enabled(True)
+            return
+        model = REVIEW_MODEL
+        use_external = True
+        self._pending_clothing_repair = (
+            project, shots, text, previous_prefix)
+        worker = ClothingRepairWorker(
+            self.cfg, shots, premise, model=model,
+            use_external=use_external, max_passes=3)
+        worker.done.connect(self._on_clothing_repair_done)
+        worker.failed.connect(self._on_clothing_repair_failed)
+        worker.canceled.connect(self._on_clothing_repair_canceled)
+        worker.log.connect(self.append_log)
+        self.clothing_repair_worker = worker
+        self._set_generation_enabled(False)
+        self.btn_cancel.setEnabled(True)
+        self.statusBar().showMessage("AI 正在修复服装闸门…")
+        self.append_log("AI 服装修复：%s" % model)
+        worker.finished.connect(
+            lambda w=worker: self._release_clothing_repair_worker(w))
+        worker.start()
+
+    def _release_clothing_repair_worker(self, worker: Any) -> None:
+        if self.clothing_repair_worker is worker:
+            self.clothing_repair_worker = None
+
+    def _on_clothing_repair_done(self, _changes: int) -> None:
+        pending = self._pending_clothing_repair
+        self._pending_clothing_repair = None
+        if not pending:
+            return
+        project, shots, text, previous_prefix = pending
+        blockers, _premise = self._evaluate_clothing_gate(project, shots)
+        if blockers:
+            self.append_log("AI 修复后闸门仍有 %d 项未通过。" % len(blockers))
+            choice = self._ask_clothing_gate(blockers)
+            if choice == "cancel":
+                self._set_generation_enabled(True)
+                return
+            if choice == "repair":
+                self._start_clothing_repair(project, shots, text,
+                                            previous_prefix, _premise)
+                return
+        self._continue_render(project.get("mode", "batch"),
+                              project, shots, text, previous_prefix)
+
+    def _on_clothing_repair_failed(self, message: str) -> None:
+        self._pending_clothing_repair = None
+        self.append_log("AI 服装修复失败：%s" % message)
+        self._set_generation_enabled(True)
+
+    def _on_clothing_repair_canceled(self, message: str) -> None:
+        self._pending_clothing_repair = None
+        self.append_log(message)
+        self._set_generation_enabled(True)
 
     def _on_expansions_ready(self, expansions: dict[str, list[str]]) -> None:
         pending = self._pending_render

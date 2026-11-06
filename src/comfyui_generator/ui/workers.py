@@ -22,6 +22,7 @@ from comfyui_generator.core.external_llm import (
     ExternalLLMClient,
     resolve_external_model,
 )
+from comfyui_generator.core.ai_review import review_stage_ai
 from comfyui_generator.core.expand_ai import generate_expansions
 from comfyui_generator.core.jobs import Task, TaskRunner
 from comfyui_generator.core.ollama import OllamaClient
@@ -32,7 +33,8 @@ from comfyui_generator.core.rewrite import rewrite_shot_prompt
 from comfyui_generator.core.single import SingleOptions, generate_single_prompt
 from comfyui_generator.core.tag_cache import load_tag_cache, update_tag_cache
 from comfyui_generator.core.translate import translate_prompts, translate_tag_list, translate_to_tags
-from comfyui_generator.core.storyboard import StoryboardOptions, generate_storyboard
+from comfyui_generator.core.storyboard import (
+    StoryboardOptions, generate_storyboard, parse_character_profiles)
 from comfyui_generator.core.trace import (
     TracedClient, start_trace, stop_trace, trace_event,
 )
@@ -542,4 +544,64 @@ class AutoTranslateWorker(QThread):
             client.unload(self.model)
         except Exception:
             pass
+
+
+class ClothingRepairWorker(QThread):
+    done = Signal(int)
+    failed = Signal(str)
+    canceled = Signal(str)
+    log = Signal(str)
+
+    def __init__(self, cfg: AppConfig, shots: list[dict[str, Any]],
+                 premise: str, model: str = "", use_external: bool = False,
+                 max_passes: int = 3):
+        super().__init__()
+        self.cfg = cfg
+        self.shots = shots
+        self.premise = premise
+        self.model = model
+        self.use_external = use_external
+        self.max_passes = max_passes
+
+    def cancel(self) -> None:
+        self.requestInterruption()
+
+    def run(self) -> None:
+        if self.use_external:
+            client = ExternalLLMClient(self.cfg.external_llm)
+            model = self.model or resolve_external_model(self.cfg.external_llm)
+        else:
+            client = OllamaClient(self.cfg.ollama.base_url)
+            model = self.model or self.cfg.ollama.default_model
+        try:
+            trace, trace_token = start_trace(
+                self.cfg.single_projects_dir.parent / "log", "clothing_repair", {
+                    "shots": len(self.shots),
+                    "model": model,
+                    "use_external": self.use_external,
+                })
+        except Exception as exc:
+            trace, trace_token = None, None
+            self.log.emit("日志初始化失败：%s" % exc)
+        client = TracedClient(client, "clothing_repair")
+        profiles = parse_character_profiles(self.premise)
+        try:
+            changes = review_stage_ai(
+                client, model, "clothing", self.shots, self.premise,
+                batch_size=10, max_passes=self.max_passes,
+                timeout=600.0, log=self.log.emit, profiles=profiles)
+            if self.isInterruptionRequested():
+                self.canceled.emit("已取消服装修复")
+                return
+            self.log.emit("AI 服装修复完成：修改 %d 镜" % changes)
+            self.done.emit(changes)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        finally:
+            try:
+                client.unload(model)
+            except Exception:
+                pass
+            if trace is not None:
+                stop_trace(trace, trace_token)
 

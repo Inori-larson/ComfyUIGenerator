@@ -1,6 +1,7 @@
 from comfyui_generator.core.clothing_state import (
     clothing_gate_blockers,
     clothing_gate_findings,
+    clothing_repair_plan,
     initial_weighted_categories,
 )
 from comfyui_generator.core import ai_review
@@ -93,3 +94,78 @@ def test_pacing_gate_flags_duplicate_adjacent_shots():
     ]
     coverage = ai_review.coverage_gate_findings(shots)
     assert any("几乎完全相同" in m for m in coverage)
+
+
+def test_repair_plan_names_exact_tags_and_expected_action():
+    shots = [{"id": "50",
+              "prompt": "1girl, frilled black leotard, "
+                        "leotard skirt rolled up to waist"}]
+    plan = clothing_repair_plan(shots, PREMISE)
+    kinds = {fix["kind"] for fix in plan["fixes"]}
+    assert "must_be_off" in kinds
+    off = next(f for f in plan["fixes"] if f["kind"] == "must_be_off")
+    assert "frilled black leotard" in off["tags"]
+    assert "off-body" in off["expected"]
+
+
+def test_repair_plan_includes_ledger_and_weighted():
+    shots = [
+        {"id": "01", "prompt": "1girl, black pantyhose, black blazer"},
+        {"id": "02", "prompt": "1girl, torn pantyhose, "
+                                "discarded black blazer on floor"},
+    ]
+    plan = clothing_repair_plan(shots, PREMISE)
+    assert set(plan["weighted"]) >= {"pantyhose"}
+    assert plan["ledger"]["01"]["pantyhose"] == "worn"
+    assert plan["ledger"]["02"]["pantyhose"] == "displaced"
+
+
+def test_message_carries_fixes_ledger_and_residual():
+    import json
+    from comfyui_generator.core.ai_review import _build_messages
+    batch = [{"id": "50",
+              "prompt": "1girl, frilled black leotard, "
+                        "leotard skirt rolled up to waist"}]
+    plan = clothing_repair_plan(batch, PREMISE)
+    plan["residual"] = [
+        {"shot": "50", "category": "leotard",
+         "message": "still there", "residual_tags": ["frilled black leotard"]}]
+    msgs = _build_messages("clothing", PREMISE, batch, [],
+                           clothing_plan=plan)
+    payload = json.loads(msgs[1]["content"])
+    assert payload["required_fixes"][0]["tags"]
+    assert "clothing_ledger" in payload
+    assert payload["residual_tags"][0]["residual_tags"] == [
+        "frilled black leotard"]
+
+
+def test_ensure_clothing_gate_loops_until_clear():
+    from comfyui_generator.core.ai_review import ensure_clothing_gate
+
+    clean_prompt = ("1girl, discarded frilled black leotard on floor, "
+                    "discarded black blazer on floor, torn pantyhose, "
+                    "black lace panties, panties aside, black lace bra")
+    repaired = {"shots": [
+        {"id": "01", "valid": False, "issues": ["fixed"],
+         "prompt": clean_prompt}]}
+
+    class GateClient:
+        def __init__(self):
+            self.calls = 0
+
+        def chat_json(self, *a, **k):
+            self.calls += 1
+            return repaired
+
+    initial = [{"id": "01",
+                "prompt": "1girl, black blazer, frilled black leotard, "
+                          "leotard skirt rolled up to waist, "
+                          "torn pantyhose, black lace panties, "
+                          "panties aside, black lace bra"}]
+    client = GateClient()
+    performed = ensure_clothing_gate(client, "deepseek-v4.1-flash",
+                                     initial, PREMISE, max_passes=3)
+    assert performed >= 1
+    assert client.calls >= 1
+    plan = clothing_repair_plan(initial, PREMISE)
+    assert plan["fixes"] == []

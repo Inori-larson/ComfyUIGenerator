@@ -20,7 +20,7 @@ import json
 import re
 from typing import Any, Callable
 
-from .clothing_state import clothing_gate_findings
+from .clothing_state import clothing_gate_findings, clothing_repair_plan
 from .mechanical import (
     normalize_prompt_text,
     normalize_whitespace,
@@ -285,7 +285,8 @@ def _build_messages(stage: str, premise: str,
                     batch: list[dict[str, Any]],
                     history: list[dict[str, Any]],
                     gate: dict[str, list[str]] | None = None,
-                    coverage: list[str] | None = None) -> list[dict[str, str]]:
+                    coverage: list[str] | None = None,
+                    clothing_plan: dict[str, Any] | None = None) -> list[dict[str, str]]:
     system_parts = [
         _GLOBAL_RULES.format(premise=normalize_whitespace(premise)),
         _STAGE_BRIEFS[stage],
@@ -296,7 +297,28 @@ def _build_messages(stage: str, premise: str,
         "history": [_shot_payload(shot) for shot in history],
         "shots": [_shot_payload(shot) for shot in batch],
     }
-    if gate:
+    if clothing_plan:
+        batch_ids = {str(shot.get("id") or "") for shot in batch}
+        relevant = [fix for fix in clothing_plan.get("fixes", [])
+                    if fix.get("shot") in batch_ids]
+        user_payload["clothing_ledger"] = clothing_plan.get("ledger", {})
+        user_payload["required_fixes"] = relevant
+        if clothing_plan.get("residual"):
+            batch_ids = {str(shot.get("id") or "") for shot in batch}
+            user_payload["residual_tags"] = [
+                item for item in clothing_plan["residual"]
+                if item.get("shot") in batch_ids]
+            system_parts.append(
+                "residual_tags 指出你上一轮没有删掉的标签；这些标签必须在本次 prompt 中删除，"
+                "不得再次保留。")
+        system_parts.append(
+            "required_fixes 是只读服装状态机给出的可执行指令，每条含 shot/category/tags/expected/keep，"
+            "必须严格照做：从该镜英文 prompt 中删除 tags 列出的冲突标签，按 expected 改写，"
+            "保留 keep 中的标签；不得保留 tags 里任何一个标签。\n"
+            "clothing_ledger 是全片每镜每类服装的状态（worn/displaced/off），"
+            "你的改写必须与台账及服装单向推进规则一致；权重服装（weighted=true）只能保持 active，"
+            "非权重服装到结局前必须 off。不得用文字说明代替实际改标签。")
+    elif gate:
         user_payload["required_fixes"] = gate
         system_parts.append(
             "required_fixes 是软件只读结构闸门发现的硬性问题，必须逐条修复，"
@@ -389,34 +411,37 @@ def review_stage_ai(client: Any, model: str, stage: str,
         return 0
     profiles = profiles or []
     total_changes = 0
+    previous_residual: dict[tuple[str, str], list[str]] = {}
     for _pass in range(max(1, int(max_passes))):
         pass_changes = 0
         invalid_remaining = False
+        current_residual: dict[tuple[str, str], list[str]] = {}
         for offset in range(0, len(shots), max(1, int(batch_size))):
             batch = shots[offset:offset + max(1, int(batch_size))]
             history = _history_before(shots, offset)
             batch_gate = {}
             batch_coverage: list[str] = []
+            plan: dict[str, Any] = {}
             if stage == "clothing":
-                full_gate = structural_gate_findings(shots)
-                clothing_gate = clothing_gate_findings(shots, premise)
-                combined = {key: list(full_gate.get(key, []))
-                            for key in set(full_gate) | set(clothing_gate)}
-                for key, messages in clothing_gate.items():
-                    combined.setdefault(key, [])
-                    combined[key].extend(messages)
-                batch_gate = {
-                    str(shot.get("id") or ""): combined[str(shot.get("id") or "")]
-                    for shot in batch
-                    if str(shot.get("id") or "") in combined
-                }
+                plan = clothing_repair_plan(shots, premise)
+                if previous_residual:
+                    plan = dict(plan)
+                    residual_notes = []
+                    for (_shot, category), tags in previous_residual.items():
+                        residual_notes.append(
+                            {"shot": _shot, "category": category,
+                             "message": "上一轮要求删除但仍残留在 prompt 中的标签，"
+                                        "本次必须删除",
+                             "residual_tags": tags})
+                    plan["residual"] = residual_notes
             if stage == "pacing":
                 batch_coverage = coverage_gate_findings(shots)
             try:
                 raw = client.chat_json(
                     model,
                     _build_messages(stage, premise, batch, history,
-                                    batch_gate, batch_coverage),
+                                    batch_gate, batch_coverage,
+                                    clothing_plan=plan or None),
                     schema=_REVIEW_SCHEMA,
                     temperature=temperature,
                     num_predict=num_predict,
@@ -459,11 +484,17 @@ def review_stage_ai(client: Any, model: str, stage: str,
         gate: dict[str, list[str]] = {}
         if stage == "clothing":
             gate = structural_gate_findings(shots)
-            for key, messages in clothing_gate_findings(shots, premise).items():
-                gate.setdefault(key, [])
-                gate[key].extend(messages)
         coverage = coverage_gate_findings(shots) if stage == "pacing" else []
+        plan_remaining = (
+            clothing_repair_plan(shots, premise).get("fixes", [])
+            if stage == "clothing" else [])
+        if stage == "clothing":
+            current_residual = {
+                (fix["shot"], fix["category"]): fix["tags"]
+                for fix in plan_remaining}
         if gate:
+            invalid_remaining = True
+        if plan_remaining:
             invalid_remaining = True
         if coverage:
             invalid_remaining = True
@@ -477,7 +508,44 @@ def review_stage_ai(client: Any, model: str, stage: str,
         })
         if not invalid_remaining:
             break
+        previous_residual = current_residual
     return total_changes
+
+
+def ensure_clothing_gate(client: Any, model: str,
+                         shots: list[dict[str, Any]], premise: str,
+                         *, timeout: float = 600.0,
+                         log: LogFn | None = None,
+                         profiles: list[Any] | None = None,
+                         max_passes: int = 3) -> int:
+    """Run extra clothing passes during generation until the gate is clear.
+
+    Uses the tag-level repair plan/ledger/residual guidance. The software
+    never edits tags; the AI rewrites until the structural gate passes or the
+    pass budget is exhausted. Returns number of passes performed.
+    """
+    if not shots:
+        return 0
+    profiles = profiles or []
+    if not clothing_repair_plan(shots, premise).get("fixes"):
+        return 0
+    performed = 0
+    for _extra in range(max(1, int(max_passes))):
+        if log:
+            log("服装闸门自动修复：第 %d 轮" % (_extra + 1))
+        review_stage_ai(
+            client, model, "clothing", shots, premise,
+            batch_size=10, max_passes=1,
+            timeout=timeout, log=log, profiles=profiles)
+        performed += 1
+        remaining = clothing_repair_plan(shots, premise).get("fixes", [])
+        if not remaining:
+            if log:
+                log("服装闸门已通过。")
+            break
+        if log:
+            log("服装闸门剩余 %d 项，继续修复。" % len(remaining))
+    return performed
 
 
 def run_all_reviews(client: Any, model: str,
