@@ -80,6 +80,35 @@ def test_external_client_retries_with_larger_budget_on_length(monkeypatch):
     assert bodies[1]["max_tokens"] == 8192
 
 
+def test_external_client_retries_on_incomplete_json_with_stop(monkeypatch):
+    cfg = SimpleNamespace(base_url="https://example.test/v1", api_key="",
+                          model="test-model", timeout=30)
+    client = ExternalLLMClient(cfg)
+    bodies = []
+
+    def fake_urlopen(req, timeout):
+        bodies.append(json.loads(req.data.decode("utf-8")))
+        if len(bodies) == 1:
+            return FakeResponse({
+                "choices": [{
+                    "finish_reason": "stop",
+                    "message": {"content": "```json\n{\"shots\": ["},
+                }]
+            })
+        return FakeResponse({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"content": "{\"shots\": []}"},
+            }]
+        })
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    assert client.chat_json(
+        "test-model", [{"role": "user", "content": "x"}],
+        num_predict=4096, retries=1) == {"shots": []}
+    assert len(bodies) == 2
+
+
 def test_external_client_retries_after_read_timeout(monkeypatch):
     cfg = SimpleNamespace(base_url="https://example.test/v1", api_key="",
                           model="test-model", timeout=30)
