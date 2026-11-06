@@ -191,6 +191,7 @@ GALLERY_IMAGE_ROLE = GALLERY_TASK_ROLE + 1
 GALLERY_META_ROLE = GALLERY_IMAGE_ROLE + 1
 GALLERY_FAVORITE_ROLE = GALLERY_META_ROLE + 1
 GALLERY_INDEX_ROLE = GALLERY_FAVORITE_ROLE + 1
+NEGATIVE_ROLE = GALLERY_INDEX_ROLE + 1
 
 
 class GalleryViewerDialog(QDialog):
@@ -3659,6 +3660,7 @@ class MainWindow(QMainWindow):
             prompt_item.setData(PHASE_ROLE, str(shot.get("phase", "")))
             prompt_item.setData(BEAT_ROLE, str(shot.get("beat", "")))
             prompt_item.setData(CLOTHING_ROLE, str(shot.get("clothing", "")))
+            prompt_item.setData(NEGATIVE_ROLE, str(shot.get("negative", "")))
             prompt_item.setData(CHARACTERS_ROLE, str(shot.get("characters", "")))
             states = shot.get("character_states") or {}
             if isinstance(states, str):
@@ -4022,6 +4024,7 @@ class MainWindow(QMainWindow):
             "phase": (prompt_item.data(PHASE_ROLE) or "") if prompt_item else "",
             "beat": (prompt_item.data(BEAT_ROLE) or "") if prompt_item else "",
             "clothing": (prompt_item.data(CLOTHING_ROLE) or "") if prompt_item else "",
+            "negative": (prompt_item.data(NEGATIVE_ROLE) or "") if prompt_item else "",
             "characters": (prompt_item.data(CHARACTERS_ROLE) or "") if prompt_item else "",
             "character_states": states,
             "clothing_details": details,
@@ -4529,11 +4532,12 @@ class MainWindow(QMainWindow):
                 "script": data.get("script", ""),
                 "phase": data.get("phase", ""),
                 "beat": data.get("beat", ""),
-                "clothing": data.get("clothing", ""),
-                "characters": data.get("characters", ""),
-                "character_states": data.get("character_states") or {},
-                "clothing_details": data.get("clothing_details") or {},
-                "prompt_groups": data.get("prompt_groups") or [],
+                              "clothing": data.get("clothing", ""),
+                              "negative": data.get("negative", ""),
+                              "characters": data.get("characters", ""),
+                              "character_states": data.get("character_states") or {},
+                              "clothing_details": data.get("clothing_details") or {},
+                              "prompt_groups": data.get("prompt_groups") or [],
                               "scene": data.get("scene", ""),
                               "continuity_state": data.get("continuity_state", ""),
                               "continuity_scene": data.get("continuity_scene", ""),
@@ -4558,6 +4562,7 @@ class MainWindow(QMainWindow):
                           "phase": data.get("phase", ""),
                           "beat": data.get("beat", ""),
                           "clothing": data.get("clothing", ""),
+                          "negative": data.get("negative", ""),
                           "characters": data.get("characters", ""),
                           "character_states": data.get("character_states") or {},
                           "clothing_details": data.get("clothing_details") or {},
