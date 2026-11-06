@@ -5,7 +5,7 @@ from comfyui_generator.core.style_profile import (
     style_profile_apply_settings,
     style_profile_positive,
 )
-from comfyui_generator.core.workflow import compose_pass_prompts, compose_prompts
+from comfyui_generator.core.workflow import compose_prompts
 
 
 def test_normalize_defaults_to_none():
@@ -67,20 +67,6 @@ def test_workflow_profile_can_be_disabled():
     assert positive.startswith("masterpiece")
     assert "cinematic film still" not in positive
     assert negative.startswith("bad quality")
-    assert "multiple boys" in negative
-
-
-def test_second_pass_includes_profile():
-    cfg = {
-        "style": {"positive": "masterpiece", "negative": "bad quality"},
-        "style_profile": {"id": "tv_anime"},
-        "loras": [],
-    }
-    shot = {"prompt": "1boy, standing"}
-    positive, negative = compose_pass_prompts(
-        cfg, shot, {"gender": "boy", "prompt": "1boy, standing"})
-    assert "anime screencap" in positive
-    assert "photorealistic" in negative
 
 
 def test_profile_positive_helper():

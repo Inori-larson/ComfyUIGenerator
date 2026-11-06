@@ -5,12 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from comfyui_generator.core.mechanical import normalize_prompt_text
 from comfyui_generator.core.ollama import OllamaClient
 from comfyui_generator.core.storyboard import (
-    BOORU_WORKFLOW, PROMPT_COVERAGE, normalize_cast, raw_prompt,
+    BOORU_WORKFLOW, PROMPT_COVERAGE, raw_prompt,
 )
 from comfyui_generator.core.tags import dedupe_tags
-from comfyui_generator.core.trace import trace_event
 
 SINGLE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -68,51 +68,11 @@ FRAMING_TAGS = {
     "portrait": "portrait, face focus",
     "wide": "wide shot",
 }
-_MULTI_MALE_SINGLE = (
-    "2boys", "3boys", "multiple boys", "two boys", "extra boy",
-    "second male", "second boy", "two male", "couple",
-)
-_MALE_NUDE_SINGLE = (
-    "nude male", "faceless male", "male head out of frame",
-    "male face out of frame",
-)
 
 
 def sanitize_single_prompt(prompt: str, cast: str = "",
                            clothing_state: str = "") -> str:
-    before = str(prompt or "")
-    tags = [tag.strip() for tag in before.split(",") if tag.strip()]
-    state_text = str(clothing_state or "").strip()
-    state_tags = [tag.strip() for tag in state_text.split(",")
-                  if tag.strip() and tag.strip().lower() != "none"]
-    cast = normalize_cast(cast) if str(cast or "").strip() else ""
-    if not cast:
-        tags.extend(tag for tag in state_tags if tag.lower() not in {
-            item.lower() for item in tags})
-        result = dedupe_tags(tags)
-        trace_event("single.sanitize", {
-            "before": before, "after": result,
-            "cast": cast, "clothing_state": clothing_state,
-        })
-        return result
-    tags = [tag for tag in tags
-            if not any(word in tag.lower() for word in _MULTI_MALE_SINGLE)]
-    if "1boy" in cast:
-        tags = [tag for tag in tags
-                if tag.lower() not in ("solo", "male", "couple", "1boy")]
-        tags.append("1boy")
-    else:
-        tags = [tag for tag in tags
-                if tag.lower() not in ("1boy", "male", "couple")
-                and tag.lower() not in _MALE_NUDE_SINGLE]
-    tags.extend(tag for tag in state_tags if tag.lower() not in {
-        item.lower() for item in tags})
-    result = dedupe_tags(tags)
-    trace_event("single.sanitize", {
-        "before": before, "after": result,
-        "cast": cast, "clothing_state": clothing_state,
-    })
-    return result
+    return normalize_prompt_text(str(prompt or ""))
 
 
 @dataclass

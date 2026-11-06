@@ -60,10 +60,9 @@ from comfyui_generator.core.style_profile import (
     normalize_style_profile, style_profile_apply_settings,
 )
 from comfyui_generator.core.storyboard import (
-    StoryboardOptions, backfill_clothing_details, extract_premise_beats,
-    filter_locked_appearance, normalize_shot_casts, parse_character_profiles,
+    StoryboardOptions, extract_premise_beats,
+    normalize_shot_casts, parse_character_profiles,
     premise_from_json, shots_from_json, slugify,
-    sync_clothing_state_to_prompt,
 )
 from comfyui_generator.core.tag_cache import load_tag_cache, update_tag_cache
 from comfyui_generator.core.tags import append_tags, estimate_tokens
@@ -3039,12 +3038,6 @@ class MainWindow(QMainWindow):
         if mode == "story" and (":" in appearance or "：" in appearance):
             appearance = ""
         activation = self._character_tags()
-        if appearance:
-            locked = [tag.strip() for tag in appearance.split(",") if tag.strip()]
-            filtered = filter_locked_appearance(
-                [tag.strip() for tag in activation.split(",") if tag.strip()],
-                locked)
-            activation = ", ".join(filtered)
         return append_tags(append_tags(role, activation), appearance)
 
     def _has_activation_tags(self) -> bool:
@@ -3372,7 +3365,6 @@ class MainWindow(QMainWindow):
         project["prefix"] = "anime_story/" + name
         project["server"] = self.cfg.comfy.base_url
         project["output_dir"] = self.cfg.comfy.output_dir
-        backfill_clothing_details(project["shots"], text)
         return project
 
     # ---------------------------------------------------------------- prompt generation
@@ -5326,11 +5318,7 @@ class MainWindow(QMainWindow):
         self.project = project
         premise = str(project.get("premise") or "")
         normalize_shot_casts(project.get("shots") or [])
-        backfill_clothing_details(project.get("shots") or [], premise)
         profiles = parse_character_profiles(premise)
-        if profiles:
-            sync_clothing_state_to_prompt(
-                project.get("shots") or [], profiles)
         self._run_prefix = ""
         self._run_signature = ""
         mode = project.get("mode", "story")
@@ -6125,7 +6113,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("角色参考表已生成并自动填入")
 
     def _save_reference_sheet(self, image: str) -> Path:
-        folder = self.cfg.root / "references"
+        folder = Path(r"H:\ComfyUIData\output\角色参考表")
         folder.mkdir(parents=True, exist_ok=True)
         target = folder / ("character_sheet_%s_%s.png" % (
             time.strftime("%Y%m%d_%H%M%S"), uuid.uuid4().hex[:4]))

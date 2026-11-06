@@ -51,16 +51,15 @@ def test_generate_single_prompt_passes_schema_and_keeps_model_output():
     assert kwargs["schema"]["required"] == ["prompt"]
 
 
-def test_generate_single_prompt_uses_structured_ai_cast():
+def test_generate_single_prompt_keeps_ai_cast_prompt_verbatim():
     client = FakeClient({
         "prompt": "1girl, solo, standing",
         "cast": "1girl 1boy",
         "negative": "",
     })
-    result = generate_single_prompt(client, "girl with man", SingleOptions(model="test-model"))
-    tags = [tag.strip() for tag in result["prompt"].split(",")]
-    assert "1boy" in tags
-    assert "solo" not in tags
+    result = generate_single_prompt(
+        client, "girl with man", SingleOptions(model="test-model"))
+    assert result["prompt"] == "1girl, solo, standing"
 
 
 def test_generate_single_prompt_keeps_quality_tags():
@@ -102,16 +101,15 @@ def test_framing_table():
     assert FRAMING_TAGS["close_up"] == "close-up"
 
 
-def test_sanitize_single_prompt_removes_multiple_males_and_solo_conflict():
+def test_sanitize_single_prompt_only_dedupes_and_keeps_ai_tags():
     prompt = sanitize_single_prompt(
-        "1girl, solo, male, 2boys, couple, penis in pussy, standing",
+        "1girl, solo, male, 2boys, couple, penis in pussy, standing, 1girl",
         cast="1girl 1boy")
     tags = [tag.strip() for tag in prompt.split(",")]
-    assert "2boys" not in tags
-    assert "solo" not in tags
-    assert "male" not in tags
-    assert "1boy" in tags
-    assert "nude male" not in tags
+    assert "2boys" in tags
+    assert "solo" in tags
+    assert "1boy" not in tags
+    assert tags.count("1girl") == 1
     assert "penis in pussy" in tags
 
 

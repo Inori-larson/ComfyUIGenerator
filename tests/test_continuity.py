@@ -7,7 +7,7 @@ from comfyui_generator.core.continuity import (
     normalize_continuity,
     strip_shot_grammar,
 )
-from comfyui_generator.core.workflow import compose_pass_prompts, compose_prompts
+from comfyui_generator.core.workflow import compose_prompts
 
 
 def test_normalize_continuity_defaults():
@@ -99,22 +99,3 @@ def test_workflow_injects_continuity_and_shot_grammar():
     assert "from above" in positive
     assert "wide shot" not in positive
     assert "different location" in negative
-
-
-def test_boy_pass_does_not_receive_female_character_anchor():
-    cfg = {
-        "style": {"positive": "masterpiece", "negative": "bad quality"},
-        "continuity": {
-            "character": "silver hair, breasts",
-            "scene": "bedroom",
-            "state": "cum on thigh",
-        },
-    }
-    shot = {"prompt": "1boy, standing",
-            "continuity_scene": "bedroom",
-            "continuity_state": "cum on thigh"}
-    positive, _ = compose_pass_prompts(
-        cfg, shot, {"gender": "boy", "prompt": "1boy, standing"})
-    assert "silver hair" not in positive
-    assert "cum on thigh" not in positive
-    assert "bedroom" in positive
