@@ -17,7 +17,7 @@
   },
   "style": {
     "positive": "masterpiece, best quality, amazing quality",
-    "negative": "bad quality, worst quality, worst detail, sketch"
+    "negative": "bad quality, worst quality, worst detail, sketch, censor"
   },
   "settings": {
     "width": 1024,

@@ -15,16 +15,17 @@
   },
   {
     "id": "wai_illustrious_170",
-    "label": "WAI Illustrious v17.0（832×1216 / 30 / CFG5）",
+    "label": "WAI Illustrious v17.0（1024×1344 / 30 / CFG5 / Hires）",
     "model": "WAI\\waiIllustriousSDXL_v170.safetensors",
     "clip_skip": -2,
-    "width": 832,
-    "height": 1216,
+    "width": 1024,
+    "height": 1344,
     "steps": 30,
     "cfg": 5.0,
     "sampler": "euler_ancestral",
     "scheduler": "normal",
-    "hires": {"enabled": true, "scale": 1.5, "steps": 20, "denoise": 0.4}
+    "hires": {"enabled": true, "scale": 1.5, "steps": 20, "denoise": 0.4},
+    "upscaler": "RealESRGAN_x4plus_anime_6B.pth"
   },
   {
     "id": "animagine_xl_31",
