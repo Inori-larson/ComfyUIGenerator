@@ -133,20 +133,15 @@ class ExternalLLMClient:
             except (ValueError, json.JSONDecodeError):
                 pass
             if attempt < retries:
-                truncated = (finish == "length")
-                if truncated:
-                    token_budget = min(32768, max(8192, token_budget * 2))
+                token_budget = min(32768, max(8192, token_budget * 2))
                 convo = list(messages)
                 if last.strip():
-                    user_hint = (
-                        "上一条 JSON 被截断，未输出完整。"
-                        "请重新返回完整、可解析的 JSON，不要解释，不要 markdown。"
-                        if truncated else
-                        "上一条 JSON 不完整或无效。"
-                        "请重新返回完整、可解析的 JSON，不要解释，不要 markdown。")
                     convo += [
                         {"role": "assistant", "content": last},
-                        {"role": "user", "content": user_hint},
+                        {"role": "user", "content": (
+                            "上一条 JSON 不完整或无效（内容可能在输出中途被截断）。"
+                            "请在更大的输出长度下重新返回完整、可解析的 JSON，"
+                            "不要解释，不要 markdown。")},
                     ]
                 else:
                     convo += [{"role": "user", "content": "上一条响应为空。"
