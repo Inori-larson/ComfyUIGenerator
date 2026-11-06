@@ -10,7 +10,13 @@ from comfyui_generator.core.ai_review import run_all_reviews
 from comfyui_generator.core.mechanical import normalize_prompt_text
 from comfyui_generator.core.trace import trace_event
 
-PROMPT_CONVERSION_FLASH_MODEL = "volcengine/deepseek-v4.1-flash"
+PROMPT_CONVERSION_FLASH_MODEL = "deepseek-v4.1-flash"
+GENERATION_MODEL = "deepseek-v4.1-flash"
+REVIEW_MODEL = "deepseek-v4.1-flash"
+def generation_model(_selected_model: str = "") -> str:
+    return GENERATION_MODEL
+def review_model(_selected_model: str = "") -> str:
+    return REVIEW_MODEL
 def prompt_conversion_model(_selected_model: str = "") -> str:
     return PROMPT_CONVERSION_FLASH_MODEL
 PROMPT_COVERAGE = (
@@ -1372,7 +1378,7 @@ def generate_full_story_pipeline(client: OllamaClient, premise: str,
     log = options.log
     log("Stage 1/4: writing complete story...")
     story_raw = client.chat_json(
-        options.model,
+        generation_model(options.model),
         build_story_messages(premise, shots, options.setting),
         schema=STORY_SCHEMA, temperature=options.temperature,
         num_predict=16384, num_ctx=32768, keep_alive=options.keep_alive,
@@ -1390,7 +1396,7 @@ def generate_full_story_pipeline(client: OllamaClient, premise: str,
         for profile in profiles))
     log("Stage 2/4: splitting story into acts...")
     act_raw = client.chat_json(
-        options.model,
+        generation_model(options.model),
         build_act_plan_messages(
             story, premise, shots, options.setting,
             max_act_shots=options.max_act_shots),
@@ -1415,7 +1421,7 @@ def generate_full_story_pipeline(client: OllamaClient, premise: str,
         log("Stage 3/4: refining Act %d/%d, shots %d-%d..." % (
             act_index, len(acts), start, end))
         outline = plan_storyboard_outline(
-            client, options.model, act_premise, act_size, options.setting,
+            client, generation_model(options.model), act_premise, act_size, options.setting,
             chunk=6, timeout=max(options.timeout, 600.0),
             strip_appearance=options.strip_appearance,
             character_bible=bible,
@@ -1458,7 +1464,7 @@ def generate_full_story_pipeline(client: OllamaClient, premise: str,
     renumber_shots(result)
     normalize_shot_casts(result)
     run_all_reviews(
-        client, options.model, result, premise,
+        client, review_model(options.model), result, premise,
         batch_size=10, max_passes=2,
         timeout=max(options.timeout, 600.0), log=options.log,
         profiles=profiles)
@@ -1673,7 +1679,7 @@ def _generate_long_storyboard(client: OllamaClient, premise: str,
     max_act_shots = max(1, int(options.max_act_shots))
     if not extract_premise_beats(premise):
         spine = plan_story_spine(
-            client, options.model, premise, shots, options.setting,
+            client, generation_model(options.model), premise, shots, options.setting,
             timeout=max(options.timeout, 600.0), log=log,
             max_act_shots=max_act_shots)
     act_total = (shots + max_act_shots - 1) // max_act_shots
@@ -1694,7 +1700,7 @@ def _generate_long_storyboard(client: OllamaClient, premise: str,
         log("Act %d/%d: shots %d-%d" % (
             act_index, act_total, act_start, act_end))
         outline = plan_storyboard_outline(
-            client, options.model, premise, act_size, options.setting,
+            client, generation_model(options.model), premise, act_size, options.setting,
             chunk=3, timeout=max(options.timeout, 600.0),
             strip_appearance=options.strip_appearance,
             act_summary=act_summary, story_state=story_state,
@@ -1722,7 +1728,7 @@ def _generate_long_storyboard(client: OllamaClient, premise: str,
         for offset, outline_chunk in chunks:
             chunk_state = _global_story_state(premise, result, profiles)
             script_raw = client.chat_json(
-                options.model,
+                generation_model(options.model),
                 build_script_messages(
                     premise, len(outline_chunk), options.setting,
                     result, shots, [item["outline"] for item in outline_chunk],
@@ -1778,7 +1784,7 @@ def _generate_long_storyboard(client: OllamaClient, premise: str,
     renumber_shots(result)
     normalize_shot_casts(result)
     run_all_reviews(
-        client, options.model, result, premise,
+        client, review_model(options.model), result, premise,
         batch_size=10, max_passes=2,
         timeout=max(options.timeout, 600.0), log=options.log,
         profiles=profiles)
@@ -1822,7 +1828,7 @@ def generate_storyboard(client: OllamaClient, premise: str,
     else:
         log("Stage 0: planning %d numbered outline entries..." % remaining)
         outline = plan_storyboard_outline(
-            client, options.model, premise, remaining, options.setting,
+            client, generation_model(options.model), premise, remaining, options.setting,
             chunk=6, timeout=max(options.timeout, 600.0),
             strip_appearance=options.strip_appearance, spine=None,
             character_bible=bible)
@@ -1846,7 +1852,7 @@ def generate_storyboard(client: OllamaClient, premise: str,
             script_base + offset + len(outline_chunk)))
         chunk_state = _global_story_state(premise, result, profiles)
         script_raw = client.chat_json(
-            options.model,
+            generation_model(options.model),
             build_script_messages(
                 premise, len(outline_chunk), options.setting,
                 result, shots, beat_slice,
@@ -1904,7 +1910,7 @@ def generate_storyboard(client: OllamaClient, premise: str,
     renumber_shots(result)
     normalize_shot_casts(result)
     run_all_reviews(
-        client, options.model, result, premise,
+        client, review_model(options.model), result, premise,
         batch_size=10, max_passes=2,
         timeout=max(options.timeout, 600.0), log=options.log,
         profiles=profiles)

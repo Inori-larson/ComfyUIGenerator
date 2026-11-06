@@ -17,12 +17,15 @@ The AI also produces each shot's English negative prompt.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Callable
 
+from .clothing_state import clothing_gate_findings
 from .mechanical import (
     normalize_prompt_text,
     normalize_whitespace,
     split_tags,
+    strip_cjk_segments,
 )
 from .trace import trace_event
 
@@ -33,6 +36,136 @@ REVIEW_STAGE_LABELS = {
     "clothing": "服装连续性",
     "pacing": "节奏与覆盖",
 }
+
+
+def _tag_keys(value: str) -> set[str]:
+    keys: set[str] = set()
+    for tag in split_tags(strip_cjk_segments(value)):
+        text = re.sub(r"^\(\s*(.*?)\s*:\s*[0-9.]+\s*\)$", r"\1", tag)
+        keys.add(re.sub(r"[^a-z0-9]", "", text.lower()))
+    return keys
+
+
+def _male_present(shot: dict[str, Any]) -> bool:
+    cast = str(shot.get("cast") or "").lower()
+    if "boy" in cast or "男" in cast:
+        return True
+    return "1boy" in _tag_keys(str(shot.get("prompt") or ""))
+
+
+def coverage_gate_findings(shots: list[dict[str, Any]]) -> list[str]:
+    prompts = [str(shot.get("prompt") or "") for shot in shots]
+    keys_per_shot = [_tag_keys(prompt) for prompt in prompts]
+    all_keys: set[str] = set()
+    for keys in keys_per_shot:
+        all_keys |= keys
+    issues: list[str] = []
+
+    has_intercourse = any("penisinpussy" in keys for keys in keys_per_shot)
+    ejaculation_tags = (
+        "cum", "cumshot", "cumonpussy", "cumonstomach", "cumonthighs",
+        "creampie", "cuminside", "semen", "ejaculation", "cumdrip",
+    )
+    has_ejaculation = any(tag in all_keys for tag in ejaculation_tags)
+    has_climax = "orgasm" in all_keys or "climax" in all_keys
+    has_fluid = ("pussyjuice" in all_keys or "wetpussy" in all_keys
+                 or "squirt" in all_keys or "dripping" in all_keys)
+
+    if has_intercourse and not has_ejaculation:
+        issues.append(
+            "剧情已发生阴茎插入性交，但全片缺少射精/精液（cum/semen/ejaculation/creampie）；"
+            "请在性交段内、退出之前补拍射精与精液位置，不得仅在事后叙述中提及")
+    if has_intercourse and not has_climax:
+        issues.append(
+            "剧情已发生性交，但缺少性爱高潮（orgasm）；请在性交段安排高潮镜头")
+    if has_intercourse and not has_fluid:
+        issues.append(
+            "剧情已发生性交，但缺少体液表现（pussy juice/wet pussy/dripping）；请补足体液")
+
+    def _run_length(pred) -> int:
+        longest = run = 0
+        for keys in keys_per_shot:
+            if pred(keys):
+                run += 1
+                longest = max(longest, run)
+            else:
+                run = 0
+        return longest
+
+    afterglow_run = _run_length(
+        lambda keys: not (
+            "penisinpussy" in keys or "fellatio" in keys
+            or "cunnilingus" in keys or "fingering" in keys))
+    if afterglow_run >= 12:
+        issues.append(
+            "结尾余韵/整理连续 %d 镜过长；请合并重复的整理、走路、回望镜头，"
+            "把镜头预算让给关键情色节拍" % afterglow_run)
+    fellatio_count = sum(1 for keys in keys_per_shot if "fellatio" in keys)
+    if has_intercourse and fellatio_count < 2:
+        issues.append(
+            "女主对男主口交仅 %d 镜，覆盖不足；请补足口交过程"
+            "（接近、含入、吞吐等微节拍）" % fellatio_count)
+
+    # intimacy rank must not move backward after penetration
+    rank_order = {
+        "solo": 0, "masturbation": 1, "fellatio": 2, "cunnilingus": 3,
+        "penetration": 4, "aftermath": 5,
+    }
+    rank_tags = (
+        ("penetration", ("penisinpussy", "sex", "vaginal", "deepthrust",
+                         "deep penetration")),
+        ("cunnilingus", ("cunnilingus", "tongueonpussy", "tongueinpussy",
+                         "oralonfemale")),
+        ("fellatio", ("fellatio", "penisinmouth", "deepthroat", "blowjob",
+                      "irrumatio")),
+        ("masturbation", ("fingering", "masturbating", "rubbingthrough",
+                          "handbetweenlegs", "sologirl")),
+    )
+
+    def _rank_of(keys: set[str]) -> int:
+        rank = 0
+        for label, terms in rank_tags:
+            if any(term in keys for term in terms):
+                rank = max(rank, rank_order[label])
+        return rank
+
+    ranks = [_rank_of(keys) for keys in keys_per_shot]
+    for i in range(1, len(ranks)):
+        if ranks[i - 1] >= rank_order["penetration"] and 0 < ranks[i] < rank_order["penetration"]:
+            issues.append(
+                "shot %s 已进入性交，但后续无明确转折地回到口交/自慰等更早阶段；"
+                "插入/性交后动作只能向前，不得回退" % shots[i].get("id"))
+            break
+
+    # near-duplicate adjacent shots indicate spinning in place
+    for i in range(1, len(keys_per_shot)):
+        prev, cur = keys_per_shot[i - 1], keys_per_shot[i]
+        if not prev or not cur:
+            continue
+        overlap = len(prev & cur) / max(1, len(prev | cur))
+        if overlap >= 0.98:
+            issues.append(
+                "shot %s 与上一镜标签几乎完全相同（重合 %.0f%%）；"
+                "请推进剧情或合并，不要复制镜头" % (shots[i].get("id"), overlap * 100))
+    return issues
+
+
+def structural_gate_findings(shots: list[dict[str, Any]]) -> dict[str, list[str]]:
+    findings: dict[str, list[str]] = {}
+    for shot in shots:
+        if not _male_present(shot):
+            continue
+        keys = _tag_keys(str(shot.get("prompt") or ""))
+        issues: list[str] = []
+        if "nudemale" not in keys:
+            issues.append(
+                "男性在场但 positive 缺少 nude male；请补充裸体男主标签，不得保留任何男装")
+        if "facelessmale" not in keys and "malefaceless" not in keys:
+            issues.append(
+                "男性在场但 positive 缺少 faceless male；请补充无脸男主标签")
+        if issues:
+            findings[str(shot.get("id") or "")] = issues
+    return findings
 
 _REVIEW_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -77,6 +210,10 @@ _GLOBAL_RULES = (
     "只有动作确实需要时才使用全身；script 中若出现男装描述，视为错误并由你修正。\n"
     "- 服装按剧情单向推进：常规服装脱下后不复穿；任何破损（torn/ripped/hole）永久保留；"
     "隔着衣物、手伸入内层、直接接触等层次必须与剧情一致。\n"
+    "- 初始服装中带权重强调（如 tag(1.2)）的单品全程保留、不允许完全脱下：裤袜/丝袜类可以撕裂破洞，"
+    "胸罩类可以半脱/滑肩带，内裤类可以挪到一边（panties aside），以增加情趣；鞋与发饰等保持在身。\n"
+    "- 初始服装中不带权重的常规外衣（外套、衬衣、披风、连体衣、裙子、手套、肩章等）必须在最后一镜前全部脱下，"
+    "脱下后放在一个固定位置，不得在 desk/floor 之间跳变，也不得穿回。\n"
     "- 动作只能向前推进，已经插入/性交后不得无过渡回到自慰、口交或初遇。\n"
 )
 
@@ -146,7 +283,9 @@ def _shot_payload(shot: dict[str, Any]) -> dict[str, Any]:
 
 def _build_messages(stage: str, premise: str,
                     batch: list[dict[str, Any]],
-                    history: list[dict[str, Any]]) -> list[dict[str, str]]:
+                    history: list[dict[str, Any]],
+                    gate: dict[str, list[str]] | None = None,
+                    coverage: list[str] | None = None) -> list[dict[str, str]]:
     system_parts = [
         _GLOBAL_RULES.format(premise=normalize_whitespace(premise)),
         _STAGE_BRIEFS[stage],
@@ -157,6 +296,16 @@ def _build_messages(stage: str, premise: str,
         "history": [_shot_payload(shot) for shot in history],
         "shots": [_shot_payload(shot) for shot in batch],
     }
+    if gate:
+        user_payload["required_fixes"] = gate
+        system_parts.append(
+            "required_fixes 是软件只读结构闸门发现的硬性问题，必须逐条修复，"
+            "并在对应 shot 的英文 prompt 中补齐标签；不得忽略，不得用文字说明代替。")
+    if coverage:
+        user_payload["coverage_fixes"] = coverage
+        system_parts.append(
+            "coverage_fixes 是软件只读覆盖闸门发现的硬性缺失，必须通过新增或重写镜头来补齐，"
+            "让缺失事件真实发生在对应剧情阶段；不得只在镜头说明里事后追述。")
     return [
         {"role": "system", "content": "\n".join(system_parts)},
         {"role": "user", "content": json.dumps(
@@ -174,8 +323,10 @@ def _coerce_items(raw: Any) -> list[dict[str, Any]]:
     return []
 
 
-def _history_before(shots: list[dict[str, Any]], end: int) -> list[dict[str, Any]]:
-    return shots[:max(0, end)]
+def _history_before(shots: list[dict[str, Any]], end: int,
+                    window: int = 4) -> list[dict[str, Any]]:
+    start = max(0, end - max(0, int(window)))
+    return shots[start:max(0, end)]
 
 
 def _apply_clothing_details(shot: dict[str, Any],
@@ -244,10 +395,28 @@ def review_stage_ai(client: Any, model: str, stage: str,
         for offset in range(0, len(shots), max(1, int(batch_size))):
             batch = shots[offset:offset + max(1, int(batch_size))]
             history = _history_before(shots, offset)
+            batch_gate = {}
+            batch_coverage: list[str] = []
+            if stage == "clothing":
+                full_gate = structural_gate_findings(shots)
+                clothing_gate = clothing_gate_findings(shots, premise)
+                combined = {key: list(full_gate.get(key, []))
+                            for key in set(full_gate) | set(clothing_gate)}
+                for key, messages in clothing_gate.items():
+                    combined.setdefault(key, [])
+                    combined[key].extend(messages)
+                batch_gate = {
+                    str(shot.get("id") or ""): combined[str(shot.get("id") or "")]
+                    for shot in batch
+                    if str(shot.get("id") or "") in combined
+                }
+            if stage == "pacing":
+                batch_coverage = coverage_gate_findings(shots)
             try:
                 raw = client.chat_json(
                     model,
-                    _build_messages(stage, premise, batch, history),
+                    _build_messages(stage, premise, batch, history,
+                                    batch_gate, batch_coverage),
                     schema=_REVIEW_SCHEMA,
                     temperature=temperature,
                     num_predict=num_predict,
@@ -287,11 +456,24 @@ def review_stage_ai(client: Any, model: str, stage: str,
                     "item": item,
                 })
         total_changes += pass_changes
+        gate: dict[str, list[str]] = {}
+        if stage == "clothing":
+            gate = structural_gate_findings(shots)
+            for key, messages in clothing_gate_findings(shots, premise).items():
+                gate.setdefault(key, [])
+                gate[key].extend(messages)
+        coverage = coverage_gate_findings(shots) if stage == "pacing" else []
+        if gate:
+            invalid_remaining = True
+        if coverage:
+            invalid_remaining = True
         trace_event("review.pass_summary", {
             "stage": stage,
             "pass": _pass + 1,
             "changes": pass_changes,
             "invalid_remaining": invalid_remaining,
+            "structural_gate": gate,
+            "coverage_gate": coverage,
         })
         if not invalid_remaining:
             break

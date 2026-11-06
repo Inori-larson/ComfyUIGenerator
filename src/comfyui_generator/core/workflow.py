@@ -11,6 +11,11 @@ from typing import Any
 from comfyui_generator.core.continuity import (
     continuity_negative, continuity_positive, strip_shot_grammar,
 )
+from comfyui_generator.core.mechanical import (
+    dedupe_tags,
+    split_tags,
+    strip_cjk_segments,
+)
 from comfyui_generator.core.style_profile import apply_style_profile
 _BODY_TRIGGER_GROUPS = (
     (("juice", "cum", "ejaculat", "squirt", "liquid", "orgasm", "drip"), (
@@ -389,6 +394,8 @@ def compose_prompts(cfg: dict[str, Any], shot: dict[str, Any]) -> tuple[str, str
         clothing_source, body_source, continuity_tags, render_prompt,
         style_suffix,
     )
+    positive = strip_cjk_segments(positive)
+    positive = ", ".join(dedupe_tags(split_tags(positive)))
     return positive, negative
 def lora_chain(cfg: dict[str, Any], shot: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     loras = cfg.get("loras")

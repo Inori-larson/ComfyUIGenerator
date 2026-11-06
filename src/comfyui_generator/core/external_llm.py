@@ -64,6 +64,7 @@ class ExternalLLMClient:
         finish = ""
         token_budget = max(256, min(32768, int(num_predict or 4096)))
         convo = list(messages)
+        json_forced = bool(schema)
         for attempt in range(max(0, int(retries)) + 1):
             payload = {
                 "model": target,
@@ -72,6 +73,8 @@ class ExternalLLMClient:
                 "max_tokens": token_budget,
                 "stream": False,
             }
+            if json_forced:
+                payload["response_format"] = {"type": "json_object"}
             if getattr(self.cfg, "disable_thinking", True):
                 payload["thinking"] = {"type": "disabled"}
             req = urllib.request.Request(
@@ -82,6 +85,9 @@ class ExternalLLMClient:
                     data = json.loads(resp.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", "replace")[:2000]
+                if exc.code == 400 and json_forced:
+                    json_forced = False
+                    continue
                 if exc.code >= 500 and attempt < retries:
                     time.sleep(3 + attempt * 4)
                     continue
@@ -106,10 +112,12 @@ class ExternalLLMClient:
             try:
                 text = last.strip()
                 if text.startswith("```"):
-                    text = text.strip("`")
-                    if text.startswith("json"):
+                    text = text[3:]
+                    if text[:4].lower() == "json":
                         text = text[4:]
-                text = text.strip()
+                if text.endswith("```"):
+                    text = text[:-3]
+                text = text.strip().strip("`").strip()
                 if text.startswith("["):
                     parsed = json.loads(text)
                     if isinstance(parsed, list):

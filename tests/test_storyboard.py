@@ -14,6 +14,7 @@ from comfyui_generator.core.storyboard import (
     TAG_SCHEMA,
     TAG_SYSTEM,
     CharacterProfile,
+    PROMPT_CONVERSION_FLASH_MODEL,
     StoryboardOptions,
     build_act_plan_messages,
     build_outline_messages,
@@ -45,11 +46,10 @@ from comfyui_generator.core.storyboard import (
 )
 from comfyui_generator.core.mechanical import normalize_prompt_text
 from comfyui_generator.core.ai_review import (
+
     REVIEW_STAGE_LABELS,
     review_stage_ai,
 )
-
-PROMPT_CONVERSION_FLASH_MODEL = "volcengine/deepseek-v4.1-flash"
 
 
 def make_options(**kwargs):

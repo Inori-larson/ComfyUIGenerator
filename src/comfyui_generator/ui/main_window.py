@@ -69,6 +69,7 @@ from comfyui_generator.core.tags import append_tags, estimate_tokens
 from comfyui_generator.core.vision import format_similarity, vision_ready
 from comfyui_generator.core.translate import translate_to_tags
 from comfyui_generator.core.workflow import compose_prompts
+from comfyui_generator.core.clothing_state import clothing_gate_blockers
 from comfyui_generator.ui.branding import app_icon, logo_pixmap
 from comfyui_generator.ui.contact_sheet import build_contact_sheet, build_face_sheet
 from comfyui_generator.ui.continuity_worker import ContinuityWorker
@@ -415,7 +416,7 @@ class MainWindow(QMainWindow):
         self._setup_auto_translate()
         self._restore_ui_state()
         self._apply_model_preset_migration()
-        self._sync_model_config_to_checkpoint(apply=True)
+        self._sync_model_config_to_checkpoint(apply=False)
         self._ensure_window_on_screen()
         self._loading_style_profile = False
         self._update_partial_button()
@@ -1751,6 +1752,8 @@ class MainWindow(QMainWindow):
     def _on_checkpoint_changed(self, *_args) -> None:
         if getattr(self, "_loading_model_config", False):
             return
+        if getattr(self, "_restoring_state", False):
+            return
         config = find_model_config(
             self.model_configs, self.ckpt_combo.currentValue())
         if config:
@@ -1760,6 +1763,8 @@ class MainWindow(QMainWindow):
 
     def _on_model_config_changed(self, *_args) -> None:
         if getattr(self, "_loading_model_config", False):
+            return
+        if getattr(self, "_restoring_state", False):
             return
         config_id = str(self.model_config_combo.currentData() or "")
         config = getattr(self, "_model_config_by_id", {}).get(config_id)
@@ -3975,6 +3980,29 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.No)
         return answer == QMessageBox.StandardButton.Yes
 
+    def _clothing_gate_pass(self, project: dict[str, Any],
+                            shots: list[dict[str, Any]]) -> bool:
+        evaluated: list[dict[str, Any]] = []
+        for shot in shots:
+            positive, _negative = compose_prompts(project, shot)
+            tags = [part.strip() for part in positive.split(",") if part.strip()]
+            evaluated.append({"id": shot.get("id"), "_positive_tags": tags})
+        premise = self._story_premise_text() or str(project.get("premise") or "")
+        blockers = clothing_gate_blockers(evaluated, premise)
+        if not blockers:
+            return True
+        for message in blockers:
+            self.append_log("服装闸门 · " + message)
+        preview = "\n".join(blockers[:20])
+        if len(blockers) > 20:
+            preview += "\n... 另有 %d 条" % (len(blockers) - 20)
+        answer = QMessageBox.warning(
+            self, "服装结构闸门未通过（%d 项）" % len(blockers),
+            preview + "\n\n建议回到 AI 重写/补拍。仍要强行渲染吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        return answer == QMessageBox.StandardButton.Yes
+
     def _row_data(self, row: int) -> dict[str, Any]:
         lock_item = self.shot_table.item(row, 0)
         prompt_item = self.shot_table.item(row, 3)
@@ -4657,6 +4685,8 @@ class MainWindow(QMainWindow):
             for change in repairs:
                 self.append_log("自动连贯修复 · " + change)
         if not self._preflight_quality(project):
+            return
+        if mode != "single" and not self._clothing_gate_pass(project, shots):
             return
         prefix = self._run_prefix_for(mode, text)
         project["prefix"] = prefix
