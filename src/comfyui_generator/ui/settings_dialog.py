@@ -12,6 +12,8 @@ from PySide6.QtWidgets import (
 
 from comfyui_generator.ui.widgets import SearchComboBox
 
+from comfyui_generator.core.external_llm import EXTERNAL_LLM_MODEL
+
 from comfyui_generator.core.config import AppConfig, save_config
 
 
@@ -116,8 +118,8 @@ class SettingsDialog(QDialog):
         self.external_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.external_key.setPlaceholderText("sk-...（也可用 OPENAI_API_KEY）")
         external_form.addRow("API Key", self.external_key)
-        self.external_model = QLineEdit(cfg.external_llm.model)
-        self.external_model.setPlaceholderText("模型名，例如 gpt-4o")
+        self.external_model = QLineEdit(cfg.external_llm.model or EXTERNAL_LLM_MODEL)
+        self.external_model.setPlaceholderText(EXTERNAL_LLM_MODEL)
         external_form.addRow("模型", self.external_model)
         self.external_no_thinking = QCheckBox("关闭模型推理输出（DeepSeek/豆包结构化 JSON）")
         self.external_no_thinking.setChecked(bool(
@@ -204,7 +206,7 @@ class SettingsDialog(QDialog):
         c.ollama.default_model = self.ollama_model.currentValue() or ""
         c.external_llm.base_url = self.external_base.text().strip()
         c.external_llm.api_key = self.external_key.text().strip()
-        c.external_llm.model = self.external_model.text().strip()
+        c.external_llm.model = self.external_model.text().strip() or EXTERNAL_LLM_MODEL
         c.external_llm.disable_thinking = self.external_no_thinking.isChecked()
         c.lora.character_dir = self.character_lora_dir.text().strip()
         c.lora.style_dir = self.style_lora_dir.text().strip()

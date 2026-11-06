@@ -1,7 +1,11 @@
 import json
 from types import SimpleNamespace
 
-from comfyui_generator.core.external_llm import ExternalLLMClient
+from comfyui_generator.core.external_llm import (
+    EXTERNAL_LLM_MODEL,
+    ExternalLLMClient,
+    resolve_external_model,
+)
 
 
 class FakeResponse:
@@ -69,6 +73,9 @@ def test_external_client_retries_with_larger_budget_on_length(monkeypatch):
         "test-model", [{"role": "user", "content": "x"}],
         num_predict=4096, retries=1)
     assert result == {"shots": []}
+    assert resolve_external_model(cfg, "old-model") == "test-model"
+    assert resolve_external_model(None, "supplied-model") == "supplied-model"
+    assert resolve_external_model(None, "") == EXTERNAL_LLM_MODEL
     assert bodies[0]["max_tokens"] == 4096
     assert bodies[1]["max_tokens"] == 8192
 

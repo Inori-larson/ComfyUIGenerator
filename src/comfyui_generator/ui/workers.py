@@ -17,7 +17,11 @@ from PySide6.QtCore import QThread, Signal
 from comfyui_generator.core.assets import Assets
 from comfyui_generator.core.comfy import ComfyClient
 from comfyui_generator.core.config import AppConfig
-from comfyui_generator.core.external_llm import ExternalLLMClient
+from comfyui_generator.core.external_llm import (
+    EXTERNAL_LLM_MODEL,
+    ExternalLLMClient,
+    resolve_external_model,
+)
 from comfyui_generator.core.expand_ai import generate_expansions
 from comfyui_generator.core.jobs import Task, TaskRunner
 from comfyui_generator.core.ollama import OllamaClient
@@ -139,7 +143,7 @@ class PromptWorker(QThread):
     def run(self) -> None:
         if self.use_external:
             client = ExternalLLMClient(self.cfg.external_llm)
-            model = self.model or self.cfg.external_llm.model
+            model = resolve_external_model(self.cfg.external_llm, self.model)
         else:
             client = OllamaClient(self.cfg.ollama.base_url)
             model = self.model or (self.single_options or self.story_options).model
@@ -287,7 +291,7 @@ class ExpansionWorker(QThread):
     def run(self) -> None:
         if self.use_external:
             client = ExternalLLMClient(self.cfg.external_llm)
-            model = self.model or self.cfg.external_llm.model
+            model = resolve_external_model(self.cfg.external_llm, self.model)
         else:
             client = OllamaClient(self.cfg.ollama.base_url)
             model = self.model or self.cfg.ollama.default_model

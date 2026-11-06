@@ -169,7 +169,7 @@ class OllamaConfig:
 class ExternalLLMConfig:
     base_url: str = ""
     api_key: str = ""
-    model: str = ""
+    model: str = "doubao-seed-2.1-pro"
     timeout: float = 240.0
     disable_thinking: bool = True
 

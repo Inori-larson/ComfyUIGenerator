@@ -12,9 +12,19 @@ from comfyui_generator.core.storyboard import (
     _script_resets_to_full,
     _global_story_state,
     _action_audit_messages,
+    _has_insertion,
     _intimacy_regressions,
     _intimacy_stage,
+    _intimacy_stages,
     _pacing_audit_messages,
+    _shot_action_summary,
+    canonicalize_intimacy_positions,
+    enforce_intimacy_monotonic,
+    normalize_action_labels,
+    sanitize_render_prompt,
+    stabilize_intimacy_sequence,
+    stabilize_self_masturbation,
+    vary_duplicate_shots,
     _phase_backtracks,
     _story_progress_ledger,
     enforce_final_wardrobe,
@@ -25,6 +35,12 @@ from comfyui_generator.core.storyboard import (
     ensure_layered_breast_contact,
     ensure_layered_masturbation,
     ensure_outerwear_occlusion,
+    collect_contract_validation_findings,
+    mark_similarity_candidates,
+    canonicalize_clothing_state_sources,
+    synchronize_phase_with_beat,
+    differentiate_near_duplicate_prompts,
+    ensure_narrative_action_tags,
     wardrobe_weight_policy,
     stabilize_clothing_sequence,
     repair_clothing_sequence,
@@ -2151,50 +2167,63 @@ def test_final_wardrobe_removes_unweighted_but_keeps_weighted():
     assert "red cape" not in shot["clothing_details"][profiles[0].key]
 
 
-def test_final_climax_gets_afterglow_and_script():
+def test_final_climax_is_not_deterministically_rewritten():
+    original_prompt = "1girl, 1boy, cum on stomach, orgasm"
     shots = [{
         "id": "50",
         "phase": "正面冲刺顶点",
-        "prompt": "1girl, 1boy, cum on stomach, orgasm",
+        "prompt": original_prompt,
         "script": "男主体外射精，女主到达顶点。",
     }]
     ensure_final_afterglow(shots)
-    assert "afterglow" in shots[0]["prompt"]
-    assert "after sex" in shots[0]["prompt"]
-    assert "事后余韵" in shots[0]["phase"]
-    assert "事后余韵" in shots[0]["script"]
+    assert shots[0]["prompt"] == original_prompt
+    assert shots[0]["script"] == "男主体外射精，女主到达顶点。"
 
 
-def test_premise_layered_masturbation_fills_missing_inside_contact():
-    premise = "剧情：先隔着裤袜和内裤自慰，然后手伸进内裤里摸阴唇自慰"
-    shots = [
-        {"id": "06", "script": "她隔着内裤揉按自慰",
-         "prompt": "1girl, solo, rubbing through panties"},
-        {"id": "07", "script": "她把裤袜拉低，继续隔着内裤自慰",
-         "prompt": "1girl, solo, pantyhose pulled down, through panties"},
-        {"id": "08", "script": "她高潮了",
-         "prompt": "1girl, solo, orgasm"},
-    ]
-    enforce_premise_masturbation_layers(shots, premise)
-    assert "hand inside panties" in shots[1]["prompt"]
-    assert "hand inside pantyhose" in shots[1]["prompt"]
-    assert "fingers on labia" in shots[1]["prompt"]
-    assert "through panties" not in shots[1]["prompt"]
-    assert "直接接触阴唇" in shots[1]["script"]
+def test_premise_layered_masturbation_is_not_deterministically_filled():
+    original_prompt = "1girl, solo, pantyhose pulled down, through panties"
+    shots = [{"id": "07", "script": "她把裤袜拉低，继续隔着内裤自慰",
+              "prompt": original_prompt}]
+    enforce_premise_masturbation_layers(
+        shots, "剧情：手伸进内裤里摸阴唇自慰")
+    assert shots[0]["prompt"] == original_prompt
+    assert shots[0]["script"] == "她把裤袜拉低，继续隔着内裤自慰"
 
 
-def test_layered_masturbation_adds_inside_layers_and_labia():
+def test_layered_masturbation_is_not_deterministically_added():
+    original_prompt = "1girl, solo, hand between legs, rubbing through pantyhose"
     shots = [{
         "id": "06",
         "script": "她把手伸进黑色裤袜和内裤里，指尖直接摸阴唇自慰",
-        "prompt": "1girl, solo, hand between legs, rubbing through pantyhose",
+        "prompt": original_prompt,
     }]
     ensure_layered_masturbation(shots)
-    prompt = shots[0]["prompt"]
-    assert "hand inside pantyhose" in prompt
-    assert "hand inside panties" in prompt
-    assert "fingers on labia" in prompt
-    assert "直接接触阴唇" in shots[0]["script"]
+    assert shots[0]["prompt"] == original_prompt
+
+
+def test_contract_findings_report_missing_expression_without_rewrite():
+    shots = [{
+        "id": "03",
+        "beat": "她从军装外衣下伸手进去，探进胸罩里摸乳房",
+        "script": "她从军装外衣下伸手进去，探进胸罩里摸乳房",
+        "prompt": "1girl, military uniform, black bra, sitting",
+    }]
+    original_prompt = shots[0]["prompt"]
+    findings = collect_contract_validation_findings(shots)
+    assert shots[0]["prompt"] == original_prompt
+    assert findings[0]["shot_id"] == "03"
+    assert findings[0]["recommended_repair_strategy"] == "return_to_ai_for_prompt_rewrite"
+
+
+def test_layered_breast_contact_is_now_non_mutating():
+    shots = [{
+        "id": "03",
+        "script": "她从军装外衣下伸手进去，探进胸罩里摸乳房",
+        "prompt": "1girl, military uniform, black bra, sitting",
+    }]
+    original_prompt = shots[0]["prompt"]
+    ensure_layered_breast_contact(shots)
+    assert shots[0]["prompt"] == original_prompt
 
 
 def test_layer_action_keeps_base_clothing_when_hand_is_inside():
@@ -2273,31 +2302,176 @@ def test_sheer_pantyhose_shows_panties_underneath():
     assert "black lace panties" in shots[0]["prompt"]
 
 
-def test_layered_breast_contact_adds_under_outerwear_tags():
-    shots = [{
-        "id": "03",
-        "script": "她从军装外衣下伸手进去，探进胸罩里摸乳房",
-        "prompt": "1girl, military uniform, black bra, sitting",
-    }]
+def test_layered_breast_contact_ignores_unrelated_beats():
+    shots = [
+        {"id": "01", "script": "她双手交叠站着，NSFW：无",
+         "prompt": "1girl, hands clasped, standing"},
+        {"id": "22", "script": "她跪下给男主口交",
+         "prompt": "1girl, 1boy, fellatio"},
+        {"id": "50", "script": "男主给她额头轻吻",
+         "prompt": "1girl, 1boy, forehead kiss"},
+    ]
     ensure_layered_breast_contact(shots)
-    prompt = shots[0]["prompt"]
-    assert "hand under clothes" in prompt
-    assert "hand inside bra" in prompt
-    assert "breast grab" in prompt
-    assert "从外衣下伸入胸罩" in shots[0]["script"]
+    for shot in shots:
+        assert "breast grab" not in shot["prompt"]
+        assert "hand inside bra" not in shot["prompt"]
+        assert "hand under clothes" not in shot["prompt"]
+
+
+def test_layered_masturbation_ignores_partner_and_afterglow_beats():
+    shots = [
+        {"id": "29", "cast": "1girl 1boy", "script": "男主解开她的腰带",
+         "prompt": "1girl, 1boy, belt"},
+        {"id": "39", "cast": "1girl 1boy", "script": "男主插入",
+         "prompt": "1girl, 1boy, vaginal sex, penis in pussy"},
+        {"id": "48", "cast": "1girl 1boy", "script": "男主抽出",
+         "prompt": "1girl, 1boy, pulls out, afterglow"},
+    ]
+    ensure_layered_masturbation(shots)
+    for shot in shots:
+        assert "fingers on labia" not in shot["prompt"]
+
+
+def test_sync_carries_half_off_legwear_to_empty_detail_shots():
+    premise = ("角色：少女\n初始服装：white gloves, military uniform, "
+               "(black pantyhose:1.2), black lace panties")
+    profiles = parse_character_profiles(premise)
+    key = profiles[0].key
+    shots = [
+        {"id": "09", "prompt": "1girl, panties aside, pantyhose around thighs",
+         "clothing_details": {key: "panties aside, pantyhose around thighs"},
+         "character_states": {key: "black lace panties, black pantyhose"}},
+        {"id": "10", "prompt": "1girl, 1boy, surprised",
+         "clothing_details": {key: ""},
+         "character_states": {key: "black pantyhose, black lace panties"}},
+    ]
+    sync_clothing_state_to_prompt(shots, profiles)
+    prompt = shots[1]["prompt"]
+    assert "panties aside" in prompt
+    assert "pantyhose around thighs" in prompt
+    assert "panties under pantyhose" not in prompt
+
+
+def test_torn_pantyhose_and_aside_are_treated_as_open():
+    premise = ("角色：少女\n初始服装：military uniform, torn pantyhose, "
+               "black lace panties")
+    profiles = parse_character_profiles(premise)
+    key = profiles[0].key
+    shots = [
+        {"id": "36", "prompt": ("1girl, military uniform, torn pantyhose, "
+                                "black lace panties, panties aside"),
+         "clothing_details": {key: "torn pantyhose, panties aside"}},
+        {"id": "37", "prompt": ("1girl, military uniform, pantyhose hole, "
+                                "black lace panties, pulling panties aside"),
+         "clothing_details": {key: "pantyhose hole, panties aside"}},
+    ]
+    ensure_outerwear_occlusion(shots)
+    assert "black lace panties" in shots[0]["prompt"]
+    assert "panties aside" in shots[1]["prompt"]
+
+
+def test_clothing_state_canonicalizer_separates_uniform_top_skirt_belt():
+    premise = ("角色：少女\n初始服装：white gloves, military uniform, belt, "
+               "military skirt, black bra")
+    profiles = parse_character_profiles(premise)
+    key = profiles[0].key
+    shots = [
+        {"id": "28", "script": "军装上衣完全脱下放在课桌上",
+         "prompt": "1girl, 1boy, putting down clothes",
+         "character_states": {key: "white gloves, military uniform, belt, military skirt"}},
+        {"id": "29", "script": "男主解开腰带并缓缓抽离腰带",
+         "prompt": "1girl, 1boy",
+         "character_states": {key: "white gloves, military uniform, belt, military skirt"}},
+        {"id": "32", "script": "男主勾住裙摆边缘向下推",
+         "prompt": "1girl, 1boy",
+         "character_states": {key: "white gloves, military uniform, belt, military skirt"}},
+    ]
+    canonicalize_clothing_state_sources(shots, profiles)
+    assert "uniform_top removed" in shots[0]["clothing_details"][key]
+    assert "skirt" in shots[0]["character_states"][key]
+    assert "belt" in shots[0]["character_states"][key]
+    assert "belt removed" in shots[1]["clothing_details"][key]
+    assert "skirt pushed down" in shots[2]["clothing_details"][key]
+
+
+def test_cape_off_body_does_not_reappear_without_redress():
+    premise = "角色：少女\n初始服装：military uniform, red cape, black bra"
+    profiles = parse_character_profiles(premise)
+    key = profiles[0].key
+    shots = [
+        {"id": "09", "prompt": "1girl, red cape on desk",
+         "clothing_details": {key: "red cape on desk"}},
+        {"id": "11", "prompt": "1girl, red cape, cape slipped to arm",
+         "clothing_details": {key: "cape slipped to arm"}},
+        {"id": "24", "prompt": "1girl, red cape",
+         "clothing_details": {key: "red cape"}},
+    ]
+    canonicalize_clothing_state_sources(shots, profiles)
+    sync_clothing_state_to_prompt(shots, profiles)
+    assert "red cape" not in shots[1]["prompt"]
+    assert "red cape" not in shots[2]["prompt"]
+
+
+def test_sanitize_collapses_multiple_open_states_for_one_key():
+    prompt = ("1girl, military uniform unbuttoned, "
+              "(military uniform unbuttoned:1.2), (uniform off shoulder:1.2)")
+    result = sanitize_render_prompt(prompt)
+    assert "unbuttoned" not in result
+    assert result.count("off shoulder") == 1
+
+
+def test_similarity_candidates_are_marked_without_rewrite():
+    shots = [
+        {"id": "07", "script": "she is masturbating",
+         "prompt": "1girl, solo, masturbation, blush, parted lips, looking up"},
+        {"id": "08", "script": "she is masturbating now",
+         "prompt": "1girl, solo, masturbation, blush, parted lips, looking down"},
+    ]
+    original_prompt = shots[1]["prompt"]
+    mark_similarity_candidates(shots, 0.5, 0.5)
+    assert shots[1]["prompt"] == original_prompt
+    assert shots[1]["validation_candidates"]
+    first = shots[1]["validation_candidates"]
+    mark_similarity_candidates(shots, 0.5, 0.5)
+    assert shots[1]["validation_candidates"] == first
+
+
+def test_narrative_action_tags_keep_brushing_bangs():
+    shots = [{
+        "id": "50", "beat": "男主俯身拨刘海，额头轻吻",
+        "prompt": "1girl, 1boy, forehead kiss",
+    }]
+    ensure_narrative_action_tags(shots)
+    assert "brushing bangs" in shots[0]["prompt"]
+    assert not __import__("comfyui_generator.core.storyboard", fromlist=[
+        "_appearance_conflicts"])._appearance_conflicts(
+            "brushing bangs", parse_character_profiles(
+                "角色：少女：blunt bangs"))
+
+
+def test_phase_synchronizes_with_current_beat():
+    shots = [
+        {"id": "31", "phase": "性爱前戏·脱肩章", "beat": "男主压近胸膛贴近肩头"},
+        {"id": "32", "phase": "性爱前戏·脱披风", "beat": "男主勾住裙摆边缘向下推"},
+    ]
+    synchronize_phase_with_beat(shots)
+    assert "脱肩章" not in shots[0]["phase"]
+    assert "脱披风" not in shots[1]["phase"]
+    assert "男主压近" in shots[0]["phase"]
+    assert "男主勾住裙摆" in shots[1]["phase"]
 
 
 def test_layered_masturbation_does_not_add_inside_for_through_clothes():
     shots = [{
         "id": "02",
-        "script": "她隔着裤袜和内裤轻轻揉阴唇",
+        "script": "她隔着裤袜和内裤轻轻揉私处",
         "prompt": "1girl, solo, rubbing through pantyhose, through panties",
     }]
     ensure_layered_masturbation(shots)
     prompt = shots[0]["prompt"]
     assert "hand inside pantyhose" not in prompt
     assert "hand inside panties" not in prompt
-    assert "fingers on labia" in prompt
+    assert "fingers on labia" not in prompt
 
 
 def test_weighted_clothing_allows_half_off_but_not_removal():
@@ -2354,6 +2528,218 @@ def test_intimacy_stage_detects_post_sex_regression():
     assert _intimacy_stage(shots[1]) == 4
     regressions = _intimacy_regressions(shots)
     assert [item["id"] for item in regressions] == ["03", "04"]
+
+
+def test_finger_penetration_is_not_partner_sex():
+    solo = {
+        "id": "01", "cast": "1girl solo",
+        "prompt": "1girl, solo, finger penetration, fingering, wet pussy",
+    }
+    partner_finger = {
+        "id": "02", "cast": "1girl 1boy",
+        "prompt": "1girl, 1boy, finger penetration, fingering",
+    }
+    partner_sex = {
+        "id": "03", "cast": "1girl 1boy",
+        "prompt": "1girl, 1boy, vaginal sex, penis in pussy",
+    }
+    assert _intimacy_stage(solo) == 1
+    assert _intimacy_stage(partner_finger) == 1
+    assert _intimacy_stage(partner_sex) == 3
+
+
+def test_intimacy_regressions_start_at_real_sex_not_finger_penetration():
+    shots = [
+        {"id": "01", "cast": "1girl solo",
+         "prompt": "1girl, solo, finger penetration, fingering"},
+        {"id": "02", "cast": "1girl 1boy", "prompt": "1girl, 1boy, fellatio"},
+        {"id": "03", "cast": "1girl 1boy",
+         "prompt": "1girl, 1boy, cunnilingus"},
+        {"id": "04", "cast": "1girl 1boy",
+         "prompt": "1girl, 1boy, vaginal sex, penis in pussy"},
+        {"id": "05", "cast": "1girl 1boy", "prompt": "1girl, 1boy, fellatio"},
+    ]
+    regressions = _intimacy_regressions(shots)
+    assert [(item["id"], item["first"]) for item in regressions] == [
+        ("05", "04")]
+
+
+def test_continuity_history_has_actions_instead_of_clothing_prefix():
+    class Fake:
+        def __init__(self):
+            self.messages = []
+
+        def chat_json(self, model, messages, **kwargs):
+            self.messages.append(messages[1]["content"])
+            return {"shots": []}
+
+    shots = [{
+        "id": "%02d" % index,
+        "phase": "自慰" if index < 4 else "性交",
+        "beat": "手指插入" if index < 4 else "阴道性交",
+        "cast": "1girl solo" if index < 4 else "1girl 1boy",
+        "script": "服装：" + "黑色长裙," * 80 + "姿势动作：手指插入；NSFW：自慰",
+        "prompt": "1girl, solo, finger penetration" if index < 4
+        else "1girl, 1boy, vaginal sex",
+    } for index in range(1, 11)]
+    client = Fake()
+    repair_story_continuity_ai(client, "m", shots, chunk=2)
+    assert '"stage": 3' in client.messages[-1]
+    assert '"actions":' in client.messages[-1]
+    assert "性交" in client.messages[-1]
+    assert "阴道性交" in client.messages[-1]
+
+
+def test_continuity_rejects_post_sex_oral_rewrite():
+    class Fake:
+        def chat_json(self, model, messages, **kwargs):
+            return {"shots": [{
+                "id": "02", "valid": False,
+                "issues": ["补口交"],
+                "script": "女主跪地口交",
+                "prompt": "1girl, 1boy, fellatio",
+            }]}
+
+    shots = [
+        {"id": "01", "cast": "1girl 1boy", "phase": "性交",
+         "beat": "性交", "script": "姿势动作：插入；NSFW：性交",
+         "prompt": "1girl, 1boy, vaginal sex, penis in pussy"},
+        {"id": "02", "cast": "1girl 1boy", "phase": "性交后",
+         "beat": "脱衣", "script": "姿势动作：脱衣；NSFW：事后",
+         "prompt": "1girl, 1boy, after sex, lying on desk"},
+    ]
+    repair_story_continuity_ai(Fake(), "m", shots, start=1, chunk=1)
+    assert "fellatio" not in shots[1]["prompt"]
+    assert shots[1]["beat"] == "脱衣"
+
+
+def test_enforce_intimacy_monotonic_rewrites_post_sex_tail():
+    shots = [
+        {"id": "01", "cast": "1girl solo",
+         "prompt": "1girl, solo, masturbation"},
+        {"id": "02", "cast": "1girl 1boy", "phase": "正面插入",
+         "beat": "后入性交开始",
+         "script": "姿势动作：男主从后方顶入；NSFW：后入性交",
+         "prompt": "1girl, 1boy, vaginal sex, missionary, on back"},
+        {"id": "03", "cast": "1girl 1boy", "phase": "胁迫口交",
+         "beat": "口交",          "script": "姿势动作：口交；NSFW：口交",
+         "prompt": "1girl, 1boy, fellatio, kneeling, mouth around penis"},
+        {"id": "04", "cast": "1girl 1boy", "phase": "胁迫自慰",
+         "beat": "自慰", "script": "姿势动作：自慰；NSFW：自慰",
+         "prompt": "1girl, 1boy, masturbation, tongue out"},
+    ]
+    stabilize_intimacy_sequence(shots, "夜晚教室，要求高潮和体液")
+    assert _intimacy_stage(shots[2]) == 3
+    assert _intimacy_stage(shots[3]) in (3, 4)
+    assert "fellatio" not in shots[2]["prompt"]
+    assert "masturbation" not in shots[3]["prompt"]
+    assert "kneeling" not in shots[2]["prompt"]
+    assert "mouth around penis" not in shots[2]["prompt"]
+    assert "tongue out" not in shots[3]["prompt"]
+    assert _intimacy_regressions(shots) == []
+    assert "后入" not in shots[1]["beat"]
+    assert "正面" in shots[1]["beat"]
+
+
+def test_stabilize_intimacy_sequence_is_idempotent():
+    shots = [
+        {"id": "01", "cast": "1girl 1boy",
+         "prompt": "1girl, 1boy, vaginal sex, missionary, on back",
+         "script": "姿势动作：插入；NSFW：性交"},
+        {"id": "02", "cast": "1girl 1boy",
+         "prompt": "1girl, 1boy, fellatio",
+         "script": "姿势动作：口交；NSFW：口交"},
+        {"id": "03", "cast": "1girl 1boy",
+         "prompt": "1girl, 1boy, masturbation",
+         "script": "姿势动作：自慰；NSFW：自慰"},
+    ]
+    stabilize_intimacy_sequence(shots, "要求高潮和体液")
+    first = [dict(shot) for shot in shots]
+    stabilize_intimacy_sequence(shots, "要求高潮和体液")
+    assert [shot["prompt"] for shot in shots] == [
+        shot["prompt"] for shot in first]
+    assert [shot["script"] for shot in shots] == [
+        shot["script"] for shot in first]
+
+
+def test_sanitize_merges_same_garment_states_for_shot_08():
+    prompt = (
+        "1girl, solo, (black pantyhose around mid-thigh:1.2), "
+        "(black pantyhose pulled down:1.2), "
+        "(black lace panties aside:1.2), panties aside, "
+        "bra under clothes, bra under uniform")
+    positive = sanitize_render_prompt(prompt)
+    assert "around mid-thigh" in positive
+    assert "pulled down" not in positive
+    assert positive.count("panties aside") == 1
+    assert "bra under uniform" not in positive
+    assert "bra under clothes" not in positive
+
+
+def test_sanitize_merges_colored_base_into_panties_aside_for_shot_10():
+    prompt = (
+        "1girl, solo, black lace panties, panties aside, "
+        "(pantyhose around knees:1.2), military uniform, uniform")
+    positive = sanitize_render_prompt(prompt)
+    assert "black lace panties aside" in positive
+    assert "black lace panties," not in positive
+    assert "pantyhose around knees" in positive
+    assert "military uniform" in positive
+    assert ", uniform," not in positive
+
+
+def test_phase_follows_visual_action_not_stale_sex_label():
+    shots = [
+        {"id": "42", "cast": "1girl 1boy", "phase": "性交·正面",
+         "beat": "性交进行中",
+         "prompt": "1girl, 1boy, cunnilingus, tongue on pussy"},
+        {"id": "50", "cast": "1girl 1boy", "phase": "做爱·事后余韵",
+         "beat": "插入后抽送",
+         "prompt": "1girl, 1boy, vaginal sex, thrusting, afterglow"},
+    ]
+    normalize_action_labels(shots)
+    assert _intimacy_stage(shots[0]) == 2
+    assert shots[0]["phase"] == "口交"
+    assert shots[0]["beat"] == "口交/舔阴进行中"
+    assert 3 in _intimacy_stages(shots[1])
+    assert shots[1]["phase"].startswith("性交")
+
+
+def test_afterglow_before_first_sex_is_merged_into_sex_and_moved_to_end():
+    shots = [
+        {"id": "01", "cast": "1girl 1boy",
+         "prompt": "1girl, 1boy, cunnilingus"},
+        {"id": "02", "cast": "1girl 1boy", "phase": "事后余韵",
+         "prompt": "1girl, 1boy, cum dripping on desk"},
+        {"id": "03", "cast": "1girl 1boy", "phase": "事后余韵",
+         "prompt": "1girl, 1boy, pussy juice"},
+        {"id": "04", "cast": "1girl 1boy",
+         "prompt": "1girl, 1boy, vaginal sex, thrusting"},
+    ]
+    stabilize_intimacy_sequence(shots, "要求高潮和体液")
+    assert 3 in _intimacy_stages(shots[1])
+    assert 3 in _intimacy_stages(shots[2])
+    assert 4 in _intimacy_stages(shots[3])
+    assert "afterglow" in shots[3]["prompt"]
+    assert _intimacy_regressions(shots) == []
+
+
+def test_self_masturbation_does_not_withdraw_and_restart():
+    shots = [
+        {"id": "01", "prompt": "1girl, solo, finger penetration, fingering",
+         "script": "姿势动作：手指探入穴内抽送；NSFW：自慰"},
+        {"id": "02", "prompt": "1girl, solo, rubbing through pantyhose, "
+                              "hand between legs",
+         "script": "姿势动作：抽出湿指准备跪下，重新开始自慰；NSFW：隔着裤袜自慰"},
+        {"id": "03", "prompt": "1girl, solo, fingering, wet pussy",
+         "script": "姿势动作：手指探入穴内；NSFW：自慰"},
+        {"id": "04", "prompt": "1girl, 1boy, fellatio",
+         "script": "姿势动作：口交；NSFW：口交"},
+    ]
+    stabilize_self_masturbation(shots)
+    assert _has_insertion(shots[1])
+    assert "rubbing through" not in shots[1]["prompt"]
+    assert "跪下" not in shots[1]["script"]
 
 
 def test_focus_tags_get_weight_but_plain_tags_do_not():
@@ -2484,6 +2870,32 @@ def test_repetitive_shot_groups_catches_near_duplicate_below_old_threshold():
         {"id": "03", "script": "completely different action"},
     ]
     assert ["01", "02"] in repetitive_shot_groups(shots)
+
+
+def test_repetitive_shot_groups_ignores_shared_clothing_prefix():
+    prefix = "服装：" + "黑色长裙，" * 80
+    shots = [
+        {"id": "01", "beat": "缓慢抽送",
+         "script": prefix + "；姿势动作：缓慢抽送；NSFW：性交"},
+        {"id": "02", "beat": "抬起腰部迎合",
+         "script": prefix + "；姿势动作：抬起腰部迎合；NSFW：性交"},
+    ]
+    assert repetitive_shot_groups(shots) == []
+
+
+def test_vary_duplicate_shots_is_non_mutating():
+    shots = [
+        {"id": "01", "beat": "手指在裤袜内揉动",
+         "script": "姿势动作：手指在裤袜内揉动；NSFW：自慰",
+         "prompt": "1girl, solo, masturbation"},
+        {"id": "02", "beat": "手指在裤袜内揉动",
+         "script": "姿势动作：手指在裤袜内揉动；NSFW：自慰",
+         "prompt": "1girl, solo, masturbation"},
+    ]
+    original_prompt = shots[1]["prompt"]
+    vary_duplicate_shots(shots)
+    assert shots[1]["prompt"] == original_prompt
+    assert "duplicate_variation" not in shots[1]
 
 
 def test_repetitive_shot_groups_detects_near_duplicates():

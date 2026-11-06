@@ -877,7 +877,11 @@ _CLOTHING_KEYS = (
     ("suit", (r"\bsuit\b(?!\s*(?:pants|trousers|jacket|shirt|shoes?))",
               r"tuxedo", r"套装", r"西服", r"西装")),
     ("armor", (r"armor", r"盔甲", r"铠甲")),
-    ("skirt", (r"skirt", r"裙子", r"短裙", r"裙")),
+    ("uniform_top", (r"\b(?:military|dress|uniform|service)\s+(?:top|jacket|coat|shirt)\b",
+                     r"\b(?:jacket|top)\s+(?:of|from)\s+(?:a|the)\s+uniform\b",
+                     r"军装上衣", r"制服上衣", r"军服上衣")),
+    ("skirt", (r"military skirt", r"uniform skirt", r"service skirt", r"skirt",
+               r"裙子", r"短裙", r"裙")),
     ("pants", (r"pants(?!less)", r"trousers", r"slacks", r"chinos", r"joggers",
                r"裤子", r"长裤", r"西裤", r"休闲裤", r"运动裤")),
     ("jeans", (r"jeans", r"牛仔裤")),
@@ -1891,6 +1895,10 @@ def _is_fully_nude(profile: CharacterProfile, states: dict[str, set[str]]) -> bo
 
 def _appearance_conflicts(tag: str, present: list[CharacterProfile]) -> bool:
     low = str(tag or "").lower()
+    if re.search(
+            r"\b(?:sweat(?:y)?|wet hair|sweaty bangs|teary|tears?|"
+            r"red eyes|crying|brushing bangs)\b|汗|湿发|泪", low):
+        return False
     if (low.strip() == "black eye" or _clothing_key(tag)
             or "hairclip" in low or "hair ornament" in low
             or "hair bow" in low or "hair ribbon" in low or "pubic hair" in low):
@@ -2091,7 +2099,8 @@ def _dedupe_weighted_clothing(tags: list[str]) -> list[str]:
 
 
 _HALF_OFF_WORDS = (
-    "pulled down", "pulled aside", "half-off", "half off", "around one leg",
+    "pushed down", "pulled down", "pulled aside", "half-off", "half off",
+ "around one leg",
     "around one ankle", "around ankle", "around ankles", "around thigh",
     "around thighs", "around knee", "around knees", "around calf",
     "around calves", "around shin", "around shins", "around foot",
@@ -2594,6 +2603,8 @@ def sync_clothing_state_to_prompt(shots: list[dict[str, Any]],
         for profile in profiles:
             state_tags = set(_drop_mutually_exclusive_states(
                 list(_profile_clothing_details(shot, profile))))
+            if not state_tags:
+                state_tags = set(active_states[profile.key].values())
             active = active_states[profile.key]
             for tag in state_tags:
                 key = _clothing_key(tag)
@@ -2613,7 +2624,15 @@ def sync_clothing_state_to_prompt(shots: list[dict[str, Any]],
                     continue
                 if key in damaged_keys[profile.key]:
                     continue
-                if restore_all or _restores_item(script, key):
+                restore_marker = (restore_all
+                                  or _restores_item(script, key))
+                if restore_marker and "整理" in script:
+                    cue = script.find("整理")
+                    section = script[max(0, cue - 80):cue + 80]
+                    if re.search(r"(?:knee|thigh|膝盖|大腿)", section, re.I):
+                        restore_marker = False
+
+                if restore_marker:
                     active.pop(key, None)
                     restored_keys.add(key)
             state_tags = {
@@ -2653,9 +2672,13 @@ def sync_clothing_state_to_prompt(shots: list[dict[str, Any]],
             if nude:
                 tags = [tag for tag in tags if not _clothing_key(tag)]
                 continue
+            state_families = {
+                _clothing_key(tag) for tag in state_tags if _clothing_key(tag)}
             cleaned: list[str] = []
             for tag in tags:
                 key = _clothing_key(tag)
+                if key in state_families and not _is_displaced_state(tag):
+                    continue
                 if not key:
                     if _is_state_or_damage(tag) and tag not in state_tags:
                         continue
@@ -2687,7 +2710,8 @@ def sync_clothing_state_to_prompt(shots: list[dict[str, Any]],
             tags = cleaned
         tags = [
             tag for tag in tags
-            if not _is_off_body_tag(tag)
+            if _clothing_key(tag) not in ("uniform_top", "belt")
+            and not _is_off_body_tag(tag)
             and not any(_tag_matches_removed_item(tag, item)
                         for item in removed_items)]
         tags = _drop_male_visibility_conflicts(tags)
@@ -2719,6 +2743,13 @@ def _is_displaced_state(tag: str) -> bool:
                 r"\b(?:around|at|bunched|hanging|removed|off)\b", low)))
 
 
+def _is_exclusive_state(tag: str) -> bool:
+    low = _spaced_tag(tag)
+    return (_is_displaced_state(tag) or _is_off_body_tag(tag)
+            or bool(re.search(
+                r"\b(?:aside|pulled\s+(?:down|aside|off))\b", low)))
+
+
 def _drop_mutually_exclusive_states(tags: list[str]) -> list[str]:
     damaged_keys = {
         _clothing_key(tag) for tag in tags
@@ -2732,9 +2763,129 @@ def _drop_mutually_exclusive_states(tags: list[str]) -> list[str]:
                 and not _is_damage_tag(tag))]
 
 
+_OPEN_CLOTHING_RE = re.compile(
+    r"\b(?:open(?:ed)?|unbuttoned|unzipped)\b|敞开|解开", re.I)
+_STATE_LOCATION_RE = re.compile(
+    r"\b(?:around|at)\b|thigh|knee|ankle|calf|shin|waist|大腿|膝|脚踝", re.I)
+
+
+def _merge_colored_state(base: str, state: str) -> str:
+    clean_base = _tag_weight_key(base)[0].strip()
+    clean_state = _tag_weight_key(state)[0].strip()
+    if not clean_base or clean_base.lower() in clean_state.lower():
+        return state
+    noun = clean_base.split()[-1]
+    if noun and re.search(r"\b%s\b" % re.escape(noun), clean_state, re.I):
+        merged = re.sub(
+            r"\b%s\b" % re.escape(noun), clean_base, clean_state,
+            count=1, flags=re.I)
+    else:
+        merged = "%s %s" % (clean_base, clean_state)
+    weight = re.search(r":([0-9.]+)\)\s*$", state)
+    return "(%s:%s)" % (merged, weight.group(1)) if weight else merged
+
+
+def _single_state_clothing_tags(tags: list[str]) -> list[str]:
+    groups: dict[str, list[str]] = {}
+    for tag in tags:
+        key = _clothing_key(tag)
+        if key:
+            groups.setdefault(key, []).append(tag)
+    remove: set[str] = set()
+    replace: dict[str, str] = {}
+    for key, values in groups.items():
+        bases: list[str] = []
+        displaced: list[str] = []
+        damage: list[str] = []
+        opened: list[str] = []
+        layers: list[str] = []
+        for tag in values:
+            low = _spaced_tag(tag)
+            if _OPEN_CLOTHING_RE.search(low):
+                opened.append(tag)
+            elif _is_exclusive_state(tag):
+                if _is_damage_tag(tag):
+                    damage.append(tag)
+                else:
+                    displaced.append(tag)
+            elif _is_damage_tag(tag):
+                damage.append(tag)
+            elif re.search(r"\b(?:under|inside)\b", low):
+                layers.append(tag)
+            else:
+                bases.append(tag)
+        for tag in bases[1:]:
+            remove.add(tag)
+        if displaced:
+            weighted_displaced = [tag for tag in displaced
+                                  if _tag_weight_key(tag)[1]]
+            keep = next(
+                (tag for tag in weighted_displaced
+                 if _STATE_LOCATION_RE.search(_spaced_tag(tag))),
+                next((tag for tag in weighted_displaced),
+                     next((tag for tag in displaced
+                           if _STATE_LOCATION_RE.search(_spaced_tag(tag))),
+                          displaced[-1])))
+            if bases:
+                replace[keep] = _merge_colored_state(bases[0], keep)
+            for tag in values:
+                if tag not in (keep, ):
+                    remove.add(tag)
+        elif damage:
+            keep = next(
+                (tag for tag in damage if "torn" in _spaced_tag(tag)),
+                damage[0])
+            for tag in values:
+                if tag != keep and tag not in opened:
+                    remove.add(tag)
+        elif opened:
+            for tag in opened[1:]:
+                remove.add(tag)
+    return [replace.get(tag, tag) for tag in tags if tag not in remove]
+
+
+def _is_upper_outerwear_tag(tag: str) -> bool:
+    key = _clothing_key(tag)
+    if key not in {
+            "shirt", "uniform", "jacket", "coat", "blouse", "sweater",
+            "dress", "leotard", "bodysuit"}:
+        return False
+    low = _spaced_tag(tag)
+    return not bool(re.search(
+        r"\b(?:skirt|pants|trousers|shorts|jeans|pantyhose|stockings|"
+        r"thighhigh|legwear|shoes|heels|boots)\b", low))
+
+
+def _strip_orphan_layer_tags(tags: list[str]) -> list[str]:
+    keys = {_clothing_key(tag) for tag in tags if _clothing_key(tag)}
+    displaced = {
+        _clothing_key(tag) for tag in tags
+        if _clothing_key(tag) and _is_exclusive_state(tag)}
+    upper = [tag for tag in tags if _is_upper_outerwear_tag(tag)]
+    result = []
+    for tag in tags:
+        low = _spaced_tag(tag)
+        if low == "bra under clothes" and not upper:
+            continue
+        if low == "bra under uniform" and not any(
+                _clothing_key(item) == "uniform" for item in upper):
+            continue
+        if low == "bra under shirt" and not any(
+                _clothing_key(item) == "shirt" for item in upper):
+            continue
+        if low == "panties under pantyhose" and (
+                "pantyhose" not in keys or "pantyhose" in displaced):
+            continue
+        result.append(tag)
+    return result
+
+
 def sanitize_render_prompt(prompt: str) -> str:
     tags = _drop_mutually_exclusive_states(
         [tag.strip() for tag in str(prompt or "").split(",") if tag.strip()])
+    tags = _dedupe_weighted_clothing(tags)
+    tags = _single_state_clothing_tags(tags)
+    tags = _strip_orphan_layer_tags(tags)
     removed_items: set[str] = set()
     for tag in tags:
         if _is_off_body_tag(tag) and not _is_male_state(tag):
@@ -2743,7 +2894,7 @@ def sanitize_render_prompt(prompt: str) -> str:
                 removed_items.add(item)
     displaced_keys = {
         _clothing_key(tag) for tag in tags
-        if _clothing_key(tag) and _is_displaced_state(tag)
+        if _clothing_key(tag) and _is_exclusive_state(tag)
         and not _is_male_state(tag)}
     faceless = any(
         tag.lower() in (
@@ -2760,14 +2911,16 @@ def sanitize_render_prompt(prompt: str) -> str:
             continue
         key = _clothing_key(tag)
         if (key and key in displaced_keys
-                and not _is_displaced_state(tag)
+                and not _is_exclusive_state(tag)
                 and not _is_state_or_damage(tag)):
             continue
         if (faceless and re.search(r"\bmale (?:face|head)\b", tag, re.I)
                 and "out of frame" not in tag.lower()):
             continue
         result.append(tag)
+    result = _dedupe_weighted_clothing(result)
     return ", ".join(result)
+
 
 
 def apply_focus_weights(shots: list[dict[str, Any]],
@@ -2988,53 +3141,33 @@ _DIRECT_TOUCH_WORDS = ("阴唇", "阴蒂", "私处", "阴道口", "外阴")
 
 
 def ensure_layered_masturbation(shots: list[dict[str, Any]]) -> None:
-    for shot in shots:
-        if not isinstance(shot, dict):
-            continue
-        text = _shot_narrative_text(shot)
-        if not any(word in text for word in _DIRECT_TOUCH_WORDS):
-            continue
-        if not any(word in text for word in (
-                "自慰", "揉", "摸", "指", "手", "masturbat", "fingering")):
-            continue
-        tags = [tag.strip() for tag in str(shot.get("prompt") or "").split(",")
-                if tag.strip()]
-        low = ", ".join(tag.lower() for tag in tags)
-        additions: list[str] = []
-        if _LAYERED_TOUCH_RE.search(text) and "hand inside pantyhose" not in low:
-            additions.append("hand inside pantyhose")
-        if _LAYERED_PANTIES_RE.search(text) and "hand inside panties" not in low:
-            additions.append("hand inside panties")
-        if not any(term in low for term in (
-                "fingers on labia", "fingers on clitoris", "touching labia")):
-            additions.append("fingers on labia")
-        if additions:
-            shot["prompt"] = ", ".join(tags + additions)
-            script = str(shot.get("script") or "")
-            if "直接接触阴唇" not in script:
-                if "hand inside panties" in additions:
-                    script = (script.rstrip("。；; ")
-                              + "；手指伸入内裤，指腹直接接触阴唇。").strip()
-                elif "hand inside pantyhose" in additions:
-                    script = (script.rstrip("。；; ")
-                              + "；手指伸入裤袜内。").strip()
-                if script:
-                    shot["script"] = script
-            trace_event("prompt.layered_masturbation", {
-                "id": str(shot.get("id") or ""),
-                "added": additions,
-            })
+    return None
+
+
+_INJECTED_ACTION_CLAUSE_RE = re.compile(
+    r"[；;]\s*(?:手从外衣下伸入胸罩内抚摸乳房|手指伸入内裤，指腹直接接触阴唇|"
+    r"手指伸入裤袜内|事后余韵：动作放慢，呼吸仍未平复)[^。；;]*[。？?]?",
+    re.I)
+_DETAIL_ACTION_PRESENT_RE = re.compile(r"\b(?:holding|pulling|removing|unbuttoning|lifting|pushing)\b")
+
+
+def _clean_injected_action_clauses(value: str) -> str:
+    return _INJECTED_ACTION_CLAUSE_RE.sub("", str(value or "")).strip()
 
 
 _BREAST_LAYER_RE = re.compile(
-    r"(?:手|指)[^。；;]{0,12}(?:伸进|伸入|探入|进入|under)[^。；;]{0,16}"
+    r"(?:手|指)[^。；;]{0,24}(?:伸进|伸入|探入|进入|摸|under|inside)[^。；;]{0,24}"
     r"(?:外衣|上衣|制服|衣服|shirt|uniform|bra|胸罩|内衣)"
-    r"[^。；;]{0,20}(?:胸|乳房|breast)", re.I)
+    r"[^。；;]{0,24}(?:胸|乳房|breast)|"
+    r"(?:外衣|上衣|制服|衣服|shirt|uniform|bra|胸罩|内衣)"
+    r"[^。；;]{0,24}(?:手|指)[^。；;]{0,24}"
+    r"(?:伸进|伸入|探入|进入|摸|under|inside)[^。；;]{0,24}(?:胸|乳房|breast)",
+    re.I)
 
 
 _UPPER_OUTERWEAR_KEYS = {
-    "uniform", "shirt", "jacket", "coat", "blouse", "sweater", "dress",
-    "leotard", "bodysuit",
+    "uniform", "uniform_top", "shirt", "jacket", "coat", "blouse", "sweater",
+    "dress", "leotard", "bodysuit",
 }
 _LOWER_OUTERWEAR_KEYS = {
     "uniform", "skirt", "pants", "trousers", "shorts", "jeans", "dress",
@@ -3061,6 +3194,50 @@ _OUTER_OPEN_RE = re.compile(
     re.I)
 _HAND_LAYER_RE = re.compile(
     r"\b(?:hand|fingers?|finger)\s+(?:inside|under|in)\b", re.I)
+
+
+def prune_unsupported_transient_action_tags(shots: list[dict[str, Any]]) -> None:
+    breast_actions = {
+        "hand under clothes", "hand inside bra", "breast grab",
+        "hand on breast",
+    }
+    masturbation_actions = {
+        "fingers on labia", "fingers on clitoris", "touching labia",
+        "hand inside panties", "hand inside pantyhose",
+    }
+    for shot in shots:
+        if not isinstance(shot, dict):
+            continue
+        script = str(shot.get("script") or shot.get("outline") or "")
+        beat = str(shot.get("beat") or "")
+        narrative = " ".join((script, beat))
+        tags = _split_tag_list(shot.get("prompt") or "")
+        kept: list[str] = []
+        removed: list[str] = []
+        source_stages = _stages_from_text(shot, narrative.lower())
+        self_action = bool(re.search(
+            r"\b(?:masturbat|fingering|finger(?:s)?\s+(?:on|inside|in)|"
+            r"rubbing|self[- ]pleasure)\b|自慰|手淫|揉(?:弄|按|压)?|指交",
+            narrative.lower()))
+        through_clothes = bool(re.search(
+            r"隔着|through\s+(?:panties|pantyhose|clothes)|rubbing through",
+            narrative.lower()))
+        for tag in tags:
+            clean = _tag_weight_key(tag)[0]
+            if clean in breast_actions and not _BREAST_LAYER_RE.search(narrative):
+                removed.append(tag)
+                continue
+            if clean in masturbation_actions and (
+                    through_clothes or not (source_stages <= {1} and self_action)):
+                removed.append(tag)
+                continue
+            kept.append(tag)
+        if removed:
+            shot["prompt"] = ", ".join(kept)
+            trace_event("prompt.unsupported_actions_pruned", {
+                "id": str(shot.get("id") or ""),
+                "removed": removed,
+            })
 
 
 def ensure_clothing_layers(shots: list[dict[str, Any]]) -> None:
@@ -3141,7 +3318,9 @@ def ensure_outerwear_occlusion(shots: list[dict[str, Any]]) -> None:
                  in _UPPER_OUTERWEAR_KEYS)
             for tag in tags)
         lower_open = any(
-            _OUTER_OPEN_RE.search(tag)
+            (_OUTER_OPEN_RE.search(tag)
+             or _is_damage_tag(tag)
+             or re.search(r"\b(?:torn|ripped|hole|aside)\b", tag.lower()))
             and (_clothing_key(_tag_weight_key(tag)[0])
                  in _LOWER_OUTERWEAR_KEYS)
             for tag in tags)
@@ -3178,101 +3357,115 @@ def ensure_outerwear_occlusion(shots: list[dict[str, Any]]) -> None:
             })
 
 
-def ensure_layered_breast_contact(shots: list[dict[str, Any]]) -> None:
+def collect_contract_validation_findings(
+        shots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
     for shot in shots:
         if not isinstance(shot, dict):
             continue
-        text = _shot_narrative_text(shot)
-        if not any(word in text for word in ("胸", "乳房", "breast")):
-            continue
-        if not any(word in text for word in ("手", "指")):
-            continue
-        if not any(word in text for word in (
-                "外衣", "上衣", "制服", "衣服", "shirt", "uniform", "bra",
-                "胸罩", "内衣")):
-            continue
-        tags = [tag.strip() for tag in str(shot.get("prompt") or "").split(",")
-                if tag.strip()]
-        low = ", ".join(tag.lower() for tag in tags)
-        additions = []
-        if "hand under clothes" not in low:
-            additions.append("hand under clothes")
-        if "hand inside bra" not in low:
-            additions.append("hand inside bra")
-        if "breast grab" not in low and "hand on breast" not in low:
-            additions.append("breast grab")
-        if additions:
-            shot["prompt"] = ", ".join(tags + additions)
-            script = str(shot.get("script") or "")
-            if "从外衣下伸入胸罩" not in script:
-                shot["script"] = (script.rstrip("。；; ")
-                                  + "；手从外衣下伸入胸罩内抚摸乳房。").strip()
-            trace_event("prompt.layered_breast", {
-                "id": str(shot.get("id") or ""),
-                "added": additions,
+        script = str(shot.get("script") or shot.get("outline") or "")
+        beat = str(shot.get("beat") or "")
+        narrative = " ".join((script, beat))
+        prompt = str(shot.get("prompt") or "")
+        tags = {_tag_weight_key(tag)[0] for tag in _split_tag_list(prompt)}
+        missing: list[str] = []
+        if _BREAST_LAYER_RE.search(narrative):
+            for expected in ("hand under clothes", "hand inside bra"):
+                if expected not in tags:
+                    missing.append(expected)
+        if _LAYERED_PANTIES_RE.search(narrative):
+            contact_terms = (
+                "hand inside panties", "fingers on labia",
+                "fingers on clitoris", "touching labia")
+            if not any(term in tags for term in contact_terms):
+                missing.append("contact_term_for_current_beat")
+        if missing:
+            findings.append({
+                "shot_id": str(shot.get("id") or ""),
+                "finding_type": "contract_expression_missing",
+                "evidence": {
+                    "current_beat": beat,
+                    "missing_expressions": missing,
+                },
+                "recommended_repair_strategy": "return_to_ai_for_prompt_rewrite",
             })
+    return findings
+
+
+def ensure_layered_breast_contact(shots: list[dict[str, Any]]) -> None:
+    return None
 
 
 def enforce_premise_masturbation_layers(
         shots: list[dict[str, Any]], premise: str) -> None:
-    text = str(premise or "")
-    inside = re.search(
-        r"(?:手|指)[^。；;]{0,8}(?:伸进|探入|伸入|插进)[^。；;]{0,12}"
-        r"(?:内裤|裤袜)", text)
-    if not inside:
-        return
-    wants_pantyhose = bool(re.search(r"裤袜", text))
-    candidates = []
-    for shot in shots:
-        cast = str(shot.get("cast") or "").lower()
-        if "1boy" in cast or "male" in cast:
-            break
-        narrative = _shot_narrative_text(shot)
-        if not any(word in narrative for word in ("自慰", "masturbat", "fingering")):
-            continue
-        if not any(word in narrative for word in ("内裤", "panties")):
-            continue
-        stages = _intimacy_stages(shot)
-        if 3 in stages:
-            break
-        if 4 in stages:
-            continue
-        candidates.append(shot)
-    if not candidates:
-        return
-    target = candidates[-1]
-    tags = [tag.strip() for tag in str(target.get("prompt") or "").split(",")
-            if tag.strip()]
-    low = ", ".join(tag.lower() for tag in tags)
-    additions: list[str] = []
-    if "hand inside pantyhose" not in low and wants_pantyhose:
-        additions.append("hand inside pantyhose")
-    if "hand inside panties" not in low:
-        additions.append("hand inside panties")
-    if not any(term in low for term in (
-            "fingers on labia", "fingers on clitoris", "touching labia")):
-        additions.append("fingers on labia")
-    if not additions:
-        return
-    tags = [
-        tag for tag in tags
-        if tag.lower() not in (
-            "through panties", "rubbing through panties",
-            "rubbing over panties", "through clothes")]
-    target["prompt"] = ", ".join(tags + additions)
-    script = str(target.get("script") or "")
-    if "手指直接接触阴唇" not in script:
-        target["script"] = (script.rstrip("。；; ") + "；手指伸入内裤内直接接触阴唇。").strip()
-    trace_event("prompt.premise_masturbation_layers", {
-        "id": str(target.get("id") or ""),
-        "added": additions,
-    })
+    return None
 
 
 _LAYER_TAG_ORDER = (
+    "bra under clothes", "bra under uniform", "panties under pantyhose",
+    "hand under clothes", "hand inside bra", "breast grab",
     "hand inside pantyhose", "hand inside panties", "fingers on labia",
     "fingers on clitoris", "touching labia",
 )
+
+
+_DUPLICATE_VARIATION_TAGS = (
+    "trembling thighs", "sweat on skin", "clenched hands", "eye contact",
+    "parted lips", "arched back", "messy hair", "heavy breathing",
+    "blush", "teary eyes", "curled toes", "body blush",
+)
+
+
+def vary_duplicate_shots(shots: list[dict[str, Any]]) -> None:
+    return None
+
+
+_NEAR_DUPLICATE_CAMERA_TAGS = (
+    "close-up", "extreme close-up", "upper body", "from below",
+    "from above", "side angle", "cowboy shot", "over the shoulder",
+)
+
+
+def differentiate_near_duplicate_prompts(shots: list[dict[str, Any]],
+                                         threshold: float = 0.9) -> None:
+    return None
+
+
+def mark_similarity_candidates(shots: list[dict[str, Any]],
+                               script_threshold: float = 0.82,
+                               positive_threshold: float = 0.9) -> None:
+    for index in range(1, len(shots)):
+        previous = shots[index - 1]
+        shot = shots[index]
+        script_ratio = difflib.SequenceMatcher(
+            None,
+            str(previous.get("script") or previous.get("outline") or ""),
+            str(shot.get("script") or shot.get("outline") or "")).ratio()
+        positive_ratio = difflib.SequenceMatcher(
+            None,
+            str(previous.get("prompt") or ""),
+            str(shot.get("prompt") or "")).ratio()
+        candidates = []
+        if script_ratio >= script_threshold:
+            candidates.append({
+                "type": "adjacent_script_similarity",
+                "previous_id": str(previous.get("id") or ""),
+                "ratio": round(script_ratio, 4),
+                "requires_semantic_review": True,
+            })
+        if positive_ratio >= positive_threshold:
+            candidates.append({
+                "type": "adjacent_positive_similarity",
+                "previous_id": str(previous.get("id") or ""),
+                "ratio": round(positive_ratio, 4),
+                "requires_semantic_review": True,
+            })
+        if candidates:
+            shot["validation_candidates"] = candidates
+            trace_event("validation.similarity_candidate", {
+                "id": str(shot.get("id") or ""),
+                "candidates": candidates,
+            })
 
 
 def canonicalize_layer_tags(shots: list[dict[str, Any]]) -> None:
@@ -3297,37 +3490,200 @@ def canonicalize_layer_tags(shots: list[dict[str, Any]]) -> None:
 
 
 def ensure_final_afterglow(shots: list[dict[str, Any]]) -> None:
-    if not shots or not isinstance(shots[-1], dict):
-        return
-    shot = shots[-1]
-    text = _shot_narrative_text(shot)
-    if any(term in text for term in (
-            "afterglow", "after sex", "afterplay", "余韵", "事后")):
-        return
-    if not any(term in text for term in (
-            "orgasm", "climax", "ejaculat", "creampie", "cum", "semen",
-            "射精", "高潮", "潮吹", "白浊")):
-        return
-    tags = [tag.strip() for tag in str(shot.get("prompt") or "").split(",")
-            if tag.strip()]
-    low = ", ".join(tag.lower() for tag in tags)
-    additions = []
-    if "afterglow" not in low:
-        additions.append("afterglow")
-    if "after sex" not in low:
-        additions.append("after sex")
-    shot["prompt"] = ", ".join(tags + additions)
-    phase = str(shot.get("phase") or "").strip()
-    if phase and not any(term in phase for term in ("余韵", "事后")):
-        shot["phase"] = phase + "·事后余韵"
-    script = str(shot.get("script") or "")
-    if "事后余韵" not in script:
-        shot["script"] = (script.rstrip("。；; ")
-                          + "；事后余韵：动作放慢，呼吸仍未平复。").strip()
-    trace_event("prompt.final_afterglow", {"id": str(shot.get("id") or "")})
+    return None
 
 
-def finalize_generated_story(shots: list[dict[str, Any]], premise: str,
+_SKIRT_DOWN_RE = re.compile(
+    r"(?:skirt|裙摆|裙)[^。；;]{0,18}(?:pushed|pulled|down|向下推|推下|褪下|拉下)",
+    re.I)
+_BELT_OFF_RE = re.compile(
+    r"(?:belt|腰带)[^。；;]{0,20}(?:pulled off|removed|抽离|抽出|解开并|脱下|取下)",
+    re.I)
+_UNIFORM_TOP_REMOVED_RE = re.compile(
+    r"(?:uniform|军装|军服|制服)[^。；;]{0,10}(?:top|jacket|上衣)[^。；;]{0,20}"
+    r"(?:removed|taken off|脱下|完全脱下|脱下放在)", re.I)
+_ALL_CLOTHING_KEYS = {key for key, _patterns in _CLOTHING_KEYS}
+
+
+def _split_tag_list(text: str) -> list[str]:
+    return [tag.strip() for tag in str(text or "").split(",") if tag.strip()]
+
+
+def _explicitly_worn_keys(shot: dict[str, Any], profile: CharacterProfile) -> set[str]:
+    text = " ".join((
+        str(shot.get("script") or shot.get("outline") or ""),
+        str(shot.get("beat") or ""),
+        str(shot.get("clothing") or ""),
+    ))
+    keys: set[str] = set()
+    for key in _ALL_CLOTHING_KEYS:
+        aliases = dict(_CLOTHING_KEYS).get(key, ())
+        if any(re.search(alias, text, re.I) for alias in aliases):
+            keys.add(key)
+    if "military skirt" in text.lower() or "军装裙" in text:
+        keys.add("skirt")
+    return keys
+
+
+def _canonical_state_semantic(tag: str) -> str:
+    value = _tag_weight_key(tag)[0]
+    value = re.sub(r"\b(?:black|lace)\s+(?=panties)", "", value)
+    value = re.sub(r"\bblack\s+(?=pantyhose)", "", value)
+    value = re.sub(r"\b(?:red\s+)?cape on floor\b", "cape removed", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _dedupe_clothing_detail_tags(tags: list[str]) -> list[str]:
+    chosen: dict[str, str] = {}
+    order: list[str] = []
+    for tag in tags:
+        semantic = _canonical_state_semantic(tag)
+        key = _clothing_key(semantic) or semantic
+        identity = key + "|" + semantic
+        if identity not in chosen:
+            chosen[identity] = tag
+            order.append(identity)
+    return [chosen[identity] for identity in order]
+
+
+def normalize_clothing_detail_sets(shots: list[dict[str, Any]]) -> None:
+    for shot in shots:
+        details = shot.get("clothing_details")
+        if not isinstance(details, dict):
+            continue
+        for key, value in list(details.items()):
+            tags = [tag.strip() for tag in str(value or "").split(",")
+                    if tag.strip()]
+            normalized = _dedupe_clothing_detail_tags(tags)
+            if normalized != tags:
+                details[key] = ", ".join(normalized)
+
+
+def canonicalize_clothing_state_sources(
+        shots: list[dict[str, Any]],
+        profiles: list[CharacterProfile]) -> None:
+    carried: dict[str, set[str]] = {profile.key: set() for profile in profiles}
+    for shot in shots:
+        if not isinstance(shot, dict):
+            continue
+        if shot.get("script"):
+            shot["script"] = _clean_injected_action_clauses(shot["script"])
+        if shot.get("outline"):
+            shot["outline"] = _clean_injected_action_clauses(shot["outline"])
+        script = str(shot.get("script") or shot.get("outline") or "")
+        details = shot.get("clothing_details")
+        if not isinstance(details, dict):
+            details = None
+        states = shot.get("character_states")
+        if not isinstance(states, dict):
+            states = None
+        reset_to_full = _script_resets_to_full(script)
+        for profile in profiles:
+            detail_tags = set(_profile_clothing_details(shot, profile))
+            if not detail_tags and carried[profile.key] and not reset_to_full:
+                detail_tags = set(carried[profile.key])
+                if details is None:
+                    details = {}
+                    shot["clothing_details"] = details
+                details[profile.key] = ", ".join(sorted(detail_tags))
+            detail_text = ", ".join(detail_tags).lower()
+            detail_keys = {_clothing_key(tag) for tag in detail_tags}
+            detail_keys.discard("")
+            state_tags = set(_profile_worn_clothing(shot, profile))
+            state_keys = {_clothing_key(tag) for tag in state_tags}
+            state_keys.discard("")
+            additions = set()
+            worn_additions = set()
+            worn_keys = _explicitly_worn_keys(shot, profile)
+            for key in worn_keys:
+                base = next((tag for tag in profile.initial_clothing
+                             if _clothing_key(tag) == key), "")
+                if _UNIFORM_TOP_REMOVED_RE.search(script) and key == "uniform":
+                    additions.add("uniform_top removed")
+                elif key not in state_keys and base and "全部穿着整齐" in script:
+                    worn_additions.add(base)
+            if _UNIFORM_TOP_REMOVED_RE.search(script):
+                additions.add("uniform_top removed")
+                detail_tags = {tag for tag in detail_tags
+                               if not (_clothing_key(tag) == "uniform"
+                                       and "unbuttoned" in tag.lower())}
+            if _BELT_OFF_RE.search(script):
+                additions.add("belt removed")
+            if _SKIRT_DOWN_RE.search(script):
+                additions.add("skirt pushed down")
+                base = next((tag for tag in profile.initial_clothing
+                             if _clothing_key(tag) == "skirt"), "skirt")
+                worn_additions.add(base)
+            if any(tag == "cape removed" for tag in detail_tags):
+                detail_tags = {tag for tag in detail_tags
+                               if not re.match(r"^(?:red cape|cape) on (?:desk|floor)$", tag)}
+            elif any(re.match(r"^(?:red cape|cape) on (?:desk|floor)$", tag) for tag in detail_tags):
+                detail_tags.add("cape removed")
+            if detail_tags | additions:
+                if details is None:
+                    details = {}
+                    shot["clothing_details"] = details
+                details[profile.key] = ", ".join(sorted(detail_tags | additions))
+                carried[profile.key] = set(detail_tags | additions)
+
+            if state_tags | worn_additions:
+                if states is None:
+                    states = {}
+                    shot["character_states"] = states
+                states[profile.key] = ", ".join(sorted(state_tags | worn_additions))
+
+
+def _phase_is_aligned(phase: str, beat: str) -> bool:
+    terms = {
+        "自慰": ("自慰", "手淫", "揉", "finger", "masturbat"),
+        "口交": ("口交", "舔", "含", "blowjob", "oral", "fellatio", "cunnilingus"),
+        "性交": ("性交", "做爱", "插入", "vaginal", "sex", "penis in", "thrust"),
+        "余韵": ("余韵", "事后", "抽出", "afterglow", "after sex", "pulls out"),
+        "披风": ("披风", "cape"),
+        "肩章": ("肩章", "epaulette"),
+    }
+    for label, markers in terms.items():
+        if label in phase and not any(marker in beat.lower() for marker in markers):
+            return False
+    return True
+
+
+def ensure_narrative_action_tags(shots: list[dict[str, Any]]) -> None:
+    mappings = (
+        (re.compile(r"拨刘海|拨开刘海|brushing bangs|brushes bangs", re.I),
+         "brushing bangs"),
+    )
+    for shot in shots:
+        if not isinstance(shot, dict):
+            continue
+        text = " ".join((
+            str(shot.get("script") or shot.get("outline") or ""),
+            str(shot.get("beat") or ""),
+        ))
+        tags = _split_tag_list(shot.get("prompt") or "")
+        low = {tag.lower() for tag in tags}
+        additions = [tag for pattern, tag in mappings
+                     if pattern.search(text) and tag not in low]
+        if additions:
+            shot["prompt"] = ", ".join(tags + additions)
+            trace_event("prompt.narrative_action_tags", {
+                "id": str(shot.get("id") or ""),
+                "added": additions,
+            })
+
+
+def synchronize_phase_with_beat(shots: list[dict[str, Any]]) -> None:
+    for shot in shots:
+        phase = str(shot.get("phase") or "").strip()
+        beat = str(shot.get("beat") or "").strip()
+        if not phase or not beat or _phase_is_aligned(phase, beat):
+            continue
+        base = beat.split("，", 1)[0].split("；", 1)[0].strip()
+        if base:
+            shot["phase"] = base[:80]
+
+
+def _finalize_generated_story_once(shots: list[dict[str, Any]], premise: str,
                              profiles: list[CharacterProfile] | None = None
                              ) -> None:
     renumber_shots(shots)
@@ -3340,19 +3696,41 @@ def finalize_generated_story(shots: list[dict[str, Any]], premise: str,
             or shot.get("script") or "")[:80]
         if fallback:
             shot["phase"] = fallback
+    stabilize_intimacy_sequence(shots, premise)
     profiles = profiles or parse_character_profiles(premise)
+    canonicalize_clothing_state_sources(shots, profiles)
     infer_missing_clothing_details(shots, profiles)
     sync_clothing_state_to_prompt(shots, profiles)
     enforce_weighted_core(shots, profiles)
     enforce_final_wardrobe(shots, profiles)
     ensure_clothing_layers(shots)
     ensure_outerwear_occlusion(shots)
+    prune_unsupported_transient_action_tags(shots)
     ensure_layered_masturbation(shots)
     ensure_layered_breast_contact(shots)
+    prune_unsupported_transient_action_tags(shots)
     enforce_premise_masturbation_layers(shots, premise)
+    ensure_layered_masturbation(shots)
+    prune_unsupported_transient_action_tags(shots)
     ensure_final_afterglow(shots)
+    ensure_narrative_action_tags(shots)
+    normalize_clothing_detail_sets(shots)
+    synchronize_phase_with_beat(shots)
     apply_focus_weights(shots)
+    mark_similarity_candidates(shots)
+    vary_duplicate_shots(shots)
+    differentiate_near_duplicate_prompts(shots)
     canonicalize_layer_tags(shots)
+    for shot in shots:
+        if isinstance(shot, dict):
+            shot["prompt"] = sanitize_render_prompt(shot.get("prompt") or "")
+
+
+def finalize_generated_story(shots: list[dict[str, Any]], premise: str,
+                             profiles: list[CharacterProfile] | None = None
+                             ) -> None:
+    _finalize_generated_story_once(shots, premise, profiles)
+    _finalize_generated_story_once(shots, premise, profiles)
 
 
 _CLOTHING_REPAIR_SCHEMA: dict[str, Any] = {
@@ -3829,6 +4207,10 @@ def _story_validation_messages(history: list[dict[str, Any]],
         "history": history,
         "shots": [{
             "id": str(shot.get("id") or ""),
+            "phase": str(shot.get("phase") or ""),
+            "beat": str(shot.get("beat") or ""),
+            "stage": _intimacy_stage(shot),
+            "actions": _shot_action_summary(shot),
             "script": str(shot.get("script") or shot.get("outline") or ""),
             "prompt": str(shot.get("prompt") or ""),
         } for shot in batch],
@@ -3852,8 +4234,12 @@ def _story_validation_messages(history: list[dict[str, Any]],
             "cast 与 prompt 人数是否一致：cast 有 1boy 时 prompt 必须有男性在场，"
             "或明确写 male body out of frame；若男性完全不在场，cast 改成 1girl solo；"
             "同一阶段连续超过 15-20 镜仍未推进时，要求压缩或推进到下一阶段。"
-            "用户明确要求的动作类型必须分别覆盖，例如女主自慰、男主对女主口交、"
-            "女主对男主口交、吞精；缺少任何一项都要重写补上。"
+            "history 里的 stage 和 actions 表示已经发生的动作；任何已出现的动作都视为已覆盖，"
+            "不要因为当前批次看不到就重写补动作。补缺失动作由独立步骤处理，"
+            "连续性审查不得把当前镜改成历史里更早的动作。"
+            "如果 history 最大 stage 已经达到 3（性交），当前镜只能继续性交、换体位、"
+            "高潮、余韵、穿衣或离开；不得改写成 stage 1（自慰/指交）或 stage 2（口交/手交）。"
+            "服装整理、脱衣、事后余韵不是缺失口交的理由，不能因此回退动作阶段。"
             "穿衣或整理后无时间跳跃、场景变化或新事件就再次脱衣，必须重写。"
             "多轮性爱如果没有明确轮次过渡，只是前戏→性交→事后→再脱循环，必须合并或删重。"
             "用户没有明确要求第二轮时，第一次射精后再完整重复"
@@ -4035,8 +4421,14 @@ def repair_story_continuity_ai(client: Any, model: str,
         batch = shots[offset:offset + max(1, int(chunk))]
         history = [{
             "id": str(shot.get("id") or ""),
-            "script": str(shot.get("script") or shot.get("outline") or "")[:180],
+            "phase": str(shot.get("phase") or ""),
+            "beat": str(shot.get("beat") or ""),
+            "stage": _intimacy_stage(shot),
+            "actions": _shot_action_summary(shot),
+            "script": str(shot.get("script") or shot.get("outline") or "")[:360],
         } for shot in shots[:offset]]
+        history_stage = max((
+            _intimacy_stage(shot) for shot in shots[:offset]), default=0)
         try:
             raw = client.chat_json(
                 model,
@@ -4060,6 +4452,27 @@ def repair_story_continuity_ai(client: Any, model: str,
                 if item is None and index < len(items):
                     item = items[index] if isinstance(items[index], dict) else None
                 if not isinstance(item, dict) or item.get("valid") is not False:
+                    continue
+                candidate = dict(shot)
+                for key in ("script", "prompt", "phase", "beat", "nsfw"):
+                    value = item.get(key)
+                    if isinstance(value, str) and value.strip():
+                        candidate[key] = value.strip()
+                candidate_stage = _intimacy_stage({
+                    "prompt": candidate.get("prompt") or "",
+                    "script": candidate.get("script") or "",
+                    "cast": candidate.get("cast") or "",
+                })
+                if history_stage >= 3 and candidate_stage in (1, 2):
+                    trace_event("repair.story_continuity.rejected_regression", {
+                        "id": str(shot.get("id") or ""),
+                        "history_stage": history_stage,
+                        "candidate_stage": candidate_stage,
+                        "ai_item": item,
+                    })
+                    if log:
+                        log("剧情修正跳过回退 shot %s：历史已到性交，不能改写为口交/自慰"
+                            % shot.get("id", ""))
                     continue
                 before = dict(shot)
                 script = str(item.get("script") or "").strip()
@@ -4122,11 +4535,24 @@ def repair_clothing_sequence_safe(client: Any, model: str,
             log("服装连续性校验已跳过，不影响提示词生成: %s" % exc)
 
 
+def _repetition_text(shot: dict[str, Any]) -> str:
+    variation = str(shot.get("duplicate_variation") or "").strip()
+    if variation:
+        return "variation:" + variation
+    script = str(shot.get("script") or shot.get("outline") or "")
+    sections = _split_script_sections(script)
+    action = " ".join(
+        sections.get(label, "") for label in ("姿势动作", "NSFW"))
+    beat = str(shot.get("beat") or "")
+    text = (action + " " + beat).strip()
+    if text:
+        return text
+    return script or str(shot.get("prompt") or "")
+
+
 def repetitive_shot_groups(shots: list[dict[str, Any]],
                            threshold: float = 0.82) -> list[list[str]]:
-    texts = [
-        str(shot.get("script") or shot.get("outline") or shot.get("prompt") or "")
-        for shot in shots]
+    texts = [_repetition_text(shot) for shot in shots]
     ids = [str(shot.get("id") or "") for shot in shots]
     visited: set[int] = set()
     groups: list[list[str]] = []
@@ -4195,16 +4621,24 @@ _INTIMACY_STAGE_TERMS: tuple[tuple[int, tuple[str, ...]], ...] = (
         "afterglow", "after sex", "orgasm", "climax", "ejaculat", "creampie",
         "squirt", "cum", "余韵", "高潮", "射精", "事后")),
     (3, (
-        "vaginal sex", "penis in pussy", "penetration", "intercourse",
-        "anal sex", "sex from behind", "missionary", "cowgirl", "doggystyle",
-        "mating press", "riding", "性交", "做爱", "交合")),
+        "vaginal sex", "penis in pussy", "anal sex", "sex from behind",
+        "missionary", "cowgirl", "doggystyle", "mating press",
+        "性交", "做爱", "交合")),
     (2, (
         "fellatio", "cunnilingus", "blowjob", "oral sex", "deepthroat",
         "handjob", "paizuri", "口交", "深喉", "舔阴", "舔弄")),
     (1, (
         "masturbation", "fingering", "rubbing pussy", "self pleasure",
+        "finger penetration", "fingers inside pussy", "finger in pussy",
         "自慰", "手淫", "揉阴")),
 )
+
+_AMBIGUOUS_SEX_TERMS = ("penetration", "intercourse", "riding", "插入")
+_FINGER_CONTEXT_RE = re.compile(
+    r"(?:finger|fingers|fingering|hand|digit|指|手指)[^,，。；;]{0,24}$", re.I)
+_PARTNER_CONTEXT_RE = re.compile(
+    r"(?:\b1\s*boy\b|\bmale\b|\bman\b|\bpenis\b|\bnude male\b|"
+    r"男主|男性|阴茎)", re.I)
 
 
 _NEGATION_PREFIX_RE = re.compile(
@@ -4234,15 +4668,56 @@ def _shot_narrative_text(shot: dict[str, Any]) -> str:
     )).lower()
 
 
-def _intimacy_stages(shot: dict[str, Any]) -> set[int]:
-    text = _shot_narrative_text(shot)
+def _has_partner_sex_context(shot: dict[str, Any], text: str) -> bool:
+    cast = str(shot.get("cast") or "").lower()
+    if "boy" in cast or "male" in cast:
+        return True
+    return bool(_PARTNER_CONTEXT_RE.search(text))
+
+
+def _term_in_finger_context(text: str, term: str) -> bool:
+    pattern = r"(?<![a-z0-9])%s(?![a-z0-9])" % re.escape(term) \
+        if re.search(r"[a-z]", term) else re.escape(term)
+    for match in re.finditer(pattern, text, re.I):
+        before = text[max(0, match.start() - 48):match.start()]
+        after = text[match.end():match.end() + 32]
+        if _FINGER_CONTEXT_RE.search(before):
+            return True
+        if re.search(r"^\s*(?:finger|fingers|fingering|hand|digit|指|手指)",
+                     after, re.I):
+            return True
+    return False
+
+
+def _stages_from_text(shot: dict[str, Any], text: str) -> set[int]:
     found: set[int] = set()
+    partner = _has_partner_sex_context(shot, text)
     for stage, terms in _INTIMACY_STAGE_TERMS:
         for term in terms:
             if term in text and not _term_is_negated(text, term):
                 found.add(stage)
                 break
+    for term in _AMBIGUOUS_SEX_TERMS:
+        if term not in text or _term_is_negated(text, term):
+            continue
+        if _term_in_finger_context(text, term):
+            found.add(1)
+            continue
+        if partner:
+            found.add(3)
     return found
+
+
+def _intimacy_stages(shot: dict[str, Any]) -> set[int]:
+    primary = _stages_from_text(
+        shot, str(shot.get("prompt") or "").lower())
+    if primary:
+        return primary
+    script = _stages_from_text(
+        shot, str(shot.get("script") or shot.get("outline") or "").lower())
+    if script:
+        return script
+    return _stages_from_text(shot, _shot_narrative_text(shot))
 
 
 def _intimacy_stage(shot: dict[str, Any]) -> int:
@@ -4277,6 +4752,595 @@ def _intimacy_regressions(shots: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return regressions
 
 
+_INTIMACY_STAGE_NAMES = {
+    1: "自慰/指交",
+    2: "口交/手交",
+    3: "性交",
+    4: "高潮/余韵",
+}
+
+_SCRIPT_SECTION_RE = re.compile(
+    r"(角色/cast|服装|可见部位|姿势动作|表情|场景|镜头|构图|光线时间|NSFW)[：:]\s*")
+_ORAL_MAST_TAG_RE = re.compile(
+    r"\b(?:fellatio|blowjob|oral sex|deepthroat|cunnilingus|handjob|paizuri|"
+    r"licking penis|licking pussy|penis in mouth|mouth around penis|"
+    r"lips around penis|tongue on pussy|tongue touching glans|"
+    r"hollowed cheeks|saliva|saliva trail|drool|masturbation|fingering|"
+    r"finger penetration|fingers inside pussy|finger in pussy|"
+    r"hand between legs|hand on own crotch|rubbing pussy|rubbing through|"
+    r"self pleasure|kneeling|on knees|sitting on heels|face near crotch|"
+    r"face up|looking up|tongue out|pressing head down|hand on head|"
+    r"hand on boy's head|hands on another's head|hands pushing head down|"
+    r"nose against body|bulging throat|forced to take it all|standing)\b|"
+    r"口交|深喉|舔阴|舔弄|自慰|手淫|揉阴|跪姿|跪坐|脸贴近胯部|"
+    r"舌尖触碰龟头|扶后脑|按头|按后脑|抬头|吐舌",
+    re.I)
+_SEX_POSITION_TAG_RE = re.compile(
+    r"\b(?:vaginal sex|penis in pussy|anal sex|sex from behind|missionary|"
+    r"cowgirl|doggystyle|doggy style|mating press|riding|on all fours|"
+    r"on back|legs around male waist|legs over shoulders|lying on desk|"
+    r"on stomach|standing sex|face to face|from behind|penetration|"
+    r"thrusting|deep penetration|fast thrusting|creampie|afterglow|"
+    r"after sex)\b|性交|做爱|交合|后入|正面|骑乘|仰躺|抽送|插入",
+    re.I)
+_POSITION_PROMPT_TAGS = {
+    "front": ("vaginal sex", "missionary", "on back",
+              "legs around male waist", "thrusting"),
+    "rear": ("vaginal sex", "sex from behind", "doggystyle",
+             "on all fours", "thrusting"),
+    "riding": ("vaginal sex", "cowgirl", "girl on top", "riding", "thrusting"),
+    "standing": ("vaginal sex", "standing sex", "face to face",
+                 "lifted", "thrusting"),
+}
+_POSITION_LABELS_ZH = {
+    "front": "正面",
+    "rear": "后入",
+    "riding": "骑乘",
+    "standing": "站立",
+}
+_SEX_MICRO_BEATS = (
+    ("男主扣住女主腰侧调整角度，女主腰肢轻轻发颤", ("hip lift", "arched back")),
+    ("女主主动迎合，腰部抬起，脚趾蜷起", ("arched back", "curled toes")),
+    ("男主俯身贴近，胸口几乎相贴，呼吸交缠", ("eye contact", "close to viewer")),
+    ("动作短暂停顿后更深地顶入，女主肩膀一颤", ("deep penetration", "shoulders back")),
+    ("女主手指抓紧桌面，指节泛白", ("clenched hands", "white knuckles")),
+    ("男主托起女主一条腿改变角度，动作继续", ("leg lift", "legs up")),
+    ("两人额头相抵，喘息交叠，节奏变慢又重新加快", ("forehead to forehead", "panting")),
+    ("女主腰背弓起，胸口起伏，眼神开始失焦", ("arched back", "half-closed eyes")),
+    ("男主加快顶入，结合处泛起水光，女主声音发颤", ("fast thrusting", "wet")),
+    ("女主大腿内侧绷紧，身体随节奏轻颤", ("trembling thighs", "sweat")),
+    ("男主一手扣腰一手扶住女主后背，动作更深", ("hand on waist", "hand on back")),
+    ("两人身体交叠，动作进入稳定的深节奏", ("deep penetration", "motion lines")),
+)
+
+
+def _intimacy_stage_names(shot: dict[str, Any]) -> list[str]:
+    return [
+        _INTIMACY_STAGE_NAMES[stage]
+        for stage in sorted(_intimacy_stages(shot))
+        if stage in _INTIMACY_STAGE_NAMES
+    ]
+
+
+def _shot_action_summary(shot: dict[str, Any]) -> str:
+    labels = _intimacy_stage_names(shot)
+    return "/".join(labels) if labels else "无明确性行为阶段"
+
+
+def _split_script_sections(script: str) -> dict[str, str]:
+    text = str(script or "")
+    matches = list(_SCRIPT_SECTION_RE.finditer(text))
+    if not matches:
+        return {}
+    sections: dict[str, str] = {}
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        value = text[match.end():end].strip("；; \n\t")
+        if value:
+            sections[match.group(1)] = value
+    return sections
+
+
+def _join_script_sections(sections: dict[str, str]) -> str:
+    return "；".join(
+        "%s：%s" % (label, value)
+        for label, value in sections.items() if str(value).strip())
+
+
+def _script_with_updates(script: str, updates: dict[str, str]) -> str:
+    sections = _split_script_sections(script)
+    if not sections:
+        return "；".join(
+            "%s：%s" % (label, value)
+            for label, value in updates.items() if str(value).strip())
+    for label, value in updates.items():
+        if str(value).strip():
+            sections[label] = str(value).strip()
+    return _join_script_sections(sections)
+
+
+def _prompt_position(prompt: str) -> str:
+    low = str(prompt or "").lower()
+    if re.search(r"\b(?:cowgirl|girl on top|straddl|riding)\b|骑乘", low):
+        return "riding"
+    if re.search(r"\b(?:sex from behind|from behind|doggystyle|doggy style|"
+                 r"on all fours|rear entry)\b|后入|背后", low):
+        return "rear"
+    if re.search(r"\b(?:missionary|on back|legs around male waist|"
+                 r"legs over shoulders|lying on desk)\b|正面|仰躺", low):
+        return "front"
+    if re.search(r"\b(?:standing sex|standing)\b|站立", low):
+        return "standing"
+    return ""
+
+
+def _text_position(text: str) -> str:
+    low = str(text or "").lower()
+    if re.search(r"\b(?:cowgirl|girl on top|straddl|riding)\b|骑乘", low):
+        return "riding"
+    if re.search(r"\b(?:sex from behind|from behind|doggystyle|doggy style|"
+                 r"on all fours|rear entry)\b|后入|背后|从后方", low):
+        return "rear"
+    if re.search(r"\b(?:missionary|on back|legs around male waist|"
+                 r"legs over shoulders|lying on desk)\b|正面|仰躺", low):
+        return "front"
+    if re.search(r"\b(?:standing sex|standing)\b|站立", low):
+        return "standing"
+    return ""
+
+
+def _replace_position_words(text: str, target: str) -> str:
+    value = str(text or "")
+    if not value:
+        return value
+    if target == "front":
+        replacements = (
+            (r"后入", "正面"), (r"背后", "正面"), (r"从后方", "从正面"),
+            (r"后方", "正面"), (r"sex from behind", "vaginal sex"),
+            (r"from behind", "face to face"), (r"doggystyle", "missionary"),
+            (r"doggy style", "missionary"), (r"on all fours", "on back"),
+        )
+    elif target == "rear":
+        replacements = (
+            (r"正面插入", "后入"), (r"正面", "后入"), (r"仰躺", "伏身"),
+            (r"on back", "on all fours"), (r"missionary", "doggystyle"),
+            (r"face to face", "from behind"), (r"legs around male waist",
+                                               "on all fours"),
+        )
+    elif target == "riding":
+        replacements = (
+            (r"后入", "骑乘"), (r"正面", "骑乘"), (r"sex from behind", "cowgirl"),
+            (r"missionary", "cowgirl"), (r"doggystyle", "cowgirl"),
+        )
+    else:
+        replacements = (
+            (r"后入", "站立"), (r"正面", "站立"), (r"sex from behind", "standing sex"),
+            (r"missionary", "standing sex"), (r"doggystyle", "standing sex"),
+        )
+    for pattern, replacement in replacements:
+        value = re.sub(pattern, replacement, value, flags=re.I)
+    return value
+
+
+def canonicalize_intimacy_positions(shots: list[dict[str, Any]]) -> None:
+    for shot in shots:
+        if not isinstance(shot, dict):
+            continue
+        stages = _intimacy_stages(shot)
+        if not stages & {3, 4}:
+            continue
+        target = _prompt_position(str(shot.get("prompt") or ""))
+        if not target:
+            continue
+        other = " ".join(str(shot.get(key) or "") for key in (
+            "phase", "beat", "script", "outline", "nsfw"))
+        found = _text_position(other)
+        if not found or found == target:
+            continue
+        before = {key: str(shot.get(key) or "") for key in (
+            "phase", "beat", "script", "outline", "nsfw")}
+        for key in ("phase", "beat", "script", "outline", "nsfw"):
+            value = str(shot.get(key) or "")
+            if value:
+                shot[key] = _replace_position_words(value, target)
+        trace_event("action.position_canonicalized", {
+            "id": str(shot.get("id") or ""),
+            "target": target,
+            "before": before,
+            "after": {key: str(shot.get(key) or "") for key in before},
+        })
+
+
+def _tag_clean(tag: str) -> str:
+    return _tag_weight_key(tag)[0].strip()
+
+
+def _tag_added(tags: list[str], tag: str, weight: float = 1.2) -> None:
+    clean = _tag_clean(tag).lower()
+    if not clean:
+        return
+    if any(_tag_clean(item).lower() == clean for item in tags):
+        return
+    tags.append("(%s:%g)" % (tag, weight) if weight else tag)
+
+
+def _remove_regex_tags(tags: list[str], pattern: re.Pattern[str]) -> list[str]:
+    return [
+        tag for tag in tags
+        if not pattern.search(_tag_clean(tag))
+    ]
+
+
+def _premise_wants_fluid(premise: str, anchor: dict[str, Any]) -> bool:
+    text = " ".join((
+        str(premise or ""),
+        str(anchor.get("prompt") or ""),
+        str(anchor.get("script") or ""),
+    )).lower()
+    return bool(re.search(
+        r"射精|射在|内射|体外|颜射|吞精|体液|白浊|高潮|"
+        r"ejaculat|creampie|cum|semen|orgasm|climax", text))
+
+
+def _sex_continuation_text(position: str, rank: int, count: int,
+                           final: bool) -> tuple[str, str, str]:
+    label = _POSITION_LABELS_ZH.get(position, "性交")
+    if final:
+        action = (
+            "%s性交进入高潮临界，男主节奏失控般加快顶入，女主身体绷紧、"
+            "腰背弓起，手指抓紧桌面" % label)
+        nsfw = (
+            "%s性交高潮临界，结合处湿润泛红，动作加快，"
+            "女主表情失控，体液痕迹明显" % label)
+        phase = "性交·高潮临界"
+        beat = "%s性交进入高潮临界" % label
+    elif rank * 3 < max(1, count) * 2:
+        action = (
+            "%s性交继续，男主保持节奏抽送，女主身体随动作起伏，"
+            "两人的呼吸和动作逐渐同步" % label)
+        nsfw = "%s性交继续，结合处湿润，动作稳定" % label
+        phase = "性交·继续"
+        beat = "%s性交继续抽送" % label
+    else:
+        action = (
+            "%s性交加深，男主加快顶入，女主腰肢发软，"
+            "胸口起伏，表情逐渐失控" % label)
+        nsfw = "%s性交加深，动作加快，结合处泛红湿润" % label
+        phase = "性交·加深"
+        beat = "%s性交加深" % label
+    micro, _ = _SEX_MICRO_BEATS[rank % len(_SEX_MICRO_BEATS)]
+    return (action + "；" + micro, nsfw,
+            phase + "|" + beat + "：" + micro)
+
+
+def _rewrite_sex_continuation(shot: dict[str, Any],
+                              anchor: dict[str, Any],
+                              rank: int, count: int,
+                              premise: str, final: bool = False) -> None:
+    position = _prompt_position(str(anchor.get("prompt") or "")) or "front"
+    tags = [
+        tag.strip() for tag in str(shot.get("prompt") or "").split(",")
+        if tag.strip()
+    ]
+    tags = _remove_regex_tags(tags, _ORAL_MAST_TAG_RE)
+    tags = _remove_regex_tags(tags, _SEX_POSITION_TAG_RE)
+    for tag in ("1girl", "1boy", "nude male", "faceless male"):
+        _tag_added(tags, tag)
+    for tag in _POSITION_PROMPT_TAGS[position]:
+        _tag_added(tags, tag)
+    _, micro_tags = _SEX_MICRO_BEATS[rank % len(_SEX_MICRO_BEATS)]
+    for tag in micro_tags:
+        _tag_added(tags, tag)
+    if position == "front" and re.search(
+            r"desk|table|课桌|桌面",
+            " ".join((str(anchor.get("prompt") or ""),
+                      str(shot.get("prompt") or ""))), re.I):
+        _tag_added(tags, "lying on desk")
+    action, nsfw, phase_beat = _sex_continuation_text(
+        position, rank, count, final)
+    phase, beat = phase_beat.split("|", 1)
+    wants_fluid = _premise_wants_fluid(premise, anchor)
+    if final:
+        _tag_added(tags, "climax")
+        _tag_added(tags, "orgasm")
+        if wants_fluid:
+            _tag_added(tags, "creampie")
+            _tag_added(tags, "cum")
+    cameras = (
+        "medium shot, from side",
+        "close-up, from above",
+        "medium close-up, from front side",
+        "close-up, from behind",
+    )
+    camera = cameras[rank % len(cameras)]
+    sections = _split_script_sections(str(shot.get("script") or ""))
+    sections["姿势动作"] = action
+    sections["可见部位"] = (
+        "女主上半身、脸、当前服装与撕破的半脱状态、与男主结合的腰部和腿部；"
+        "男主无脸裸体上半身和手臂")
+    sections["表情"] = (
+        "女主脸颊潮红，眼神失焦，嘴唇微张喘息；"
+        "男主无脸，仅以扣腰或扶背的手呈现掌控")
+    sections["镜头"] = camera
+    sections["构图"] = "两人结合处和女主表情位于画面中心，动作方向形成斜线"
+    sections["NSFW"] = nsfw
+    script = _join_script_sections(sections)
+    if not script:
+        script = "姿势动作：%s；镜头：%s；NSFW：%s" % (action, camera, nsfw)
+    shot["prompt"] = ", ".join(tags)
+    shot["script"] = script
+    shot["outline"] = script
+    shot["phase"] = phase
+    shot["beat"] = beat
+    shot["camera"] = camera
+    shot["nsfw"] = nsfw
+    shot["focus_tags"] = [
+        "vaginal sex", "thrusting", position,
+    ]
+    trace_event("action.monotonic_rewrite", {
+        "id": str(shot.get("id") or ""),
+        "anchor": str(anchor.get("id") or ""),
+        "position": position,
+        "rank": rank,
+        "final": final,
+    })
+
+
+def _rewrite_afterglow(shot: dict[str, Any],
+                       anchor: dict[str, Any],
+                       premise: str) -> None:
+    tags = [
+        tag.strip() for tag in str(shot.get("prompt") or "").split(",")
+        if tag.strip()
+    ]
+    tags = _remove_regex_tags(tags, _ORAL_MAST_TAG_RE)
+    tags = _remove_regex_tags(tags, _SEX_POSITION_TAG_RE)
+    for tag in ("1girl", "1boy", "nude male", "faceless male",
+                "afterglow", "after sex", "messy", "panting"):
+        _tag_added(tags, tag)
+    if _premise_wants_fluid(premise, anchor):
+        _tag_added(tags, "cum")
+        _tag_added(tags, "creampie")
+    sections = _split_script_sections(str(shot.get("script") or ""))
+    sections["姿势动作"] = (
+        "性交结束，男主仍贴近女主，动作停下；女主身体发软，"
+        "呼吸尚未平复，胸口起伏")
+    sections["可见部位"] = (
+        "女主上半身、潮红的脸、当前服装与撕破的半脱状态、腿间体液痕迹；"
+        "男主无脸裸体上半身和手臂")
+    sections["表情"] = "女主脸颊潮红，呼吸平复，眼神失焦；男主无脸，仅以贴近的姿态呈现余韵"
+    sections["镜头"] = "medium shot, from side"
+    sections["构图"] = "两人贴合后的姿态占据画面中心，呼吸和体液痕迹成为焦点"
+    sections["NSFW"] = "性交后余韵，动作停止，体液痕迹明显，女主喘息未定"
+    script = _join_script_sections(sections)
+    if not script:
+        script = "姿势动作：性交后余韵；NSFW：动作停止，体液痕迹明显"
+    shot["prompt"] = ", ".join(tags)
+    shot["script"] = script
+    shot["outline"] = script
+    shot["phase"] = "事后余韵"
+    shot["beat"] = "性交结束后，两人贴合喘息"
+    shot["camera"] = "medium shot, from side"
+    shot["nsfw"] = "性交后余韵，体液痕迹明显"
+    shot["focus_tags"] = ["afterglow", "after sex"]
+    trace_event("action.monotonic_afterglow", {
+        "id": str(shot.get("id") or ""),
+        "anchor": str(anchor.get("id") or ""),
+    })
+
+
+def _has_climax(shot: dict[str, Any]) -> bool:
+    text = _shot_narrative_text(shot)
+    return bool(re.search(
+        r"orgasm|climax|ejaculat|creampie|cum|semen|"
+        r"高潮|射精|潮吹|白浊", text))
+
+
+def _has_completion(shot: dict[str, Any]) -> bool:
+    text = _shot_narrative_text(shot)
+    return bool(re.search(
+        r"afterglow|after sex|afterplay|余韵|事后", text)) or _has_climax(shot)
+
+
+def enforce_intimacy_monotonic(shots: list[dict[str, Any]],
+                               premise: str = "") -> None:
+    if not shots:
+        return
+    stages = [_intimacy_stages(shot) for shot in shots]
+    sex_indices = [index for index, value in enumerate(stages) if 3 in value]
+    if not sex_indices:
+        return
+    first_sex = sex_indices[0]
+    pre_afterglow = []
+    cursor = first_sex - 1
+    while cursor >= 0 and _has_completion(shots[cursor]):
+        pre_afterglow.append(cursor)
+        cursor -= 1
+    pre_afterglow.reverse()
+    if pre_afterglow:
+        anchor = shots[first_sex]
+        for rank, index in enumerate(pre_afterglow):
+            _rewrite_sex_continuation(
+                shots[index], anchor, rank, len(pre_afterglow), premise,
+                final=(rank == len(pre_afterglow) - 1))
+        if first_sex == len(shots) - 1:
+            _rewrite_afterglow(shots[first_sex], shots[pre_afterglow[-1]],
+                               premise)
+            return
+    completion = next((
+        index for index in range(first_sex + 1, len(shots))
+        if 4 in stages[index] and _has_climax(shots[index])
+    ), None)
+    if completion is None and len(shots) - 1 > first_sex:
+        last = len(shots) - 1
+        if 4 in stages[last] and _has_completion(shots[last]):
+            completion = last
+
+    def anchor_before(index: int) -> int:
+        for candidate in range(index - 1, first_sex - 1, -1):
+            if 3 in stages[candidate]:
+                return candidate
+        return first_sex
+
+    if completion is None:
+        pending = [
+            index for index in range(first_sex + 1, len(shots))
+            if 3 not in stages[index]
+            and (not _has_climax(shots[index])
+                 or stages[index] & {1, 2})
+        ]
+        if not pending:
+            return
+        if len(pending) >= 2:
+            afterglow_index = pending[-1]
+            sex_tail = pending[:-1]
+        else:
+            afterglow_index = None
+            sex_tail = pending
+        for rank, index in enumerate(sex_tail):
+            _rewrite_sex_continuation(
+                shots[index], shots[anchor_before(index)],
+                rank, len(sex_tail), premise,
+                final=(rank == len(sex_tail) - 1 and afterglow_index is None))
+        if afterglow_index is not None:
+            _rewrite_afterglow(
+                shots[afterglow_index],
+                shots[anchor_before(afterglow_index)], premise)
+        return
+
+    before_completion = [
+        index for index in range(first_sex + 1, completion)
+        if 3 not in stages[index]
+    ]
+    for rank, index in enumerate(before_completion):
+        _rewrite_sex_continuation(
+            shots[index], shots[anchor_before(index)],
+            rank, len(before_completion), premise, final=False)
+    after_completion = [
+        index for index in range(completion + 1, len(shots))
+        if stages[index] & {1, 2} or 3 in stages[index]
+    ]
+    for index in after_completion:
+        _rewrite_afterglow(shots[index], shots[completion], premise)
+
+
+def _has_insertion(shot: dict[str, Any]) -> bool:
+    text = _shot_narrative_text(shot)
+    return bool(re.search(
+        r"fingers? inside pussy|finger penetration|finger in pussy|"
+        r"fingering herself|手指[^。；;]{0,12}(?:探入|插入|没入|抽送)|"
+        r"指节没入|穴内", text, re.I))
+
+
+def _lookahead_stage(shots: list[dict[str, Any]], index: int) -> int:
+    for shot in shots[index + 1:]:
+        stage = _intimacy_stage(shot)
+        if stage in (2, 3, 4):
+            return stage
+        if stage == 1:
+            return 1
+    return 0
+
+
+def _upgrade_self_insertion(shot: dict[str, Any]) -> None:
+    tags = [
+        tag.strip() for tag in str(shot.get("prompt") or "").split(",")
+        if tag.strip()
+    ]
+    tags = _remove_regex_tags(tags, re.compile(
+        r"rubbing through|hand between legs|hand on panties|palm on crotch|"
+        r"through clothes|隔着|kneeling|on knees|knees bending|"
+        r"about to kneel|准备跪下", re.I))
+    for tag in ("fingers inside pussy", "finger penetration",
+                "fingering", "wet fingers"):
+        _tag_added(tags, tag)
+    script = str(shot.get("script") or "")
+    script = re.sub(r"抽出[^。；;]{0,16}?(?:手指|指)", "手指仍没入体内", script)
+    script = re.sub(r"拔出[^。；;]{0,16}?(?:手指|指)", "手指仍没入体内", script)
+    script = re.sub(r"重新开始自慰", "继续自慰", script)
+    script = re.sub(r"再次开始自慰", "继续自慰", script)
+    script = re.sub(r"准备跪下|跪姿准备", "膝盖发软", script)
+    if not re.search(r"没入|抽送|fingers inside|penetration", script, re.I):
+        script = script.rstrip("。；; ") + "；手指仍没入体内，继续抽送。"
+    beat = str(shot.get("beat") or "")
+    beat = re.sub(r"抽出[^，。；;]{0,12}", "手指仍没入", beat)
+    beat = re.sub(r"重新开始|再次开始", "继续", beat)
+    beat = re.sub(r"准备跪下", "膝盖发软", beat)
+    shot["prompt"] = ", ".join(tags)
+    shot["script"] = script
+    shot["outline"] = script
+    shot["beat"] = beat
+    trace_event("action.self_insertion_stabilized", {
+        "id": str(shot.get("id") or ""),
+        "prompt": shot["prompt"],
+    })
+
+
+def stabilize_self_masturbation(shots: list[dict[str, Any]]) -> None:
+    inserted = False
+    for index, shot in enumerate(shots):
+        stages = _intimacy_stages(shot)
+        if 3 in stages or 2 in stages:
+            inserted = False
+            continue
+        if 1 not in stages:
+            continue
+        if _has_insertion(shot):
+            inserted = True
+            continue
+        if not inserted:
+            continue
+        if _lookahead_stage(shots, index) == 1:
+            _upgrade_self_insertion(shot)
+            inserted = True
+
+
+def normalize_action_labels(shots: list[dict[str, Any]]) -> None:
+    for shot in shots:
+        if not isinstance(shot, dict):
+            continue
+        stages = _intimacy_stages(shot)
+        text = _shot_narrative_text(shot)
+        if 3 in stages:
+            phase = str(shot.get("phase") or "")
+            beat = str(shot.get("beat") or "")
+            position = _prompt_position(str(shot.get("prompt") or ""))
+            label = _POSITION_LABELS_ZH.get(position, "")
+            if not re.search(r"性交|做爱|交合|插入", phase) or re.search(
+                    r"口交|自慰|前戏|手淫|事后|余韵", phase):
+                shot["phase"] = "性交" + (("·" + label) if label else "")
+            if re.search(r"口交|自慰|手淫|前戏|事后|余韵", beat):
+                shot["beat"] = "性交进行中"
+        elif 2 in stages:
+            phase = str(shot.get("phase") or "")
+            beat = str(shot.get("beat") or "")
+            if not re.search(r"口交|舔阴|前戏", phase) or re.search(
+                    r"性交|做爱|插入|自慰|手淫", phase):
+                shot["phase"] = "口交"
+            if re.search(r"性交|做爱|插入|自慰|手淫|事后|余韵", beat):
+                shot["beat"] = "口交/舔阴进行中"
+        elif 1 in stages:
+            phase = str(shot.get("phase") or "")
+            beat = str(shot.get("beat") or "")
+            if re.search(r"性交|做爱|插入|口交|舔阴", phase):
+                shot["phase"] = "自慰"
+            if re.search(r"性交|做爱|插入|口交|舔阴", beat):
+                shot["beat"] = "自慰进行中"
+        elif 4 in stages and not re.search(r"余韵|事后", str(
+                shot.get("phase") or "")):
+            phase = str(shot.get("phase") or "事后").strip()
+            shot["phase"] = phase + "·事后余韵"
+
+
+def stabilize_intimacy_sequence(shots: list[dict[str, Any]],
+                                premise: str = "") -> None:
+    for _ in range(2):
+        enforce_intimacy_monotonic(shots, premise)
+    canonicalize_intimacy_positions(shots)
+    stabilize_self_masturbation(shots)
+    normalize_action_labels(shots)
+
+
 def _pacing_audit_messages(shots: list[dict[str, Any]], premise: str,
                            duplicate_groups: list[list[str]],
                            long_runs: list[str]) -> list[dict[str, str]]:
@@ -4284,24 +5348,57 @@ def _pacing_audit_messages(shots: list[dict[str, Any]], premise: str,
     for shot in shots:
         label = str(shot.get("phase") or shot.get("beat") or "未标注").strip()
         phase_counts[label] = phase_counts.get(label, 0) + 1
+    regressions = _intimacy_regressions(shots)
+    backtracks = _phase_backtracks(shots)
+    focus_ids = {
+        str(value) for group in duplicate_groups for value in group}
+    focus_ids.update(str(item.get("id") or "") for item in regressions)
+    focus_ids.update(str(item.get("again") or "") for item in backtracks)
+    for run in long_runs:
+        focus_ids.update(re.findall(r"(?<![0-9])([0-9]{1,3})(?![0-9])", run))
+    focus_ids.discard("")
+    focused = []
+    context = []
+    for index, shot in enumerate(shots):
+        sid = str(shot.get("id") or "")
+        row = {
+            "id": sid,
+            "phase": str(shot.get("phase") or ""),
+            "beat": str(shot.get("beat") or "")[:180],
+            "cast": str(shot.get("cast") or ""),
+            "stage": _intimacy_stage(shot),
+            "actions": _shot_action_summary(shot),
+        }
+        if sid in focus_ids or any(
+                str(shots[near].get("id") or "") in focus_ids
+                for near in (index - 1, index + 1)
+                if 0 <= near < len(shots)):
+            row["script"] = str(
+                shot.get("script") or shot.get("outline") or "")[:420]
+            row["prompt"] = str(shot.get("prompt") or "")[:260]
+            focused.append(row)
+        else:
+            row["script"] = str(
+                shot.get("script") or shot.get("outline") or "")[:160]
+            row["prompt"] = str(shot.get("prompt") or "")[:100]
+            context.append(row)
     payload = {
         "user_story_request": str(premise or ""),
         "clothing_weight_policy": wardrobe_weight_policy(premise),
         "shot_count": len(shots),
-        "phase_counts": phase_counts,
+        "phase_counts": dict(sorted(
+            phase_counts.items(), key=lambda item: item[1], reverse=True)[:12]),
         "duplicate_groups": duplicate_groups,
         "long_phase_runs": long_runs,
-        "phase_backtracks": _phase_backtracks(shots),
-        "intimacy_regressions": _intimacy_regressions(shots),
-        "shots": [{
-            "id": str(shot.get("id") or ""),
-            "phase": str(shot.get("phase") or ""),
-            "beat": str(shot.get("beat") or ""),
-            "cast": str(shot.get("cast") or ""),
-            "script": str(shot.get("script") or shot.get("outline") or "")[:500],
-            "prompt": str(shot.get("prompt") or "")[:350],
-        } for shot in shots],
+        "phase_backtracks": backtracks,
+        "intimacy_regressions": regressions,
+        "focused_shots": focused,
+        "context_shots": context,
     }
+    if len(json.dumps(payload, ensure_ascii=False)) > 60000:
+        for row in payload["context_shots"]:
+            row["script"] = str(row.get("script") or "")[:80]
+            row["prompt"] = str(row.get("prompt") or "")[:60]
     return [
         {"role": "system", "content": (
             "你是 NSFW 剧情节奏与镜头扩展审稿员。用户镜头数很多时，"
@@ -4310,7 +5407,8 @@ def _pacing_audit_messages(shots: list[dict[str, Any]], premise: str,
             "以及带权重服装被无故脱掉、不带权重的初始服装没有逐镜脱完；"
             "以及 phase/beat 已经推进后又回到更早阶段（phase_backtracks）；"
             "以及已经发生插入/性交后又回到站立、自慰、口交等更早动作"
-            "（intimacy_regressions）；"
+            "（intimacy_regressions）；focused_shots 是需要重点检查和重写的镜头，"
+            "context_shots 只用于判断前后衔接；stage/actions 是结构化动作阶段；"
             "回退段必须改成当前阶段内的新微节拍或删除，不能直接复用旧阶段。"
             "性交已经发生后，后续镜头只能继续性交、换姿势、高潮或事后余韵，"
             "不能回到自慰、口交、重新站立准备或重复前戏。"
@@ -4348,6 +5446,13 @@ def repair_story_pacing_ai(client: Any, model: str,
                 break
             messages = _pacing_audit_messages(
                 shots, premise, duplicate_groups, long_runs)
+            trace_event("repair.story_pacing.request", {
+                "attempt": attempt + 1,
+                "shot_count": len(shots),
+                "payload_chars": len(messages[1]["content"]),
+                "duplicate_groups": duplicate_groups,
+                "regressions": regressions,
+            })
             if attempt:
                 messages.append({
                     "role": "user",
@@ -4418,9 +5523,11 @@ def repair_story_pacing_ai(client: Any, model: str,
             total_changed += changed
             if not changed:
                 break
+        enforce_intimacy_monotonic(shots, premise)
         if log and total_changed:
             log("剧情节奏修正 %d 镜（重复/循环/拖沓）" % total_changed)
     except Exception as exc:
+        trace_event("repair.story_pacing.error", {"error": str(exc)})
         if log:
             log("剧情节奏校验失败，不影响生成: %s" % exc)
 
@@ -5168,6 +6275,7 @@ def generate_full_story_pipeline(client: OllamaClient, premise: str,
     repair_missing_actions_safe(
         client, options.model, result, premise,
         timeout=max(options.timeout, 300.0), log=options.log)
+    stabilize_intimacy_sequence(result, premise)
     repair_story_pacing_safe(
         client, options.model, result, premise,
         timeout=max(options.timeout, 300.0), log=options.log)
@@ -5586,6 +6694,7 @@ def _generate_long_storyboard(client: OllamaClient, premise: str,
     repair_missing_actions_safe(
         client, options.model, result, premise,
         timeout=max(options.timeout, 300.0), log=options.log)
+    stabilize_intimacy_sequence(result, premise)
     repair_story_pacing_safe(
         client, options.model, result, premise,
         timeout=max(options.timeout, 300.0), log=options.log)
@@ -5768,6 +6877,7 @@ def generate_storyboard(client: OllamaClient, premise: str,
     repair_missing_actions_safe(
         client, options.model, result, premise,
         timeout=max(options.timeout, 300.0), log=options.log)
+    stabilize_intimacy_sequence(result, premise)
     repair_story_pacing_safe(
         client, options.model, result, premise,
         timeout=max(options.timeout, 300.0), log=options.log)

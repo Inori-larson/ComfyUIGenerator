@@ -8,7 +8,10 @@ from PySide6.QtCore import QThread, Signal
 
 from comfyui_generator.core.auto_continuity import extract_continuity
 from comfyui_generator.core.config import AppConfig
-from comfyui_generator.core.external_llm import ExternalLLMClient
+from comfyui_generator.core.external_llm import (
+    ExternalLLMClient,
+    resolve_external_model,
+)
 from comfyui_generator.core.ollama import OllamaClient
 
 
@@ -33,7 +36,7 @@ class ContinuityWorker(QThread):
         model = self.model
         if self.use_external:
             client = ExternalLLMClient(self.cfg.external_llm)
-            model = model or self.cfg.external_llm.model
+            model = resolve_external_model(self.cfg.external_llm, model)
         else:
             client = OllamaClient(self.cfg.ollama.base_url)
             model = model or self.cfg.ollama.default_model

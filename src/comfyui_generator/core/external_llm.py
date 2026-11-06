@@ -10,9 +10,19 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+EXTERNAL_LLM_MODEL = "doubao-seed-2.1-pro"
+
 
 class ExternalLLMError(RuntimeError):
     pass
+
+
+def resolve_external_model(configured: Any = None, supplied: str = "") -> str:
+    if configured is not None:
+        value = str(getattr(configured, "model", configured) or "").strip()
+        if value:
+            return value
+    return str(supplied or EXTERNAL_LLM_MODEL).strip() or EXTERNAL_LLM_MODEL
 
 
 class ExternalLLMClient:
@@ -27,6 +37,14 @@ class ExternalLLMClient:
             return base
         return base + "/chat/completions"
 
+    @staticmethod
+    def _model_identity(value: Any) -> str:
+        if value is None:
+            return ""
+        if hasattr(value, "model"):
+            value = getattr(value, "model")
+        return str(value or "").strip()
+
     def chat_json(self, model: str, messages: list[dict[str, str]], *,
                   schema: dict[str, Any] | None = None,
                   temperature: float = 0.8,
@@ -36,9 +54,7 @@ class ExternalLLMClient:
                   timeout: float | None = None,
                   retries: int = 0,
                   **kwargs: Any) -> dict[str, Any]:
-        target = str(model or getattr(self.cfg, "model", "") or "").strip()
-        if not target:
-            raise ExternalLLMError("External LLM model is empty.")
+        target = resolve_external_model(self.cfg, model)
         key = str(getattr(self.cfg, "api_key", "") or os.environ.get("OPENAI_API_KEY", "")).strip()
         headers = {"Content-Type": "application/json"}
         if key:

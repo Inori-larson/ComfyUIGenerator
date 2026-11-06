@@ -167,16 +167,18 @@ def test_compose_prompts_drops_full_legwear_when_prompt_has_half_off(cfg):
     assert "(panties:1.2)" in tags
 
 
-def test_compose_prompts_keeps_colored_base_for_generic_half_off_state(cfg):
+def test_compose_prompts_merges_color_into_generic_half_off_state(cfg):
     positive, _ = compose_prompts(cfg, {
         "prompt": "1girl, solo, black bra, bra strap pulled down, "
                   "black lace panties, panties aside",
     })
     tags = [tag.strip() for tag in positive.split(",")]
-    assert "black bra" in tags
-    assert "black lace panties" in tags
-    assert "bra strap pulled down" in tags
-    assert "panties aside" in tags
+    assert "black bra strap pulled down" in tags
+    assert "black lace panties aside" in tags
+    assert "black bra" not in tags
+    assert "black lace panties" not in tags
+    assert "bra strap pulled down" not in tags
+    assert "panties aside" not in tags
 
 
 def test_compose_prompts_blocks_second_panties_when_legwear_is_pulled_down(cfg):
@@ -709,7 +711,8 @@ def test_compose_prompts_drops_displaced_base_and_faceless_conflict(cfg):
         "cast": "1girl 1boy"})
     tags = [tag.strip() for tag in positive.split(",")]
     assert "black lace panties" not in tags
-    assert "panties around ankles" in tags
+    assert "black lace panties around ankles" in tags
+    assert "panties around ankles" not in tags
     assert "red cape" not in tags
     assert "cape on floor" not in tags
     assert "military uniform" not in tags
