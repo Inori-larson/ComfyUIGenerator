@@ -69,7 +69,7 @@ from comfyui_generator.core.tags import append_tags, estimate_tokens
 from comfyui_generator.core.vision import format_similarity, vision_ready
 from comfyui_generator.core.translate import translate_to_tags
 from comfyui_generator.core.workflow import compose_prompts
-from comfyui_generator.core.clothing_state import clothing_gate_blockers
+from comfyui_generator.core.ai_review import final_gate_blockers
 from comfyui_generator.ui.branding import app_icon, logo_pixmap
 from comfyui_generator.ui.contact_sheet import build_contact_sheet, build_face_sheet
 from comfyui_generator.ui.continuity_worker import ContinuityWorker
@@ -3557,7 +3557,14 @@ class MainWindow(QMainWindow):
         self._update_partial_button()
         self._fill_shot_table(shots)
         self.append_log("分镜已生成：%d 镜" % len(shots))
-        self.statusBar().showMessage("分镜已生成（共 %d 镜）" % len(shots))
+        ready = all(bool(shot.get("ready")) for shot in shots if isinstance(shot, dict))
+        if ready:
+            self.statusBar().showMessage("分镜已就绪（共 %d 镜），可直接渲染" % len(shots))
+        else:
+            self.statusBar().showMessage(
+                "分镜已生成但尚未就绪（%d 镜），请点渲染时选择「让 AI 修复」" % len(shots))
+            self.append_log(
+                "提示：本分镜最终闸门未全部通过，未达到就绪状态；点渲染后用「让 AI 修复」补齐。")
         self._autosave_generated_story()
         self._start_auto_continuity(shots)
 
@@ -3994,17 +4001,17 @@ class MainWindow(QMainWindow):
             tags = [part.strip() for part in positive.split(",") if part.strip()]
             evaluated.append({"id": shot.get("id"), "_positive_tags": tags})
         premise = self._story_premise_text() or str(project.get("premise") or "")
-        return clothing_gate_blockers(evaluated, premise), premise
+        return final_gate_blockers(evaluated, premise), premise
 
     def _ask_clothing_gate(self, blockers: list[str]) -> str:
         for message in blockers:
-            self.append_log("服装闸门 · " + message)
+            self.append_log("最终闸门 · " + message)
         preview = "\n".join(blockers[:20])
         if len(blockers) > 20:
             preview += "\n... 另有 %d 条" % (len(blockers) - 20)
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Warning)
-        box.setWindowTitle("服装结构闸门未通过（%d 项）" % len(blockers))
+        box.setWindowTitle("最终结构闸门未通过（%d 项）" % len(blockers))
         box.setText(preview)
         btn_repair = box.addButton("让 AI 修复",
                                    QMessageBox.ButtonRole.AcceptRole)

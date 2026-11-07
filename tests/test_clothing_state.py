@@ -78,13 +78,15 @@ def test_hand_action_tags_not_treated_as_garment():
                for m in messages)
 
 
-def test_pacing_gate_flags_post_penetration_backtrack():
+def test_backtrack_after_penetration_is_advisory_only():
     shots = [
         {"id": "01", "prompt": "1girl, 1boy, penis in pussy"},
         {"id": "02", "prompt": "1girl, 1boy, fellatio, penis in mouth"},
     ]
+    blockers = ai_review.final_gate_blockers(shots, PREMISE)
+    assert blockers == []
     coverage = ai_review.coverage_gate_findings(shots)
-    assert any("回退" in m for m in coverage)
+    assert any("确认项" in m for m in coverage)
 
 
 def test_pacing_gate_flags_duplicate_adjacent_shots():
@@ -139,9 +141,64 @@ def test_message_carries_fixes_ledger_and_residual():
         "frilled black leotard"]
 
 
-def test_ensure_clothing_gate_loops_until_clear():
-    from comfyui_generator.core.ai_review import ensure_clothing_gate
+def test_nonadjacent_pairs_detected_separately():
+    shots = [
+        {"id": "01", "prompt": "1girl, blush, sitting"},
+        {"id": "02", "prompt": "1girl, different, standing, smile"},
+        {"id": "03", "prompt": "1girl, blush, sitting"},
+    ]
+    pairs = ai_review.nonadjacent_similar_pairs(shots)
+    assert any(set(p[:2]) == {"01", "03"} for p in pairs)
+    assert ai_review.duplicate_shot_groups(shots) == []
 
+
+def test_phase_stall_run_detected():
+    shots = [
+        {"id": "%02d" % (i + 1), "phase": "stuck", "prompt": "p%d" % i}
+        for i in range(12)
+    ]
+    runs = ai_review.phase_stall_runs(shots)
+    assert runs and runs[0][0] == "stuck"
+    assert len(runs[0][1]) == 12
+
+
+def test_final_gate_blocks_consecutive_duplicates_only():
+    shots = [
+        {"id": "%02d" % (i + 1), "phase": "stuck",
+         "prompt": "1girl, identical tags, blush, smile"}
+        for i in range(12)
+    ]
+    blockers = ai_review.final_gate_blockers(shots, PREMISE)
+    assert any("consecutive duplicate" in b for b in blockers)
+    assert all("phase stall" not in b for b in blockers)
+
+
+def test_nonadjacent_similar_is_advisory_not_hard_blocker():
+    shots = [
+        {"id": "01", "prompt": "1girl, blush, smile, sitting"},
+        {"id": "02", "prompt": "1girl, different, standing, frown"},
+        {"id": "03", "prompt": "1girl, blush, smile, sitting"},
+    ]
+    pairs = ai_review.nonadjacent_similar_pairs(shots)
+    assert any(set(p[:2]) == {"01", "03"} for p in pairs)
+    assert ai_review.adjacent_duplicate_runs(shots) == []
+    blockers = ai_review.final_gate_blockers(shots, PREMISE)
+    assert all("duplicate" not in b for b in blockers)
+
+
+def test_consecutive_identical_run_is_hard_blocker():
+    shots = [
+        {"id": "01", "prompt": "1girl, identical tags, blush, smile"},
+        {"id": "02", "prompt": "1girl, identical tags, blush, smile"},
+        {"id": "03", "prompt": "1girl, identical tags, blush, smile"},
+    ]
+    runs = ai_review.adjacent_duplicate_runs(shots)
+    assert runs == [["01", "02", "03"]]
+    blockers = ai_review.final_gate_blockers(shots, PREMISE)
+    assert any("consecutive duplicate" in b for b in blockers)
+
+
+def test_ensure_final_gate_loops_until_clear():
     clean_prompt = ("1girl, discarded frilled black leotard on floor, "
                     "discarded black blazer on floor, torn pantyhose, "
                     "black lace panties, panties aside, black lace bra")
@@ -163,9 +220,50 @@ def test_ensure_clothing_gate_loops_until_clear():
                           "torn pantyhose, black lace panties, "
                           "panties aside, black lace bra"}]
     client = GateClient()
-    performed = ensure_clothing_gate(client, "deepseek-v4.1-flash",
-                                     initial, PREMISE, max_passes=3)
+    performed, remaining = ai_review.ensure_final_gate(
+        client, "deepseek-v4.1-flash", initial, PREMISE, max_cycles=3)
     assert performed >= 1
     assert client.calls >= 1
+    assert remaining == []
     plan = clothing_repair_plan(initial, PREMISE)
     assert plan["fixes"] == []
+
+
+def test_weighted_removed_midfilm_is_detected_even_if_it_returns():
+    shots = [
+        {"id": "01", "prompt": "1girl, black lace bra"},
+        {"id": "02", "prompt": "1girl, black lace bra on desk"},
+        {"id": "03", "prompt": "1girl, black lace bra, bra pull"},
+    ]
+    plan = clothing_repair_plan(shots, PREMISE)
+    kinds = [(f["shot"], f["kind"]) for f in plan["fixes"]]
+    assert ("02", "weighted_was_removed") in kinds
+
+
+def test_cum_during_oral_is_advisory_not_blocker():
+    shots = [
+        {"id": "01", "prompt": "1girl, 1boy, fellatio, cum in mouth"},
+        {"id": "02", "prompt": "1girl, 1boy, cum on face, cum on body"},
+        {"id": "03", "prompt": "1girl, 1boy, cunnilingus"},
+    ]
+    blockers = ai_review.final_gate_blockers(shots, PREMISE)
+    assert blockers == []
+
+
+def test_progression_note_is_advisory():
+    shots = [
+        {"id": "01", "prompt": "1girl, 1boy, penis in pussy"},
+        {"id": "02", "prompt": "1girl, 1boy, cunnilingus"},
+    ]
+    findings = ai_review.story_structure_findings(shots)
+    assert all(f["kind"] == "progression_note" for f in findings)
+    assert "无需修改" in findings[0]["message"]
+
+
+def test_aftermath_rank_zero_has_no_note():
+    shots = [
+        {"id": "01", "prompt": "1girl, 1boy, penis in pussy"},
+        {"id": "02", "prompt": "1girl, 1boy, afterglow, blush"},
+    ]
+    assert ai_review.story_structure_findings(shots) == []
+

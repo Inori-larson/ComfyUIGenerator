@@ -22,7 +22,8 @@ from comfyui_generator.core.external_llm import (
     ExternalLLMClient,
     resolve_external_model,
 )
-from comfyui_generator.core.ai_review import review_stage_ai
+from comfyui_generator.core.ai_review import (
+    ensure_final_gate, review_stage_ai)
 from comfyui_generator.core.expand_ai import generate_expansions
 from comfyui_generator.core.jobs import Task, TaskRunner
 from comfyui_generator.core.ollama import OllamaClient
@@ -583,18 +584,19 @@ class ClothingRepairWorker(QThread):
         except Exception as exc:
             trace, trace_token = None, None
             self.log.emit("日志初始化失败：%s" % exc)
-        client = TracedClient(client, "clothing_repair")
+        client = TracedClient(client, "final_gate_repair")
         profiles = parse_character_profiles(self.premise)
         try:
-            changes = review_stage_ai(
-                client, model, "clothing", self.shots, self.premise,
-                batch_size=10, max_passes=self.max_passes,
-                timeout=600.0, log=self.log.emit, profiles=profiles)
+            cycles, unresolved = ensure_final_gate(
+                client, model, self.shots, self.premise,
+                timeout=600.0, log=self.log.emit, profiles=profiles,
+                max_cycles=self.max_passes)
             if self.isInterruptionRequested():
-                self.canceled.emit("已取消服装修复")
+                self.canceled.emit("已取消修复")
                 return
-            self.log.emit("AI 服装修复完成：修改 %d 镜" % changes)
-            self.done.emit(changes)
+            self.log.emit("AI 闸门修复完成：%d 轮，剩余 %d 项" % (
+                cycles, len(unresolved)))
+            self.done.emit(cycles)
         except Exception as exc:
             self.failed.emit(str(exc))
         finally:

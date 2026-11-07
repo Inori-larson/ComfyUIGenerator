@@ -323,6 +323,14 @@ def clothing_repair_plan(shots: list[dict[str, Any]],
                        _joined(entry, "off", "displaced"),
                        "只保留一个放置位置，删除多余位置标签")
 
+            if is_weighted and state == "off":
+                record(shot_id, category, True, "weighted_was_removed",
+                       _joined(entry, "off"),
+                       "权重服装不得在任何镜头完全脱下；把该镜头改回 active 状态"
+                       "（torn / pulled down / around / aside / one heel off / "
+                       "bra pulled down / bra strap slipped），删除 on desk/floor、"
+                       "removed、barefoot 等全脱标签")
+
             if (prev_state == "off" and state in ("worn", "displaced")
                     and not restoring):
                 kind = "weighted_reworn" if is_weighted else "reworn"
@@ -349,6 +357,7 @@ def clothing_repair_plan(shots: list[dict[str, Any]],
 
 _FIX_KIND_TEXT = {
     "weighted_removed": "带权重服装被完全脱下；须恢复为 active 状态，不得全脱",
+    "weighted_was_removed": "权重服装在该镜头被完全脱下；任何镜头都须保持 active",
     "must_be_off": "非权重服装到结尾仍穿着；须完全脱下并注明固定位置",
     "damage_recovered": "破损被恢复；torn/ripped/hole 永久保留",
     "conflicting_states": "同镜基础穿着与半脱/脱下标签冲突；只保留一个状态",

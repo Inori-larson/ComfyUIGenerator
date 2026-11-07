@@ -7,8 +7,10 @@ from typing import Any, Callable
 
 from comfyui_generator.core.ollama import OllamaClient
 from comfyui_generator.core.ai_review import (
-    ensure_clothing_gate, run_all_reviews)
+    ensure_final_gate, run_all_reviews)
 from comfyui_generator.core.mechanical import normalize_prompt_text
+from comfyui_generator.core.story_blueprint import (
+    blueprint_text, plan_shot_blueprint)
 from comfyui_generator.core.trace import trace_event
 
 PROMPT_CONVERSION_FLASH_MODEL = "deepseek-v4.1-flash"
@@ -179,6 +181,9 @@ OUTLINE_SYSTEM = (
     "用户明确说前半没有男主或某角色后段才出现时，必须严格遵守出场时机。"
     + STORY_FLOW_RULES + "\n"
     "6. 用户消息中的剧情进度账本、已完成镜头是硬事实；不得重写、重复或回退这些事件。"
+    "镜头预算蓝图是硬约束：只有剧本的最后一个里程碑才是终局，且只能出现在最后一镜；"
+    "射精不代表终章（口交内射、颜射、射在身上都允许，故事可继续）；"
+    "本批若不含最后一镜就不得写剧本终局；多出镜头在终局之前细分。"
     "按起承转合推进，不能从开头几镜后开始循环；每镜只能有一个主行为节拍，"
     "连续动作必须拆成多个镜头；插入后不得无过渡切回自慰、前戏或初遇；"
     "整理衣物或事后余韵后，不得无新事件又重新脱衣/自慰/前戏。\n"
@@ -1054,6 +1059,26 @@ def finalize_generated_story(shots: list[dict[str, Any]], premise: str,
                              profiles: list[CharacterProfile] | None = None
                              ) -> None:
     _finalize_generated_story_once(shots, premise, profiles)
+
+
+def _mark_story_readiness(shots: list[dict[str, Any]],
+                          unresolved: list[str],
+                          log: Callable[[str], None] | None = None) -> None:
+    """Record whether the generated story is fully ready (final gate clear)."""
+    ready = not unresolved
+    for shot in shots:
+        if isinstance(shot, dict):
+            shot["ready"] = bool(ready)
+    if ready:
+        if log:
+            log("最终闸门已通过：分镜就绪，可直接渲染。")
+        return
+    if log:
+        log("警告：最终闸门仍有 %d 项未解决，分镜尚未就绪：" % len(unresolved))
+        for item in unresolved[:10]:
+            log("  未就绪 · " + item)
+        if len(unresolved) > 10:
+            log("  ... 另有 %d 项" % (len(unresolved) - 10))
 def normalize_outline(raw: dict[str, Any] | list[Any], wanted: int,
                       fallback_prefix: str, start: int = 1,
                       used_names: list[str] | None = None,
@@ -1107,11 +1132,15 @@ def build_outline_messages(premise: str, shots: int, setting: str,
                            spine: dict[str, Any] | None = None,
                            act_summary: str = "",
                            story_state: str = "",
-                           character_bible: str = "") -> list[dict[str, str]]:
+                           character_bible: str = "",
+                           blueprint: str = "") -> list[dict[str, str]]:
     user = [
         "剧情：%s" % premise,
-        "本次大纲：第 %d-%d 镜，共 %d 镜" % (start, start + shots - 1, total),
+        "本次大纲：第 %d-%d 镜，共 %d 镜（全片共 %d 镜）" % (
+            start, start + shots - 1, shots, total),
     ]
+    if blueprint:
+        user.append(blueprint)
     clothing_policy = wardrobe_weight_policy(premise)
     if clothing_policy:
         user.append(clothing_policy)
@@ -1160,7 +1189,8 @@ def plan_storyboard_outline(client: OllamaClient, model: str, premise: str,
                             act_summary: str = "", story_state: str = "",
                             character_bible: str = "",
                             start_shot: int = 1,
-                            total_shots: int | None = None) -> list[dict[str, str]]:
+                            total_shots: int | None = None,
+                            blueprint: str = "") -> list[dict[str, str]]:
     outline: list[dict[str, str]] = []
     used_names: list[str] = []
     total = int(total_shots or shots)
@@ -1177,7 +1207,8 @@ def plan_storyboard_outline(client: OllamaClient, model: str, premise: str,
                                            act_summary=act_summary,
                                            story_state=_with_outline_progress(
                                                story_state, outline),
-                                           character_bible=character_bible),
+                                           character_bible=character_bible,
+                                           blueprint=blueprint),
                     schema=OUTLINE_SCHEMA,
                     temperature=0.6,
                     num_predict=max(4096, min(8192, need * 1200)),
@@ -1210,7 +1241,8 @@ def plan_storyboard_outline(client: OllamaClient, model: str, premise: str,
                                        act_summary=act_summary,
                                        story_state=_with_outline_progress(
                                            story_state, outline),
-                                       character_bible=character_bible),
+                                       character_bible=character_bible,
+                                       blueprint=blueprint),
                 schema=OUTLINE_SCHEMA,
                 temperature=0.6,
                 num_predict=max(4096, min(8192, need * 1200)),
@@ -1469,10 +1501,11 @@ def generate_full_story_pipeline(client: OllamaClient, premise: str,
         batch_size=10, max_passes=2,
         timeout=max(options.timeout, 600.0), log=options.log,
         profiles=profiles)
-    ensure_clothing_gate(
+    _cycles, unresolved = ensure_final_gate(
         client, review_model(options.model), result, premise,
         timeout=max(options.timeout, 600.0), log=options.log,
-        profiles=profiles, max_passes=3)
+        profiles=profiles, max_cycles=5)
+    _mark_story_readiness(result, unresolved, options.log)
     finalize_generated_story(result, premise)
     return result
 
@@ -1687,6 +1720,11 @@ def _generate_long_storyboard(client: OllamaClient, premise: str,
             client, generation_model(options.model), premise, shots, options.setting,
             timeout=max(options.timeout, 600.0), log=log,
             max_act_shots=max_act_shots)
+    milestones = plan_shot_blueprint(
+        client, review_model(options.model), premise, shots,
+        timeout=max(options.timeout, 600.0), log=log, max_tries=2)
+    blueprint = blueprint_text(milestones)
+    log("Story blueprint ready: terminal locked at shot %d" % shots)
     act_total = (shots + max_act_shots - 1) // max_act_shots
     act_index = 0
     while len(result) < shots:
@@ -1710,7 +1748,8 @@ def _generate_long_storyboard(client: OllamaClient, premise: str,
             strip_appearance=options.strip_appearance,
             act_summary=act_summary, story_state=story_state,
             character_bible=bible,
-            start_shot=act_start, total_shots=shots)
+            start_shot=act_start, total_shots=shots,
+            blueprint=blueprint)
         for item in outline:
             try:
                 number = int(item.get("id", "0"))
@@ -1793,10 +1832,11 @@ def _generate_long_storyboard(client: OllamaClient, premise: str,
         batch_size=10, max_passes=2,
         timeout=max(options.timeout, 600.0), log=options.log,
         profiles=profiles)
-    ensure_clothing_gate(
+    _cycles, unresolved = ensure_final_gate(
         client, review_model(options.model), result, premise,
         timeout=max(options.timeout, 600.0), log=options.log,
-        profiles=profiles, max_passes=3)
+        profiles=profiles, max_cycles=5)
+    _mark_story_readiness(result, unresolved, options.log)
     finalize_generated_story(result, premise)
     return result
 
@@ -1823,17 +1863,19 @@ def generate_storyboard(client: OllamaClient, premise: str,
     script_base = len(result)
     remaining = shots - script_base
     premise_beats = extract_premise_beats(premise)
+    blueprint = ""
     if premise_beats:
-        outline = []
-        for index, beat in enumerate(premise_beats[script_base:shots]):
-            number = "%02d" % (script_base + index + 1)
-            outline.append({
-                "id": number,
-                "name": "shot_%s" % number,
-                "cast": "",
-                "outline": beat,
-                "phase": "",
-            })
+        milestones = plan_shot_blueprint(
+            client, review_model(options.model), premise, shots,
+            timeout=max(options.timeout, 600.0), log=log, max_tries=2)
+        blueprint = blueprint_text(milestones)
+        log("Stage 0: blueprint planned, terminal locked at shot %d" % shots)
+        outline = plan_storyboard_outline(
+            client, generation_model(options.model), premise, remaining,
+            options.setting, chunk=6, timeout=max(options.timeout, 600.0),
+            strip_appearance=options.strip_appearance,
+            character_bible=bible, start_shot=script_base + 1,
+            total_shots=shots, blueprint=blueprint)
     else:
         log("Stage 0: planning %d numbered outline entries..." % remaining)
         outline = plan_storyboard_outline(
@@ -1923,10 +1965,11 @@ def generate_storyboard(client: OllamaClient, premise: str,
         batch_size=10, max_passes=2,
         timeout=max(options.timeout, 600.0), log=options.log,
         profiles=profiles)
-    ensure_clothing_gate(
+    _cycles, unresolved = ensure_final_gate(
         client, review_model(options.model), result, premise,
         timeout=max(options.timeout, 600.0), log=options.log,
-        profiles=profiles, max_passes=3)
+        profiles=profiles, max_cycles=5)
+    _mark_story_readiness(result, unresolved, options.log)
     finalize_generated_story(result, premise)
     return result
 

@@ -53,100 +53,163 @@ def _male_present(shot: dict[str, Any]) -> bool:
     return "1boy" in _tag_keys(str(shot.get("prompt") or ""))
 
 
+def _shot_tagset(shot: dict[str, Any]) -> set[str]:
+    provided = shot.get("_positive_tags")
+    if isinstance(provided, list):
+        return {re.sub(r"[^a-z0-9]", "", str(tag).lower())
+                for tag in provided}
+    return _tag_keys(str(shot.get("prompt") or ""))
+
+
+def _pair_overlap(a: set[str], b: set[str]) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / max(1, len(a | b))
+
+
+def adjacent_duplicate_runs(shots: list[dict[str, Any]],
+                            threshold: float = 0.98) -> list[list[str]]:
+    """Consecutive shots that are (near) identical — true spinning-in-place."""
+    sets = [_shot_tagset(shot) for shot in shots]
+    runs: list[list[str]] = []
+    i = 0
+    while i < len(shots):
+        j = i + 1
+        while j < len(shots) and _pair_overlap(sets[j - 1], sets[j]) >= threshold:
+            j += 1
+        if j - i >= 2:
+            runs.append([str(shots[k].get("id") or "") for k in range(i, j)])
+        i = max(j, i + 1)
+    return runs
+
+
+def nonadjacent_similar_pairs(shots: list[dict[str, Any]],
+                              threshold: float = 0.98
+                              ) -> list[tuple[str, str, float]]:
+    """Non-adjacent near-identical pairs. Advisory only, not a hard blocker.
+
+    Two shots separated by other shots often legitimately share most tags
+    (same outfit/scene), so these are surfaced for the AI to differentiate
+    rather than treated as structural conflicts.
+    """
+    sets = [_shot_tagset(shot) for shot in shots]
+    pairs: list[tuple[str, str, float]] = []
+    for i in range(len(shots)):
+        if not sets[i]:
+            continue
+        for j in range(i + 2, len(shots)):
+            if not sets[j] or j == i + 1:
+                continue
+            overlap = _pair_overlap(sets[i], sets[j])
+            if overlap >= threshold:
+                pairs.append((str(shots[i].get("id") or ""),
+                              str(shots[j].get("id") or ""), overlap))
+    return pairs
+
+
+def duplicate_shot_groups(shots: list[dict[str, Any]],
+                          threshold: float = 0.98) -> list[list[str]]:
+    """Hard duplicate groups: only consecutive identical runs."""
+    return adjacent_duplicate_runs(shots, threshold)
+
+
+def phase_stall_runs(shots: list[dict[str, Any]],
+                     min_run: int = 10) -> list[tuple[str, list[str]]]:
+    """Long consecutive runs that share one non-empty phase label."""
+    runs: list[tuple[str, list[str]]] = []
+    if not shots:
+        return runs
+    start = 0
+    for i in range(1, len(shots) + 1):
+        current = str(shots[start].get("phase") or "")
+        changed = (i == len(shots)
+                   or str(shots[i].get("phase") or "") != current)
+        if not changed:
+            continue
+        if current and i - start >= min_run:
+            runs.append((current,
+                         [str(shots[k].get("id") or "")
+                          for k in range(start, i)]))
+        start = i
+    return runs
+
+
+# ordered intimacy milestones used for monotonic progression checks
+RANK_ORDER = {
+    "solo": 0, "masturbation": 1, "fellatio": 2, "cunnilingus": 3,
+    "penetration": 4, "aftermath": 5,
+}
+
+_RANK_TAGS = (
+    ("penetration", ("penisinpussy", "sex", "vaginal", "deepthrust",
+                     "deep penetration")),
+    ("cunnilingus", ("cunnilingus", "tongueonpussy", "tongueinpussy",
+                     "oralonfemale")),
+    ("fellatio", ("fellatio", "penisinmouth", "deepthroat", "blowjob",
+                  "irrumatio")),
+    ("masturbation", ("fingering", "masturbating", "rubbingthrough",
+                      "handbetweenlegs", "sologirl")),
+)
+
+
+def intimacy_rank(keys: set[str]) -> int:
+    rank = 0
+    for label, terms in _RANK_TAGS:
+        if any(term in keys for term in terms):
+            rank = max(rank, RANK_ORDER[label])
+    return rank
+
+
+# tags are never, on their own, proof of a terminal/restart: ejaculation may
+# happen during fellatio (cum in mouth/on body) mid-story and the story may
+# continue. Only deviation from the user's script design is a real violation.
+
+
+def story_structure_findings(shots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Advisory progression notes relative to the user's script (NOT hard gates).
+
+    A high-water-mark drop is only surfaced so the AI can confirm the scene
+    transition is intended by the plot. Ejaculation never implies "the end".
+    """
+    findings: list[dict[str, Any]] = []
+    high_water = 0
+    for shot in shots:
+        keys = _shot_tagset(shot)
+        rank = intimacy_rank(keys)
+        shot_id = str(shot.get("id") or "")
+
+        if rank > high_water:
+            high_water = rank
+            continue
+        if (high_water >= RANK_ORDER["penetration"]
+                and 0 < rank < high_water):
+            findings.append({
+                "shot": shot_id,
+                "kind": "progression_note",
+                "rank": rank,
+                "high_water": high_water,
+                "message": (
+                    "shot %s 的阶段低于此前镜头；这只是确认项——若当前场景/剧本"
+                    "就是这样设计（例如口交内射、颜射、体位或场景转换），则完全允许，"
+                    "无需修改；只有在它确实违背剧本顺序时才调整。射精本身不代表终章。"
+                ) % shot_id,
+            })
+    return findings
+
+
 def coverage_gate_findings(shots: list[dict[str, Any]]) -> list[str]:
-    prompts = [str(shot.get("prompt") or "") for shot in shots]
-    keys_per_shot = [_tag_keys(prompt) for prompt in prompts]
-    all_keys: set[str] = set()
-    for keys in keys_per_shot:
-        all_keys |= keys
     issues: list[str] = []
 
-    has_intercourse = any("penisinpussy" in keys for keys in keys_per_shot)
-    ejaculation_tags = (
-        "cum", "cumshot", "cumonpussy", "cumonstomach", "cumonthighs",
-        "creampie", "cuminside", "semen", "ejaculation", "cumdrip",
-    )
-    has_ejaculation = any(tag in all_keys for tag in ejaculation_tags)
-    has_climax = "orgasm" in all_keys or "climax" in all_keys
-    has_fluid = ("pussyjuice" in all_keys or "wetpussy" in all_keys
-                 or "squirt" in all_keys or "dripping" in all_keys)
+    # progression notes are advisory only: confirm scene intent, never a rewrite
+    for finding in story_structure_findings(shots):
+        issues.append(finding["message"])
 
-    if has_intercourse and not has_ejaculation:
+    # consecutive identical shots are true duplicates the AI must differentiate
+    for group in adjacent_duplicate_runs(shots):
         issues.append(
-            "剧情已发生阴茎插入性交，但全片缺少射精/精液（cum/semen/ejaculation/creampie）；"
-            "请在性交段内、退出之前补拍射精与精液位置，不得仅在事后叙述中提及")
-    if has_intercourse and not has_climax:
-        issues.append(
-            "剧情已发生性交，但缺少性爱高潮（orgasm）；请在性交段安排高潮镜头")
-    if has_intercourse and not has_fluid:
-        issues.append(
-            "剧情已发生性交，但缺少体液表现（pussy juice/wet pussy/dripping）；请补足体液")
+            "连续镜头 %s 的 positive 标签几乎完全相同；相邻镜头必须推进动作/姿势/构图，"
+            "请逐镜区分或合并，不要复制" % ", ".join(group))
 
-    def _run_length(pred) -> int:
-        longest = run = 0
-        for keys in keys_per_shot:
-            if pred(keys):
-                run += 1
-                longest = max(longest, run)
-            else:
-                run = 0
-        return longest
-
-    afterglow_run = _run_length(
-        lambda keys: not (
-            "penisinpussy" in keys or "fellatio" in keys
-            or "cunnilingus" in keys or "fingering" in keys))
-    if afterglow_run >= 12:
-        issues.append(
-            "结尾余韵/整理连续 %d 镜过长；请合并重复的整理、走路、回望镜头，"
-            "把镜头预算让给关键情色节拍" % afterglow_run)
-    fellatio_count = sum(1 for keys in keys_per_shot if "fellatio" in keys)
-    if has_intercourse and fellatio_count < 2:
-        issues.append(
-            "女主对男主口交仅 %d 镜，覆盖不足；请补足口交过程"
-            "（接近、含入、吞吐等微节拍）" % fellatio_count)
-
-    # intimacy rank must not move backward after penetration
-    rank_order = {
-        "solo": 0, "masturbation": 1, "fellatio": 2, "cunnilingus": 3,
-        "penetration": 4, "aftermath": 5,
-    }
-    rank_tags = (
-        ("penetration", ("penisinpussy", "sex", "vaginal", "deepthrust",
-                         "deep penetration")),
-        ("cunnilingus", ("cunnilingus", "tongueonpussy", "tongueinpussy",
-                         "oralonfemale")),
-        ("fellatio", ("fellatio", "penisinmouth", "deepthroat", "blowjob",
-                      "irrumatio")),
-        ("masturbation", ("fingering", "masturbating", "rubbingthrough",
-                          "handbetweenlegs", "sologirl")),
-    )
-
-    def _rank_of(keys: set[str]) -> int:
-        rank = 0
-        for label, terms in rank_tags:
-            if any(term in keys for term in terms):
-                rank = max(rank, rank_order[label])
-        return rank
-
-    ranks = [_rank_of(keys) for keys in keys_per_shot]
-    for i in range(1, len(ranks)):
-        if ranks[i - 1] >= rank_order["penetration"] and 0 < ranks[i] < rank_order["penetration"]:
-            issues.append(
-                "shot %s 已进入性交，但后续无明确转折地回到口交/自慰等更早阶段；"
-                "插入/性交后动作只能向前，不得回退" % shots[i].get("id"))
-            break
-
-    # near-duplicate adjacent shots indicate spinning in place
-    for i in range(1, len(keys_per_shot)):
-        prev, cur = keys_per_shot[i - 1], keys_per_shot[i]
-        if not prev or not cur:
-            continue
-        overlap = len(prev & cur) / max(1, len(prev | cur))
-        if overlap >= 0.98:
-            issues.append(
-                "shot %s 与上一镜标签几乎完全相同（重合 %.0f%%）；"
-                "请推进剧情或合并，不要复制镜头" % (shots[i].get("id"), overlap * 100))
     return issues
 
 
@@ -239,7 +302,9 @@ _STAGE_BRIEFS = {
         "- 是否存在超过 15-20 镜的同一阶段长段；\n"
         "- 是否有 phase 回退、原地打转或结尾拖长度；\n"
         "- 用户明确要求的关键节拍是否全部覆盖且顺序正确；\n"
-        "- 镜头数多于剧情节点时，是否把动作合理拆成更细微节拍而不是循环。\n"
+        "- 镜头数多于剧情节点时，在终局/射精之前把动作拆成更细微节拍；"
+        "全片终局（射精/内射/最终依偎）只能出现在最后一镜，"
+        "终局之后不得重新开始舔阴/性交/射精（否则是 story_restart）。\n"
     ),
 }
 
@@ -512,40 +577,72 @@ def review_stage_ai(client: Any, model: str, stage: str,
     return total_changes
 
 
-def ensure_clothing_gate(client: Any, model: str,
-                         shots: list[dict[str, Any]], premise: str,
-                         *, timeout: float = 600.0,
-                         log: LogFn | None = None,
-                         profiles: list[Any] | None = None,
-                         max_passes: int = 3) -> int:
-    """Run extra clothing passes during generation until the gate is clear.
+def final_gate_blockers(shots: list[dict[str, Any]],
+                        premise: str = "") -> list[str]:
+    """Hard blockers limited to true script violations.
 
-    Uses the tag-level repair plan/ledger/residual guidance. The software
-    never edits tags; the AI rewrites until the structural gate passes or the
-    pass budget is exhausted. Returns number of passes performed.
+    Only clothing-state violations and consecutive identical shots block.
+    Ejaculation timing / phase backtrack / non-adjacent similarity are never
+    hard blockers: the highest rule is conformance to the user's script.
     """
-    if not shots:
-        return 0
+    blockers: list[str] = []
+    plan = clothing_repair_plan(shots, premise)
+    for fix in plan["fixes"]:
+        blockers.append(
+            "shot %s %s: %s（%s）" % (
+                fix["shot"], fix["kind"], fix["category"],
+                ", ".join(fix["tags"])))
+    for group in adjacent_duplicate_runs(shots):
+        blockers.append(
+            "consecutive duplicate positive tags across shots %s"
+            % ", ".join(group))
+    return blockers
+
+
+def ensure_final_gate(client: Any, model: str,
+                      shots: list[dict[str, Any]], premise: str,
+                      *, timeout: float = 600.0,
+                      log: LogFn | None = None,
+                      profiles: list[Any] | None = None,
+                      max_cycles: int = 5
+                      ) -> tuple[int, list[str]]:
+    """Keep repairing clothing + pacing during generation until gate clears.
+
+    The software never edits tags; the AI rewrites. Returns
+    ``(cycles_performed, remaining_blockers)``. A non-empty remaining list
+    means the story is NOT ready and the caller must not treat it as complete.
+    """
+    remaining = final_gate_blockers(shots, premise)
+    if not shots or not remaining:
+        return 0, []
     profiles = profiles or []
-    if not clothing_repair_plan(shots, premise).get("fixes"):
-        return 0
     performed = 0
-    for _extra in range(max(1, int(max_passes))):
-        if log:
-            log("服装闸门自动修复：第 %d 轮" % (_extra + 1))
-        review_stage_ai(
-            client, model, "clothing", shots, premise,
-            batch_size=10, max_passes=1,
-            timeout=timeout, log=log, profiles=profiles)
+    for cycle in range(max(1, int(max_cycles))):
+        clothing_fixes = clothing_repair_plan(shots, premise).get("fixes", [])
+        if clothing_fixes:
+            if log:
+                log("最终闸门修复：服装 第%d轮（%d项）" % (
+                    cycle + 1, len(clothing_fixes)))
+            review_stage_ai(
+                client, model, "clothing", shots, premise,
+                batch_size=10, max_passes=1,
+                timeout=timeout, log=log, profiles=profiles)
+        if final_gate_blockers(shots, premise):
+            if log:
+                log("最终闸门修复：节奏/重复/阶段 第%d轮" % (cycle + 1))
+            review_stage_ai(
+                client, model, "pacing", shots, premise,
+                batch_size=10, max_passes=1,
+                timeout=timeout, log=log, profiles=profiles)
         performed += 1
-        remaining = clothing_repair_plan(shots, premise).get("fixes", [])
+        remaining = final_gate_blockers(shots, premise)
         if not remaining:
             if log:
-                log("服装闸门已通过。")
+                log("最终闸门已通过。")
             break
         if log:
-            log("服装闸门剩余 %d 项，继续修复。" % len(remaining))
-    return performed
+            log("最终闸门剩余 %d 项，继续。" % len(remaining))
+    return performed, remaining
 
 
 def run_all_reviews(client: Any, model: str,
