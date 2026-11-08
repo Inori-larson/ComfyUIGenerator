@@ -58,7 +58,8 @@ def build_messages(prompts: list[str]) -> list[dict[str, str]]:
 
 def translate_prompts(client: OllamaClient, model: str, prompts: list[str],
                       temperature: float = 0.2, keep_alive: str = "5m",
-                      batch_size: int = 4) -> list[str]:
+                      batch_size: int = 4,
+                      timeout: float = 30.0) -> list[str]:
     result: list[str] = []
     for start in range(0, len(prompts), max(1, batch_size)):
         batch = prompts[start:start + max(1, batch_size)]
@@ -70,6 +71,7 @@ def translate_prompts(client: OllamaClient, model: str, prompts: list[str],
             num_predict=8192,
             num_ctx=32768,
             keep_alive=keep_alive,
+            timeout=timeout,
         )
         items = raw.get("translations") if isinstance(raw, dict) else None
         if not isinstance(items, list):
@@ -114,13 +116,15 @@ def translate_to_tags(client: OllamaClient, model: str, prompts: list[str],
 
 
 def translate_tag_list(client: OllamaClient, model: str, tags: list[str],
-                       cache_path: str, batch_size: int = 50) -> dict[str, str]:
+                       cache_path: str, batch_size: int = 30,
+                       timeout: float = 30.0) -> dict[str, str]:
     unique = list(dict.fromkeys(tag.strip() for tag in tags if tag.strip()))
     cache = load_tag_cache(cache_path)
     missing = [tag for tag in unique if tag not in cache]
     for start in range(0, len(missing), max(1, batch_size)):
         chunk = missing[start:start + max(1, batch_size)]
-        values = translate_prompts(client, model, chunk, batch_size=len(chunk))
+        values = translate_prompts(
+            client, model, chunk, batch_size=len(chunk), timeout=timeout)
         pairs = {tag: value.replace("，", "、").replace(",", "、")
                  for tag, value in zip(chunk, values) if value}
         if pairs:

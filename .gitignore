@@ -13,6 +13,7 @@ data/
 logs/
 *.log
 .env
+ui_smoke.png
 
 # IDE
 .idea/

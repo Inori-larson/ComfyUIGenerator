@@ -33,23 +33,15 @@ from comfyui_generator.core.storyboard import (
     normalize_shot_casts,
     normalize_tagged,
     parse_character_profiles,
-    plan_story_spine,
-    plan_storyboard_outline,
     premise_from_json,
     raw_prompt,
     renumber_shots,
-    run_all_reviews,
     shots_from_json,
     slugify,
     strip_male_profile_details,
     wardrobe_weight_policy,
 )
 from comfyui_generator.core.mechanical import normalize_prompt_text
-from comfyui_generator.core.ai_review import (
-
-    REVIEW_STAGE_LABELS,
-    review_stage_ai,
-)
 
 
 def make_options(**kwargs):
@@ -69,7 +61,7 @@ def test_raw_prompt_strips_labels_and_whitespace():
     assert raw_prompt("  1girl, smile. ") == "1girl, smile"
 
 
-def test_slugify_lowercases_and_collapses():
+def test_slugify_lowcases_and_collapses():
     assert slugify("Hello,  World!") == "hello_world"
     assert slugify("", "fb") == "fb"
 
@@ -330,102 +322,6 @@ def test_normalize_acts_fallback_from_story():
     assert acts[0]["end"] == 50
 
 
-# ------------------------------------------------------------- AI review stage
-
-def test_review_stage_adopts_invalid_rewrite_and_negative(llm):
-    shots = [
-        {"id": "01", "prompt": "1girl", "script": "脚本"},
-        {"id": "02", "prompt": "1girl", "script": "脚本"},
-    ]
-    llm.add({"shots": [
-        {"id": "01", "valid": True, "issues": [], "negative": "na"},
-        {"id": "02", "valid": False, "issues": ["重复"],
-         "prompt": "1girl, new beat", "negative": "n2",
-         "script": "新脚本"},
-    ]})
-    from comfyui_generator.core.ai_review import review_stage_ai
-    review_stage_ai(llm, "m", "continuity", shots, "前提",
-                    batch_size=10, max_passes=1)
-    assert shots[0]["negative"] == "na"
-    assert shots[1]["prompt"] == "1girl, new beat"
-    assert shots[1]["negative"] == "n2"
-    assert shots[1]["script"] == "新脚本"
-
-
-def test_review_clothing_stage_records_state(llm):
-    shots = [
-        {"id": "01", "prompt": "1girl, intact", "script": "脚本"},
-    ]
-    llm.add({"shots": [
-        {"id": "01", "valid": False, "issues": ["服装矛盾"],
-         "prompt": "1girl, torn pantyhose", "negative": "n",
-         "clothing_state": "torn pantyhose"},
-    ]})
-    profiles = [CharacterProfile(key="char_01", gender="girl")]
-    review_stage_ai(llm, "m", "clothing", shots, "前提",
-                    batch_size=10, max_passes=1, profiles=profiles)
-    assert shots[0]["prompt"] == "1girl, torn pantyhose"
-    assert shots[0]["clothing_state"] == "torn pantyhose"
-    assert shots[0]["clothing_details"]["char_01"] == "torn pantyhose"
-
-
-# ---------------------------------------------------------------- plan outline
-
-def test_plan_storyboard_outline_loops_until_filled(llm):
-    llm.add({"shots": [
-        {"id": "01", "outline": "a", "cast": "1girl solo"},
-        {"id": "02", "outline": "b", "cast": "1girl solo"},
-    ]})
-    outline = plan_storyboard_outline(
-        llm, "m", "剧情", 2, chunk=6)
-    assert [item["outline"] for item in outline] == ["a", "b"]
-
-
-def test_plan_story_spine_parses_acts(llm):
-    llm.add({"acts": [
-        {"title": "A", "summary": "first", "start": 1, "end": 25},
-        {"title": "B", "summary": "second", "start": 26, "end": 50},
-    ]})
-    spine = plan_story_spine(llm, "m", "前提", 50)
-    assert [item["phase"] for item in spine] == ["A", "B"]
-
-
-# --------------------------------------------------------- run_all_reviews route
-
-def test_run_all_reviews_calls_each_stage_and_adopts_negative(llm):
-    shots = [{"id": "01", "prompt": "1girl"}]
-
-    def scripted(model, messages, **kwargs):
-        content = json.loads(messages[1]["content"])
-        stage = content["review_stage"]
-        return {"shots": [{
-            "id": "01", "valid": True, "issues": [],
-            "negative": "neg for %s" % stage}]}
-
-    llm.dispatch[()] = scripted
-    run_all_reviews(llm, "m", shots, "前提", batch_size=10, max_passes=1)
-    assert len(llm.calls) == 3
-    assert shots[0]["negative"] == "neg for %s" % REVIEW_STAGE_LABELS["pacing"]
-
-
-def test_review_loop_rewrites_until_valid(llm):
-    shots = [{"id": "01", "prompt": "1girl", "negative": ""}]
-    responses = [
-        {"shots": [{"id": "01", "valid": False, "issues": ["x"],
-                    "negative": "n1", "prompt": "1girl, fixed1"}]},
-        {"shots": [{"id": "01", "valid": True, "issues": [],
-                        "negative": "n2"}]},
-    ]
-    for response in responses:
-        llm.add(response)
-    from comfyui_generator.core.ai_review import review_stage_ai
-    review_stage_ai(llm, "m", "continuity", shots, "前提",
-                    batch_size=10, max_passes=2)
-    assert shots[0]["prompt"] == "1girl, fixed1"
-    assert shots[0]["negative"] == "n2"
-    assert len(llm.calls) == 2
-
-
 # ---------------------------------------------------------------- finalize
 
 def test_finalize_only_mechanically_normalizes():
@@ -448,38 +344,255 @@ def test_finalize_is_idempotent():
 
 # ------------------------------------------------------------- full entry route
 
-def test_generate_storyboard_full_pipeline_routes_reviews(llm):
-    premise = "角色：SRAMerlin\n剧情：夜晚教室故事"
-    options = make_options(shots=2, full_story=True, chunk=2)
+PREMISE_TWO_BEATS = (
+    "角色：yixuan\n初始服装：black blazer, black pantyhose(1.2)\n"
+    "剧情：\n1.女主独处\n2.男主加入做爱\n"
+)
 
-    def responder(model, messages, **kwargs):
+
+def _blueprint(total):
+    return {"milestones": [
+        {"index": 1, "title": "独处", "start": 1,
+         "end": total - 1, "terminal": False},
+        {"index": 2, "title": "做爱", "start": total,
+         "end": total, "terminal": True},
+    ]}
+
+
+class _WaterfallClient:
+    """Stateful fake for the three-stage waterfall; no text parsing."""
+
+    def __init__(self, total):
+        self.total = total
+        self.calls: list[tuple] = []
+        self._counts = {"outline": 0, "script": 0, "tags": 0}
+
+    @staticmethod
+    def _props(schema):
+        try:
+            return set(schema["properties"]["shots"]["items"]["properties"])
+        except (KeyError, TypeError):
+            return set()
+
+    def chat_json(self, model, messages, **kwargs):
+        from comfyui_generator.core.story_blueprint import BLUEPRINT_SCHEMA
+
         schema = kwargs.get("schema")
-        if schema is STORY_SCHEMA:
-            return {"story": "完整剧情", "characters": [
-                {"name": "SRAMerlin", "gender": "girl",
-                 "appearance": "purple eyes", "initial_clothing": "black skirt"}]}
-        if schema is ACT_PLAN_SCHEMA:
-            return {"acts": [
-                {"title": "Act", "summary": "全程", "start": 1, "end": 2}]}
-        if schema is OUTLINE_SCHEMA:
-            return {"shots": [
-                {"id": "01", "outline": "大纲一", "cast": "1girl solo"},
-                {"id": "02", "outline": "大纲二", "cast": "1girl solo"}]}
-        if schema is TAG_SCHEMA:
-            return {"shots": [
-                {"id": "01", "prompt": "1girl, a", "negative": "na"},
-                {"id": "02", "prompt": "1girl, b", "negative": "nb"}]}
-        if schema is None:
-            return {"shots": [
-                {"id": "01", "valid": True, "issues": [],
-                 "negative": "na"},
-                {"id": "02", "valid": True, "issues": [],
-                 "negative": "nb"}]}
-        raise AssertionError("unexpected schema %r" % (schema,))
+        self.calls.append((model, schema))
+        if schema is BLUEPRINT_SCHEMA:
+            return _blueprint(self.total)
+        props = self._props(schema)
+        if "milestone_index" in props:
+            return self._outline()
+        if "script" in props:
+            return self._script()
+        return self._tags()
 
-    llm.dispatch[()] = responder
-    result = generate_storyboard(llm, premise, options)
-    assert [s["prompt"] for s in result] == ["1girl, a", "1girl, b"]
-    tag_calls = [c for c in llm.calls
-                 if c[2].get("schema") is TAG_SCHEMA]
-    assert tag_calls[0][0] == PROMPT_CONVERSION_FLASH_MODEL
+    def _outline(self):
+        n = self._counts["outline"] + 1
+        self._counts["outline"] = n
+        mi = 1 if (n < self.total or self.total == 1) else 2
+        cast = "1girl solo" if n < self.total else "1girl, 1boy"
+        return {"shots": [{
+            "id": "%02d" % n, "milestone_index": mi,
+            "outline": "大纲%d" % n, "cast": cast}]}
+
+    def _script(self):
+        n = self._counts["script"] + 1
+        self._counts["script"] = n
+        cast = "1girl solo" if n < self.total else "1girl, 1boy"
+        text = "脚本%d" % n if n < self.total else "脚本%d：鸡巴插入阴道做爱" % n
+        return {"shots": [{
+            "id": "%02d" % n, "cast": cast, "script": text}]}
+
+    def _tags(self):
+        n = self._counts["tags"] + 1
+        self._counts["tags"] = n
+        if n < self.total:
+            prompt = "1girl, solo, black blazer, black pantyhose"
+        else:
+            prompt = ("1girl, 1boy, nude male, faceless male, "
+                      "black pantyhose, penis in pussy")
+        return {"shots": [{
+            "id": "%02d" % n, "prompt": prompt, "negative": "lowres"}]}
+
+
+
+def test_generate_storyboard_runs_waterfall_and_is_ready():
+    total = 2
+    client = _WaterfallClient(total)
+    options = make_options(shots=total, chunk=2)
+    result = generate_storyboard(client, PREMISE_TWO_BEATS, options)
+    assert [s["id"] for s in result] == ["01", "02"]
+    assert all(s.get("ready") for s in result)
+    assert "nude male" in result[1]["prompt"]
+
+
+def test_generate_storyboard_early_returns_complete_shots(llm):
+    existing = [{"id": "%02d" % i, "prompt": "1girl, smile",
+                 "negative": "", "name": "n%d" % i} for i in range(1, 3)]
+    options = make_options(shots=2)
+    result = generate_storyboard(llm, PREMISE_TWO_BEATS, options, existing)
+    assert llm.calls == []
+    assert all(s.get("ready") for s in result)
+
+
+class _SingleShotClient(_WaterfallClient):
+    def chat_json(self, model, messages, **kwargs):
+        from comfyui_generator.core.story_blueprint import BLUEPRINT_SCHEMA
+
+        if kwargs.get("schema") is BLUEPRINT_SCHEMA:
+            self.calls.append((model, kwargs["schema"]))
+            return {"milestones": [{
+                "index": 1, "title": "独处", "start": 1,
+                "end": 1, "terminal": True}]}
+        return super().chat_json(model, messages, **kwargs)
+
+    def _tags(self):
+        n = self._counts["tags"] + 1
+        self._counts["tags"] = n
+        return {"shots": [{
+            "id": "01",
+            "prompt": "1girl, solo, black blazer, black pantyhose",
+            "negative": "lowres"}]}
+
+
+def test_tag_conversion_uses_flash_model():
+    client = _SingleShotClient(1)
+    options = make_options(shots=1)
+    generate_storyboard(client, "剧情：\n1.独处\n", options)
+    tag_models = {m for m, s in client.calls
+                  if _WaterfallClient._props(s)
+                  == {"id", "prompt", "negative"}}
+    assert tag_models == {PROMPT_CONVERSION_FLASH_MODEL}
+
+
+def test_only_failed_shots_are_marked_not_ready():
+    from comfyui_generator.core.stages import _convert_tags
+
+    scripts = [
+        {"id": "01", "name": "a", "script": "脚本一", "cast": "1girl solo"},
+        {"id": "02", "name": "b", "script": "脚本二", "cast": "1girl solo"},
+        {"id": "03", "name": "c", "script": "脚本三", "cast": "1girl solo"},
+    ]
+
+    class Client:
+        def chat_json(self, model, messages, **kwargs):
+            text = messages[-1]["content"]
+            import re
+            current = re.search(r"id\s*=\s*(\d{2})", text).group(1)
+            base = "1girl, solo, exactly the same long tag set, sitting"
+            if current == "01":
+                prompt = base
+            elif current == "02":
+                # byte-identical to shot 01 -> adjacent_duplicate
+                prompt = base
+            else:
+                prompt = "1girl, solo, a clearly different new action, standing"
+            return {"shots": [{
+                "id": current, "prompt": prompt, "negative": "x"}]}
+
+    result = _convert_tags(
+        Client(), "m", "剧情：x", 3, setting="", strip_appearance=False,
+        scripts=scripts, style_positive="", timeout=30.0, log=lambda *_: None)
+    readiness = {s["id"]: s["ready"] for s in result}
+    assert readiness == {"01": True, "02": False, "03": True}
+
+
+def test_failed_tag_conversion_keeps_last_candidate_and_findings():
+    from comfyui_generator.core.stages import _convert_tags
+
+    scripts = [{"id": "01", "name": "a", "script": "脚本一", "cast": "1boy"}]
+
+    class Client:
+        def chat_json(self, model, messages, **kwargs):
+            return {"shots": [{
+                "id": "01", "prompt": "1girl, 1boy, clothes", "negative": "x"}]}
+
+    result = _convert_tags(
+        Client(), "m", "剧情：x", 1, setting="", strip_appearance=False,
+        scripts=scripts, style_positive="", timeout=30.0, log=lambda *_: None)
+    assert result[0]["ready"] is False
+    assert result[0]["prompt"] == "1girl, 1boy, clothes"
+    assert {finding["kind"] for finding in result[0]["findings"]} >= {
+        "male_nude", "male_faceless"}
+
+
+def test_repair_carries_all_active_constraints():
+    from comfyui_generator.core.stages import repair_tagged_shots
+
+    prev_script = "previous locked script"
+    locked_script = "locked next script"
+    prev_prompt = "1girl, discarded blazer on chair, sitting"
+    shots = [
+        {"id": "01", "name": "a", "cast": "1girl",
+         "script": prev_script, "outline": prev_script,
+         "prompt": prev_prompt, "ready": True, "findings": []},
+        {"id": "02", "name": "b", "cast": "1girl",
+         "script": locked_script, "outline": locked_script,
+         "prompt": "1girl, black blazer, blazer unbuttoned, sitting",
+         "ready": False,
+         "findings": [{"kind": "clothing:reworn", "message": "blazer：old", "correct": "off"}]},
+    ]
+
+    class Client:
+        prompts = []
+
+        def chat_json(self, model, messages, **kwargs):
+            text = messages[-1]["content"]
+            self.prompts.append(text)
+            if len(self.prompts) <= 2:
+                prompt = "1girl, discarded blazer on chair, sitting"
+            else:
+                prompt = "1girl, discarded blazer on chair, standing"
+            return {"shots": [{"id": "02", "prompt": prompt, "negative": ""}]}
+
+    client = Client()
+    result = repair_tagged_shots(
+        client, "m", shots, "剧情：x", timeout=30.0, log=lambda *_: None)
+    constraints = client.prompts[2]
+    assert any(word in constraints for word in ("不得回退", "resolved", "已解决"))
+    assert "与上一镜" in constraints
+    assert result[1]["ready"] is True
+    assert result[1]["prompt"].endswith("standing")
+
+
+def test_revalidate_tagged_shots_updates_status():
+    from comfyui_generator.core.stages import revalidate_tagged_shots
+
+    shots = [
+        {"id": "01", "prompt": "1girl, sitting"},
+        {"id": "02", "prompt": "1girl, 1boy, clothes"},
+    ]
+    result = revalidate_tagged_shots(shots, "剧情：x")
+    assert result[0]["ready"] is True
+    assert result[1]["ready"] is False
+    assert {f["kind"] for f in result[1]["findings"]} >= {
+        "male_nude", "male_faceless"}
+
+
+def test_repair_tagged_shots_only_rewrites_not_ready_shots():
+    from comfyui_generator.core.stages import repair_tagged_shots
+
+    shots = [
+        {"id": "01", "name": "a", "script": "脚本一", "cast": "1girl",
+         "prompt": "1girl, old", "ready": True, "findings": []},
+        {"id": "02", "name": "b", "script": "脚本二", "cast": "1girl",
+         "prompt": "bad", "ready": False, "findings": [{"kind": "x"}]},
+    ]
+
+    class Client:
+        calls = 0
+
+        def chat_json(self, model, messages, **kwargs):
+            self.calls += 1
+            return {"shots": [{
+                "id": "02", "prompt": "1girl, repaired", "negative": "x"}]}
+
+    client = Client()
+    result = repair_tagged_shots(
+        client, "m", shots, "剧情：x", timeout=30.0, log=lambda *_: None)
+    assert client.calls == 1
+    assert result[0]["prompt"] == "1girl, old"
+    assert result[1]["prompt"] == "1girl, repaired"
+    assert result[1]["ready"] is True

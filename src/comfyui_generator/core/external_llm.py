@@ -13,16 +13,52 @@ from typing import Any
 EXTERNAL_LLM_MODEL = "doubao-seed-2.1-pro"
 
 
-class ExternalLLMError(RuntimeError):
-    pass
-
-
 def resolve_external_model(configured: Any = None, supplied: str = "") -> str:
     if configured is not None:
         value = str(getattr(configured, "model", configured) or "").strip()
         if value:
             return value
     return str(supplied or EXTERNAL_LLM_MODEL).strip() or EXTERNAL_LLM_MODEL
+
+
+def _first_json_value(text: str) -> str:
+    """Return the first complete JSON object/array, ignoring trailing junk.
+
+    Braces are balanced while respecting string literals and escapes, so a
+    run of stray closing braces appended by the model is not included.
+    """
+    open_for = {"{": "}", "[": "]"}
+    for i, ch in enumerate(text):
+        if ch not in open_for:
+            continue
+        close = open_for[ch]
+        depth = 0
+        in_string = False
+        escaped = False
+        for j in range(i, len(text)):
+            cur = text[j]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif cur == "\\":
+                    escaped = True
+                elif cur == '"':
+                    in_string = False
+                continue
+            if cur == '"':
+                in_string = True
+            elif cur == ch:
+                depth += 1
+            elif cur == close:
+                depth -= 1
+                if depth == 0:
+                    return text[i:j + 1]
+        break
+    return text
+
+
+class ExternalLLMError(RuntimeError):
+    pass
 
 
 class ExternalLLMClient:
@@ -63,12 +99,11 @@ class ExternalLLMClient:
         last = ""
         finish = ""
         token_budget = max(256, min(32768, int(num_predict or 4096)))
-        convo = list(messages)
         json_forced = bool(schema)
         for attempt in range(max(0, int(retries)) + 1):
             payload = {
                 "model": target,
-                "messages": convo,
+                "messages": messages,
                 "temperature": float(temperature),
                 "max_tokens": token_budget,
                 "stream": False,
@@ -118,22 +153,8 @@ class ExternalLLMClient:
                 if text.endswith("```"):
                     text = text[:-3]
                 text = text.strip().strip("`").strip()
-                if text.startswith("["):
-                    parsed = json.loads(text)
-                    if isinstance(parsed, list):
-                        return {"shots": parsed}
-                if "{" not in text and "[" in text:
-                    start = text.find("[")
-                    end = text.rfind("]")
-                    if start >= 0 and end > start:
-                        parsed = json.loads(text[start:end + 1])
-                        if isinstance(parsed, list):
-                            return {"shots": parsed}
-                start = text.find("{")
-                end = text.rfind("}")
-                if start >= 0 and end > start:
-                    text = text[start:end + 1]
-                parsed = json.loads(text)
+                candidate = _first_json_value(text)
+                parsed = json.loads(candidate)
                 if isinstance(parsed, dict):
                     return parsed
                 if isinstance(parsed, list):
@@ -141,19 +162,16 @@ class ExternalLLMClient:
             except (ValueError, json.JSONDecodeError):
                 pass
             if attempt < retries:
-                token_budget = min(32768, max(8192, token_budget * 2))
-                convo = list(messages)
-                if last.strip():
-                    convo += [
-                        {"role": "assistant", "content": last},
-                        {"role": "user", "content": (
-                            "上一条 JSON 不完整或无效（内容可能在输出中途被截断）。"
-                            "请在更大的输出长度下重新返回完整、可解析的 JSON，"
-                            "不要解释，不要 markdown。")},
-                    ]
-                else:
-                    convo += [{"role": "user", "content": "上一条响应为空。"
-                               "请只返回完整、可解析的 JSON。"}]
+                finish_hint = (
+                    "上一条 JSON 在输出中途被截断（finish=%s）。" % finish
+                    if finish else "上一条 JSON 不完整或无法解析。")
+                payload_note = (
+                    finish_hint +
+                    "请只返回更精简、完整、可解析的 JSON：只包含要求的条目，"
+                    "不要解释，不要 markdown，不要重复无关内容。")
+                messages = list(messages) + [
+                    {"role": "user", "content": payload_note}]
+                continue
         raise ExternalLLMError(
             "External LLM did not return usable JSON (finish=%s): %s" % (
                 finish, last[:1000]))

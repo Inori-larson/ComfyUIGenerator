@@ -22,8 +22,6 @@ from comfyui_generator.core.external_llm import (
     ExternalLLMClient,
     resolve_external_model,
 )
-from comfyui_generator.core.ai_review import (
-    ensure_final_gate, review_stage_ai)
 from comfyui_generator.core.expand_ai import generate_expansions
 from comfyui_generator.core.jobs import Task, TaskRunner
 from comfyui_generator.core.ollama import OllamaClient
@@ -34,6 +32,7 @@ from comfyui_generator.core.rewrite import rewrite_shot_prompt
 from comfyui_generator.core.single import SingleOptions, generate_single_prompt
 from comfyui_generator.core.tag_cache import load_tag_cache, update_tag_cache
 from comfyui_generator.core.translate import translate_prompts, translate_tag_list, translate_to_tags
+from comfyui_generator.core.stages import repair_tagged_shots
 from comfyui_generator.core.storyboard import (
     StoryboardOptions, generate_storyboard, parse_character_profiles)
 from comfyui_generator.core.trace import (
@@ -117,7 +116,8 @@ class PromptWorker(QThread):
                  character_tags: str = "",
                  style_positive: str = "",
                  strip_appearance: bool = False,
-                 use_external: bool = False):
+                 use_external: bool = False,
+                 repair_shots: list[dict[str, Any]] | None = None):
         super().__init__()
         self.cfg = cfg
         self.kind = kind
@@ -136,6 +136,7 @@ class PromptWorker(QThread):
         self.style_positive = style_positive
         self.strip_appearance = strip_appearance
         self.use_external = use_external
+        self.repair_shots = repair_shots
 
     def cancel(self) -> None:
         self.requestInterruption()
@@ -149,7 +150,8 @@ class PromptWorker(QThread):
             model = resolve_external_model(self.cfg.external_llm, self.model)
         else:
             client = OllamaClient(self.cfg.ollama.base_url)
-            model = self.model or (self.single_options or self.story_options).model
+            options = self.single_options or self.story_options
+            model = self.model or (options.model if options is not None else "")
         local_client = client if not self.use_external else OllamaClient(self.cfg.ollama.base_url)
         local_model = model if not self.use_external else self.cfg.ollama.default_model
         if self.use_external:
@@ -214,6 +216,28 @@ class PromptWorker(QThread):
                     "instruction": self.instruction,
                 })
                 self.rewritten.emit({"prompt": prompt, "prompt_zh": prompt_zh})
+            elif self.kind == "story_repair":
+                shots = repair_tagged_shots(
+                    client, model, self.repair_shots or [], self.text,
+                    setting="",
+                    strip_appearance=self.strip_appearance,
+                    style_positive=self.style_positive,
+                    timeout=600.0,
+                    log=self.log.emit)
+                if self._canceled():
+                    raise InterruptedError
+                all_tags: list[str] = []
+                for shot in shots:
+                    all_tags += self._split_tags(shot.get("prompt", ""))
+                mapping = (self._translate_map(local_client, local_model, all_tags)
+                           if local_model else {})
+                if self._canceled():
+                    raise InterruptedError
+                for shot in shots:
+                    zh_tags = [mapping.get(tag, tag) for tag in self._split_tags(shot.get("prompt", ""))]
+                    shot["prompt_zh"] = "，".join(zh_tags)
+                trace_event("story.repair_result", shots)
+                self.story_ready.emit(shots)
             else:
                 shots = generate_storyboard(
                     client, self.text, self.story_options, initial_shots=self.initial_shots)
@@ -258,12 +282,13 @@ class PromptWorker(QThread):
                        tags: list[str]) -> dict[str, str]:
         if not tags:
             return {}
-        self.log.emit("英文提示词已生成，正在用模型翻译标签...")
+        self.log.emit("英文提示词已生成，正在后台翻译标签（仅用于显示，不影响就绪）...")
         cache_path = str(self.cfg.root / "cache" / "tag_translation.json")
         try:
-            return translate_tag_list(client, model, tags, cache_path)
+            return translate_tag_list(
+                client, model, tags, cache_path, timeout=30.0)
         except Exception as exc:
-            self.log.emit("中文翻译失败：%s" % exc)
+            self.log.emit("中文标签翻译跳过（不影响就绪）：%s" % exc)
             return {}
 
     def _translate_tags(self, client: OllamaClient, model: str, tags: list[str]) -> str:
@@ -545,65 +570,3 @@ class AutoTranslateWorker(QThread):
             client.unload(self.model)
         except Exception:
             pass
-
-
-class ClothingRepairWorker(QThread):
-    done = Signal(int)
-    failed = Signal(str)
-    canceled = Signal(str)
-    log = Signal(str)
-
-    def __init__(self, cfg: AppConfig, shots: list[dict[str, Any]],
-                 premise: str, model: str = "", use_external: bool = False,
-                 max_passes: int = 3):
-        super().__init__()
-        self.cfg = cfg
-        self.shots = shots
-        self.premise = premise
-        self.model = model
-        self.use_external = use_external
-        self.max_passes = max_passes
-
-    def cancel(self) -> None:
-        self.requestInterruption()
-
-    def run(self) -> None:
-        if self.use_external:
-            client = ExternalLLMClient(self.cfg.external_llm)
-            model = self.model or resolve_external_model(self.cfg.external_llm)
-        else:
-            client = OllamaClient(self.cfg.ollama.base_url)
-            model = self.model or self.cfg.ollama.default_model
-        try:
-            trace, trace_token = start_trace(
-                self.cfg.single_projects_dir.parent / "log", "clothing_repair", {
-                    "shots": len(self.shots),
-                    "model": model,
-                    "use_external": self.use_external,
-                })
-        except Exception as exc:
-            trace, trace_token = None, None
-            self.log.emit("日志初始化失败：%s" % exc)
-        client = TracedClient(client, "final_gate_repair")
-        profiles = parse_character_profiles(self.premise)
-        try:
-            cycles, unresolved = ensure_final_gate(
-                client, model, self.shots, self.premise,
-                timeout=600.0, log=self.log.emit, profiles=profiles,
-                max_cycles=self.max_passes)
-            if self.isInterruptionRequested():
-                self.canceled.emit("已取消修复")
-                return
-            self.log.emit("AI 闸门修复完成：%d 轮，剩余 %d 项" % (
-                cycles, len(unresolved)))
-            self.done.emit(cycles)
-        except Exception as exc:
-            self.failed.emit(str(exc))
-        finally:
-            try:
-                client.unload(model)
-            except Exception:
-                pass
-            if trace is not None:
-                stop_trace(trace, trace_token)
-

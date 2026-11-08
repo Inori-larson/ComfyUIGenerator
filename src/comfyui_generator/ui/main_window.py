@@ -50,7 +50,7 @@ from comfyui_generator.core.pose import (
 from comfyui_generator.core.project import (
     clear_story_partial, configure_projects_dir, list_projects, load_project,
     load_session, load_story_partial, move_to_trash, new_project, save_project,
-    save_session, save_story_partial,
+    save_session, save_story_partial, shot_is_ready,
 )
 from comfyui_generator.core.quality import check_project, format_report, repair_project
 from comfyui_generator.core.services import ComfyService
@@ -69,7 +69,6 @@ from comfyui_generator.core.tags import append_tags, estimate_tokens
 from comfyui_generator.core.vision import format_similarity, vision_ready
 from comfyui_generator.core.translate import translate_to_tags
 from comfyui_generator.core.workflow import compose_prompts
-from comfyui_generator.core.ai_review import final_gate_blockers
 from comfyui_generator.ui.branding import app_icon, logo_pixmap
 from comfyui_generator.ui.contact_sheet import build_contact_sheet, build_face_sheet
 from comfyui_generator.ui.continuity_worker import ContinuityWorker
@@ -81,7 +80,7 @@ from comfyui_generator.ui.vision_worker import VisionWorker
 from comfyui_generator.ui.wheel_guard import install_wheel_guard
 from comfyui_generator.ui.widgets import SearchComboBox, WrappingTabs
 from comfyui_generator.ui.workers import (
-    AssetsWorker, AutoTranslateWorker, ClothingRepairWorker, ConnectWorker,
+    AssetsWorker, AutoTranslateWorker, ConnectWorker,
     ExpansionWorker, LoraTagsWorker, PromptWorker, RenderWorker,
     TagTranslateWorker)
 
@@ -196,6 +195,8 @@ GALLERY_META_ROLE = GALLERY_IMAGE_ROLE + 1
 GALLERY_FAVORITE_ROLE = GALLERY_META_ROLE + 1
 GALLERY_INDEX_ROLE = GALLERY_FAVORITE_ROLE + 1
 NEGATIVE_ROLE = GALLERY_INDEX_ROLE + 1
+READY_ROLE = NEGATIVE_ROLE + 1
+FINDINGS_ROLE = READY_ROLE + 1
 
 
 class GalleryViewerDialog(QDialog):
@@ -337,10 +338,7 @@ class MainWindow(QMainWindow):
         self.vision_worker: VisionWorker | None = None
         self.continuity_worker: ContinuityWorker | None = None
         self.expansion_worker: ExpansionWorker | None = None
-        self.clothing_repair_worker: ClothingRepairWorker | None = None
         self._pending_render: tuple[dict[str, Any], list[dict[str, Any]], int] | None = None
-        self._pending_clothing_repair: tuple[
-            dict[str, Any], list[dict[str, Any]], str, str] | None = None
         self.tasks_by_id: dict[str, Any] = {}
         self.task_rows: dict[str, int] = {}
         self.row_task_ids: dict[int, str] = {}
@@ -735,9 +733,9 @@ class MainWindow(QMainWindow):
         self.btn_continue_partial.clicked.connect(self.continue_partial_story)
         form_layout.addWidget(self.btn_continue_partial)
 
-        self.shot_table = QTableWidget(0, 6)
+        self.shot_table = QTableWidget(0, 7)
         self.shot_table.setHorizontalHeaderLabels([
-            "锁", "镜号", "名称", "画面提示词（中文，可编辑）", "景别", "机位",
+            "锁", "镜号", "名称", "画面提示词（中文，可编辑）", "状态", "景别", "机位",
         ])
         self.shot_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.shot_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
@@ -745,6 +743,7 @@ class MainWindow(QMainWindow):
         self.shot_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self.shot_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         self.shot_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        self.shot_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
         self.shot_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.shot_table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked
                                         | QAbstractItemView.EditTrigger.EditKeyPressed)
@@ -778,6 +777,12 @@ class MainWindow(QMainWindow):
             btn = QPushButton(text)
             btn.clicked.connect(slot)
             tools.addWidget(btn)
+        self.btn_story_repair = QPushButton("修复失败分镜")
+        self.btn_story_repair.clicked.connect(self.repair_not_ready_shots)
+        tools.addWidget(self.btn_story_repair)
+        self.btn_story_revalidate = QPushButton("复检提示词")
+        self.btn_story_revalidate.clicked.connect(self.revalidate_current_shots)
+        tools.addWidget(self.btn_story_revalidate)
         layout.addLayout(tools)
 
         move_tools = QHBoxLayout()
@@ -3557,16 +3562,93 @@ class MainWindow(QMainWindow):
         self._update_partial_button()
         self._fill_shot_table(shots)
         self.append_log("分镜已生成：%d 镜" % len(shots))
-        ready = all(bool(shot.get("ready")) for shot in shots if isinstance(shot, dict))
+        ready = all(shot_is_ready(shot) for shot in shots if isinstance(shot, dict))
+        not_ready = [str(shot.get("id") or "") for shot in shots
+                     if isinstance(shot, dict) and not shot_is_ready(shot)]
         if ready:
             self.statusBar().showMessage("分镜已就绪（共 %d 镜），可直接渲染" % len(shots))
         else:
             self.statusBar().showMessage(
-                "分镜已生成但尚未就绪（%d 镜），请点渲染时选择「让 AI 修复」" % len(shots))
+                "%d 镜未通过：%s；可点「修复失败分镜」，也可直接渲染" % (
+                    len(not_ready), ", ".join(not_ready)))
             self.append_log(
-                "提示：本分镜最终闸门未全部通过，未达到就绪状态；点渲染后用「让 AI 修复」补齐。")
+                "未通过分镜：%s；可在“状态”列悬停查看原因，或点「修复失败分镜」。" %
+                ", ".join(not_ready))
+            for shot in shots:
+                if isinstance(shot, dict) and not shot_is_ready(shot):
+                    for finding in shot.get("findings") or []:
+                        self.append_log("  镜头%s · %s" % (
+                            shot.get("id") or "",
+                            finding.get("message") if isinstance(finding, dict) else finding))
         self._autosave_generated_story()
         self._start_auto_continuity(shots)
+
+    def revalidate_current_shots(self) -> None:
+        shots = self._collect_shots(False, allow_empty=True)
+        if not shots:
+            QMessageBox.information(self, "提示", "还没有分镜。")
+            return
+        premise = self._story_premise_text() or self._current_text() or ""
+        from comfyui_generator.core.stages import revalidate_tagged_shots
+
+        result = revalidate_tagged_shots(shots, premise)
+        self._fill_shot_table(result)
+        failed = [str(shot.get("id") or "") for shot in result if not shot_is_ready(shot)]
+        if failed:
+            self.append_log("复检未通过：%s" % ", ".join(failed))
+            for shot in result:
+                if not shot_is_ready(shot):
+                    for finding in shot.get("findings") or []:
+                        self.append_log("  镜头%s · %s" % (
+                            shot.get("id"), finding.get("message")))
+        else:
+            self.append_log("复检通过：%d 镜全部就绪。" % len(result))
+        self._autosave_generated_story()
+
+    def repair_not_ready_shots(self) -> None:
+        if self.prompt_worker and self.prompt_worker.isRunning():
+            return
+        shots = self._collect_shots(False, allow_empty=True)
+        not_ready = [shot for shot in shots if not shot_is_ready(shot)]
+        if not shots:
+            QMessageBox.information(self, "提示", "还没有分镜。")
+            return
+        if not not_ready:
+            QMessageBox.information(self, "提示", "全部分镜均已就绪。")
+            return
+        external = self._external_llm_ready()
+        if external:
+            if not (self.cfg.external_llm.base_url and self.cfg.external_llm.model):
+                QMessageBox.information(
+                    self, "提示", "请先在设置里填写外部 API 的 Base URL 和模型。")
+                return
+        else:
+            if not self.connected or not self._llm():
+                QMessageBox.information(self, "提示", "请先连接 ComfyUI / Ollama 并选择模型。")
+                return
+        text = self._story_premise_text() or self._current_text() or "story repair"
+        self._set_generation_enabled(False)
+        worker = PromptWorker(
+            self.cfg, "story_repair", text,
+            model=self._llm(),
+            style_positive=self._style_positive(),
+            strip_appearance=self._has_character_lora(),
+            use_external=external,
+            repair_shots=shots)
+        worker.story_ready.connect(self._on_story_repaired)
+        worker.failed.connect(self._on_prompt_failed)
+        worker.canceled.connect(self._on_prompt_canceled)
+        worker.log.connect(self.append_log)
+        worker.finished.connect(self._on_prompt_worker_finished)
+        self.prompt_worker = worker
+        self.statusBar().showMessage("正在修复失败分镜：%s" % ", ".join(
+            str(shot.get("id") or "") for shot in not_ready))
+        worker.start()
+
+    def _on_story_repaired(self, shots: list[dict[str, Any]]) -> None:
+        self._fill_shot_table(shots)
+        self.append_log("失败分镜修复流程结束：%d 镜" % len(shots))
+        self._autosave_generated_story()
 
     def _external_llm_ready(self) -> bool:
         external = self.cfg.external_llm
@@ -3702,9 +3784,26 @@ class MainWindow(QMainWindow):
             prompt_item.setData(AI_EXPANSIONS_ROLE, json.dumps(
                 shot.get("ai_expansions") or [], ensure_ascii=False))
             self.shot_table.setItem(row, 3, prompt_item)
-            self.shot_table.setItem(row, 4, QTableWidgetItem(
-                str(shot.get("shot_size") or "")))
+            ready = shot_is_ready(shot)
+            findings = shot.get("findings") or []
+            if isinstance(findings, str):
+                try:
+                    findings = json.loads(findings)
+                except (TypeError, ValueError):
+                    findings = []
+            status_item = QTableWidgetItem("就绪" if ready else "未通过")
+            status_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            status_item.setData(READY_ROLE, ready)
+            status_item.setData(FINDINGS_ROLE, json.dumps(
+                findings, ensure_ascii=False))
+            if not ready:
+                status_item.setForeground(QBrush(Qt.GlobalColor.red))
+                status_item.setToolTip("\n".join(
+                    str(item.get("message") or item) for item in findings))
+            self.shot_table.setItem(row, 4, status_item)
             self.shot_table.setItem(row, 5, QTableWidgetItem(
+                str(shot.get("shot_size") or "")))
+            self.shot_table.setItem(row, 6, QTableWidgetItem(
                 str(shot.get("camera_angle") or "")))
         finally:
             self._syncing_shots = False
@@ -3730,18 +3829,18 @@ class MainWindow(QMainWindow):
         self.shot_table.blockSignals(True)
         try:
             for row in range(total):
-                size_item = self.shot_table.item(row, 4)
-                angle_item = self.shot_table.item(row, 5)
+                size_item = self.shot_table.item(row, 5)
+                angle_item = self.shot_table.item(row, 6)
                 if (not overwrite and size_item and angle_item
                         and size_item.text().strip() and angle_item.text().strip()):
                     continue
                 grammar = auto_shot_grammar(row, total, settings)
                 if not size_item:
                     size_item = QTableWidgetItem()
-                    self.shot_table.setItem(row, 4, size_item)
+                    self.shot_table.setItem(row, 5, size_item)
                 if not angle_item:
                     angle_item = QTableWidgetItem()
-                    self.shot_table.setItem(row, 5, angle_item)
+                    self.shot_table.setItem(row, 6, angle_item)
                 size_item.setText(grammar["shot_size"])
                 angle_item.setText(grammar["camera_angle"])
         finally:
@@ -3993,49 +4092,23 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.No)
         return answer == QMessageBox.StandardButton.Yes
 
-    def _evaluate_clothing_gate(self, project: dict[str, Any],
-                                shots: list[dict[str, Any]]) -> tuple[list[str], str]:
-        evaluated: list[dict[str, Any]] = []
-        for shot in shots:
-            positive, _negative = compose_prompts(project, shot)
-            tags = [part.strip() for part in positive.split(",") if part.strip()]
-            evaluated.append({"id": shot.get("id"), "_positive_tags": tags})
-        premise = self._story_premise_text() or str(project.get("premise") or "")
-        return final_gate_blockers(evaluated, premise), premise
-
-    def _ask_clothing_gate(self, blockers: list[str]) -> str:
-        for message in blockers:
-            self.append_log("最终闸门 · " + message)
-        preview = "\n".join(blockers[:20])
-        if len(blockers) > 20:
-            preview += "\n... 另有 %d 条" % (len(blockers) - 20)
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Icon.Warning)
-        box.setWindowTitle("最终结构闸门未通过（%d 项）" % len(blockers))
-        box.setText(preview)
-        btn_repair = box.addButton("让 AI 修复",
-                                   QMessageBox.ButtonRole.AcceptRole)
-        btn_force = box.addButton("强行渲染",
-                                  QMessageBox.ButtonRole.DestructiveRole)
-        btn_cancel = box.addButton("取消",
-                                   QMessageBox.ButtonRole.RejectRole)
-        box.setDefaultButton(btn_repair)
-        box.setEscapeButton(btn_cancel)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked is btn_repair:
-            return "repair"
-        if clicked is btn_force:
-            return "force"
-        return "cancel"
-
     def _row_data(self, row: int) -> dict[str, Any]:
         lock_item = self.shot_table.item(row, 0)
         prompt_item = self.shot_table.item(row, 3)
+        status_item = self.shot_table.item(row, 4)
         states: dict[str, Any] = {}
         details: dict[str, Any] = {}
         prompt_groups: list[Any] = []
         ai_expansions: list[Any] = []
+        findings: list[Any] = []
+        if status_item:
+            raw_findings = status_item.data(FINDINGS_ROLE)
+            if isinstance(raw_findings, str) and raw_findings.strip():
+                try:
+                    parsed = json.loads(raw_findings)
+                    findings = parsed if isinstance(parsed, list) else []
+                except (TypeError, ValueError):
+                    findings = []
         if prompt_item:
             raw_states = prompt_item.data(CHARACTER_STATES_ROLE)
             if isinstance(raw_states, str) and raw_states.strip():
@@ -4065,6 +4138,8 @@ class MainWindow(QMainWindow):
                     ai_expansions = parsed if isinstance(parsed, list) else []
                 except (TypeError, ValueError):
                     ai_expansions = []
+        shot_status = status_item.data(READY_ROLE) if status_item else None
+        ready = shot_is_ready({"ready": shot_status}) if shot_status is not None else True
         return {
             "locked": bool(lock_item and lock_item.checkState() == Qt.CheckState.Checked),
             "id": self.shot_table.item(row, 1).text() if self.shot_table.item(row, 1) else "",
@@ -4091,10 +4166,12 @@ class MainWindow(QMainWindow):
             "keyframe_prompt": (prompt_item.data(KEYFRAME_PROMPT_ROLE) or ""
                                 if prompt_item else ""),
             "ai_expansions": ai_expansions,
-            "shot_size": (self.shot_table.item(row, 4).text()
-                          if self.shot_table.item(row, 4) else ""),
-            "camera_angle": (self.shot_table.item(row, 5).text()
-                             if self.shot_table.item(row, 5) else ""),
+            "ready": ready,
+            "findings": findings,
+            "shot_size": (self.shot_table.item(row, 5).text()
+                          if self.shot_table.item(row, 5) else ""),
+            "camera_angle": (self.shot_table.item(row, 6).text()
+                             if self.shot_table.item(row, 6) else ""),
         }
 
     def _on_shot_item_changed(self, item: QTableWidgetItem) -> None:
@@ -4599,6 +4676,8 @@ class MainWindow(QMainWindow):
                               "ai_expansions": data.get("ai_expansions") or [],
                               "shot_size": data.get("shot_size", ""),
                               "camera_angle": data.get("camera_angle", ""),
+                              "ready": data.get("ready", True),
+                              "findings": data.get("findings", []),
                               "locked": data["locked"]})
                 continue
             prompt_en = data.get("prompt_en", "").strip()
@@ -4628,6 +4707,8 @@ class MainWindow(QMainWindow):
                           "ai_expansions": data.get("ai_expansions") or [],
                           "shot_size": data.get("shot_size", ""),
                           "camera_angle": data.get("camera_angle", ""),
+                          "ready": data.get("ready", True),
+                          "findings": data.get("findings", []),
                           "locked": data["locked"]})
         if pending:
             translations = self._resolve_chinese_texts([item[2] for item in pending])
@@ -4713,16 +4794,19 @@ class MainWindow(QMainWindow):
         if not self._preflight_quality(project):
             return
         if mode != "single":
-            blockers, premise = self._evaluate_clothing_gate(project, shots)
-            if blockers:
-                choice = self._ask_clothing_gate(blockers)
-                if choice == "cancel":
-                    self._set_generation_enabled(True)
-                    return
-                if choice == "repair":
-                    self._start_clothing_repair(project, shots, text,
-                                                previous_prefix, premise)
-                    return
+            not_ready = [
+                str(shot.get("id") or "")
+                for shot in shots
+                if isinstance(shot, dict) and not shot_is_ready(shot)]
+            if not_ready:
+                self.append_log(
+                    "提示：以下镜头未通过生成期确定性校验（%s），不影响渲染，已按当前分镜继续生成图片。" % ", ".join(not_ready))
+                for shot in shots:
+                    if str(shot.get("id") or "") in not_ready:
+                        for finding in shot.get("findings") or []:
+                            self.append_log("  镜头%s · %s" % (
+                                shot.get("id") or "",
+                                finding.get("message") if isinstance(finding, dict) else finding))
         self._continue_render(mode, project, shots, text, previous_prefix)
 
     def _continue_render(self, mode: str, project: dict[str, Any],
@@ -4788,72 +4872,6 @@ class MainWindow(QMainWindow):
         if expansions > 0:
             self.append_log("No AI model available; skipping expansion.")
         self._start_render_tasks(self.project, shots, None)
-
-    def _start_clothing_repair(self, project: dict[str, Any],
-                               shots: list[dict[str, Any]], text: str,
-                               previous_prefix: str, premise: str) -> None:
-        external = self.cfg.external_llm
-        external_ready = bool(
-            external.base_url and external.api_key and external.model)
-        if not external_ready:
-            QMessageBox.information(
-                self, "提示",
-                "服装修复需使用外部 %s，请先在设置里填写外部 API。" % REVIEW_MODEL)
-            self._set_generation_enabled(True)
-            return
-        model = REVIEW_MODEL
-        use_external = True
-        self._pending_clothing_repair = (
-            project, shots, text, previous_prefix)
-        worker = ClothingRepairWorker(
-            self.cfg, shots, premise, model=model,
-            use_external=use_external, max_passes=3)
-        worker.done.connect(self._on_clothing_repair_done)
-        worker.failed.connect(self._on_clothing_repair_failed)
-        worker.canceled.connect(self._on_clothing_repair_canceled)
-        worker.log.connect(self.append_log)
-        self.clothing_repair_worker = worker
-        self._set_generation_enabled(False)
-        self.btn_cancel.setEnabled(True)
-        self.statusBar().showMessage("AI 正在修复服装闸门…")
-        self.append_log("AI 服装修复：%s" % model)
-        worker.finished.connect(
-            lambda w=worker: self._release_clothing_repair_worker(w))
-        worker.start()
-
-    def _release_clothing_repair_worker(self, worker: Any) -> None:
-        if self.clothing_repair_worker is worker:
-            self.clothing_repair_worker = None
-
-    def _on_clothing_repair_done(self, _changes: int) -> None:
-        pending = self._pending_clothing_repair
-        self._pending_clothing_repair = None
-        if not pending:
-            return
-        project, shots, text, previous_prefix = pending
-        blockers, _premise = self._evaluate_clothing_gate(project, shots)
-        if blockers:
-            self.append_log("AI 修复后闸门仍有 %d 项未通过。" % len(blockers))
-            choice = self._ask_clothing_gate(blockers)
-            if choice == "cancel":
-                self._set_generation_enabled(True)
-                return
-            if choice == "repair":
-                self._start_clothing_repair(project, shots, text,
-                                            previous_prefix, _premise)
-                return
-        self._continue_render(project.get("mode", "batch"),
-                              project, shots, text, previous_prefix)
-
-    def _on_clothing_repair_failed(self, message: str) -> None:
-        self._pending_clothing_repair = None
-        self.append_log("AI 服装修复失败：%s" % message)
-        self._set_generation_enabled(True)
-
-    def _on_clothing_repair_canceled(self, message: str) -> None:
-        self._pending_clothing_repair = None
-        self.append_log(message)
-        self._set_generation_enabled(True)
 
     def _on_expansions_ready(self, expansions: dict[str, list[str]]) -> None:
         pending = self._pending_render

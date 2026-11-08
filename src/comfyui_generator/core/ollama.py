@@ -35,14 +35,15 @@ def _get(url: str, timeout: float) -> dict[str, Any]:
 
 
 def extract_json(text: str) -> str:
+    from .external_llm import _first_json_value
+
     text = text.strip()
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
-    start = text.find("{")
-    end = text.rfind("}")
-    if start < 0 or end <= start:
+    candidate = _first_json_value(text.strip())
+    if candidate == text.strip() and not re.search(r"^[\[{]", candidate):
         raise ValueError("no JSON object found")
-    return text[start:end + 1]
+    return candidate
 
 
 class OllamaClient:

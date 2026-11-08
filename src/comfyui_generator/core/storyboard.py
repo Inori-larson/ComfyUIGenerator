@@ -6,8 +6,6 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from comfyui_generator.core.ollama import OllamaClient
-from comfyui_generator.core.ai_review import (
-    ensure_final_gate, run_all_reviews)
 from comfyui_generator.core.mechanical import normalize_prompt_text
 from comfyui_generator.core.story_blueprint import (
     blueprint_text, plan_shot_blueprint)
@@ -1059,26 +1057,6 @@ def finalize_generated_story(shots: list[dict[str, Any]], premise: str,
                              profiles: list[CharacterProfile] | None = None
                              ) -> None:
     _finalize_generated_story_once(shots, premise, profiles)
-
-
-def _mark_story_readiness(shots: list[dict[str, Any]],
-                          unresolved: list[str],
-                          log: Callable[[str], None] | None = None) -> None:
-    """Record whether the generated story is fully ready (final gate clear)."""
-    ready = not unresolved
-    for shot in shots:
-        if isinstance(shot, dict):
-            shot["ready"] = bool(ready)
-    if ready:
-        if log:
-            log("最终闸门已通过：分镜就绪，可直接渲染。")
-        return
-    if log:
-        log("警告：最终闸门仍有 %d 项未解决，分镜尚未就绪：" % len(unresolved))
-        for item in unresolved[:10]:
-            log("  未就绪 · " + item)
-        if len(unresolved) > 10:
-            log("  ... 另有 %d 项" % (len(unresolved) - 10))
 def normalize_outline(raw: dict[str, Any] | list[Any], wanted: int,
                       fallback_prefix: str, start: int = 1,
                       used_names: list[str] | None = None,
@@ -1367,148 +1345,6 @@ def build_premise_act_plan_messages(premise: str, total: int,
         {"role": "system", "content": ACT_PLAN_SYSTEM},
         {"role": "user", "content": "\n".join(user)},
     ]
-def plan_story_spine(client: OllamaClient, model: str, premise: str,
-                     shots: int, setting: str = "", timeout: float = 600.0,
-                     log: Callable[[str], None] | None = None,
-                     max_act_shots: int = 30
-                     ) -> list[dict[str, Any]]:
-    raw = client.chat_json(
-        model,
-        build_premise_act_plan_messages(
-            premise, shots, setting, max_act_shots=max_act_shots),
-        schema=ACT_PLAN_SCHEMA,
-        temperature=0.6,
-        num_predict=4096,
-        num_ctx=32768,
-        keep_alive="5m",
-        timeout=timeout,
-        retries=2,
-    )
-    if not isinstance(raw, dict) or not raw.get("acts"):
-        return []
-    acts = normalize_acts(raw, shots, premise)
-    spine = [{
-        "summary": act.get("summary", ""),
-        "cast": act.get("cast", ""),
-        "phase": act.get("title", ""),
-        "clothing": act.get("clothing", ""),
-        "scene": act.get("scene", ""),
-        "nsfw": act.get("nsfw", ""),
-        "beats": act.get("beats") or [],
-        "start": act.get("start", 1),
-        "end": act.get("end", shots),
-    } for act in acts]
-    if log:
-        log("Story acts: " + " | ".join(
-            "%d-%d:%s(%s)" % (item["start"], item["end"],
-                              str(item["summary"])[:24], item["cast"])
-            for item in spine))
-    return spine
-def generate_full_story_pipeline(client: OllamaClient, premise: str,
-                                 options: StoryboardOptions,
-                                 initial: list[dict[str, str]],
-                                 shots: int) -> list[dict[str, str]]:
-    log = options.log
-    log("Stage 1/4: writing complete story...")
-    story_raw = client.chat_json(
-        generation_model(options.model),
-        build_story_messages(premise, shots, options.setting),
-        schema=STORY_SCHEMA, temperature=options.temperature,
-        num_predict=16384, num_ctx=32768, keep_alive=options.keep_alive,
-        timeout=max(options.timeout, 600.0), retries=2,
-    )
-    story = str(story_raw.get("story") or "").strip()
-    if not story:
-        raise ValueError("Model returned an empty complete story.")
-    profiles = strip_male_profile_details(normalize_character_profiles(
-        story_raw.get("characters"), premise, options.strip_appearance))
-    bible = character_bible_text(profiles)
-    log("Character lock: " + " | ".join(
-        "%s(%s): %s" % (profile.name, profile.gender,
-                        ", ".join(profile.initial_clothing) or "no clothing")
-        for profile in profiles))
-    log("Stage 2/4: splitting story into acts...")
-    act_raw = client.chat_json(
-        generation_model(options.model),
-        build_act_plan_messages(
-            story, premise, shots, options.setting,
-            max_act_shots=options.max_act_shots),
-        schema=ACT_PLAN_SCHEMA, temperature=options.temperature,
-        num_predict=8192, num_ctx=32768, keep_alive=options.keep_alive,
-        timeout=max(options.timeout, 600.0), retries=2,
-    )
-    acts = normalize_acts(act_raw, shots, story)
-    if not acts:
-        raise ValueError("Model produced no usable act plan.")
-    result = list(initial[:shots])
-    act_premise = premise + "\n\n完整剧情：\n" + story
-    for act_index, act in enumerate(acts, 1):
-        if len(result) >= shots:
-            break
-        start = int(act["start"])
-        end = int(act["end"])
-        if start <= len(result):
-            start = len(result) + 1
-        act_size = max(1, end - start + 1)
-        state = _global_story_state(premise, result, profiles)
-        log("Stage 3/4: refining Act %d/%d, shots %d-%d..." % (
-            act_index, len(acts), start, end))
-        outline = plan_storyboard_outline(
-            client, generation_model(options.model), act_premise, act_size, options.setting,
-            chunk=6, timeout=max(options.timeout, 600.0),
-            strip_appearance=options.strip_appearance,
-            character_bible=bible,
-            act_summary="%s；%s；服装：%s；场景：%s；NSFW：%s" % (
-                act["title"], act["summary"], act["clothing"],
-                act["scene"], act["nsfw"]),
-            story_state=state, start_shot=start, total_shots=shots,
-        )
-        for offset in range(0, len(outline), options.chunk):
-            chunk_outline = outline[offset:offset + options.chunk]
-            scripts = [{
-                "id": item["id"], "name": item["name"],
-                "script": item["outline"], "cast": item.get("cast", ""),
-                "phase": str(act.get("title") or ""),
-            } for item in chunk_outline]
-            chunk_state = _global_story_state(
-                act_premise, result, profiles)
-            tag_raw = client.chat_json(
-                prompt_conversion_model(options.model),
-                build_tag_messages(
-                    scripts, options.style_positive, options.setting,
-                    strip_appearance=options.strip_appearance,
-                    cast_hint=str(scripts[0].get("cast") or ""),
-                    story_state=chunk_state, character_bible=bible),
-                schema=TAG_SCHEMA, temperature=options.temperature,
-                num_predict=8192, num_ctx=32768, keep_alive=options.keep_alive,
-                timeout=options.timeout, retries=3,
-            )
-            part = normalize_tagged(tag_raw, scripts)
-            chunk_start = len(result)
-            result.extend(part)
-            _notify_partial(options, result)
-            log("Stage 4/4: Act %d +%d shots (%d/%d)" % (
-                act_index, len(part), len(result), shots))
-            if not part:
-                break
-    if len(result) < shots:
-        log("Note: model produced %d/%d shots" % (len(result), shots))
-    result = result[:shots]
-    renumber_shots(result)
-    normalize_shot_casts(result)
-    run_all_reviews(
-        client, review_model(options.model), result, premise,
-        batch_size=10, max_passes=2,
-        timeout=max(options.timeout, 600.0), log=options.log,
-        profiles=profiles)
-    _cycles, unresolved = ensure_final_gate(
-        client, review_model(options.model), result, premise,
-        timeout=max(options.timeout, 600.0), log=options.log,
-        profiles=profiles, max_cycles=5)
-    _mark_story_readiness(result, unresolved, options.log)
-    finalize_generated_story(result, premise)
-    return result
-
 def script_from_fields(item: dict[str, Any]) -> str:
     parts = []
     for key, label in _SCRIPT_FIELD_LABELS:
@@ -1705,271 +1541,40 @@ def _notify_partial(options: StoryboardOptions,
         options.on_partial([dict(shot) for shot in shots])
     except Exception as exc:
         options.log("Checkpoint save failed: %s" % exc)
-def _generate_long_storyboard(client: OllamaClient, premise: str,
-                              options: StoryboardOptions,
-                              initial: list[dict[str, str]],
-                              shots: int) -> list[dict[str, str]]:
-    log = options.log
-    result: list[dict[str, str]] = initial[:shots]
-    profiles = strip_male_profile_details(parse_character_profiles(premise))
-    bible = character_bible_text(profiles)
-    spine: list[dict[str, Any]] = []
-    max_act_shots = max(1, int(options.max_act_shots))
-    if not extract_premise_beats(premise):
-        spine = plan_story_spine(
-            client, generation_model(options.model), premise, shots, options.setting,
-            timeout=max(options.timeout, 600.0), log=log,
-            max_act_shots=max_act_shots)
-    milestones = plan_shot_blueprint(
-        client, review_model(options.model), premise, shots,
-        timeout=max(options.timeout, 600.0), log=log, max_tries=2)
-    blueprint = blueprint_text(milestones)
-    log("Story blueprint ready: terminal locked at shot %d" % shots)
-    act_total = (shots + max_act_shots - 1) // max_act_shots
-    act_index = 0
-    while len(result) < shots:
-        act_index += 1
-        act_start = len(result) + 1
-        act = _phase_at(spine, act_start) if spine else {}
-        try:
-            act_end = int(act.get("end") or 0)
-        except (TypeError, ValueError):
-            act_end = 0
-        if act_end < act_start or act_end > shots:
-            act_end = min(shots, act_start + max_act_shots - 1)
-        act_size = max(1, act_end - act_start + 1)
-        act_summary = _act_summary(spine, act_start, act_end)
-        story_state = _global_story_state(premise, result, profiles)
-        log("Act %d/%d: shots %d-%d" % (
-            act_index, act_total, act_start, act_end))
-        outline = plan_storyboard_outline(
-            client, generation_model(options.model), premise, act_size, options.setting,
-            chunk=3, timeout=max(options.timeout, 600.0),
-            strip_appearance=options.strip_appearance,
-            act_summary=act_summary, story_state=story_state,
-            character_bible=bible,
-            start_shot=act_start, total_shots=shots,
-            blueprint=blueprint)
-        for item in outline:
-            try:
-                number = int(item.get("id", "0"))
-            except (TypeError, ValueError):
-                continue
-            phase = _phase_at(spine, number)
-            item["phase"] = str(phase.get("phase") or "")
-            if phase.get("cast"):
-                item["cast"] = str(phase["cast"])
-        chunks: list[tuple[int, list[dict[str, str]]]] = []
-        offset = 0
-        while offset < len(outline):
-            phase = outline[offset].get("phase", "")
-            end = offset + 1
-            while (end < len(outline) and end - offset < options.chunk
-                   and outline[end].get("phase", "") == phase):
-                end += 1
-            chunks.append((offset, outline[offset:end]))
-            offset = end
-        for offset, outline_chunk in chunks:
-            chunk_state = _global_story_state(premise, result, profiles)
-            script_raw = client.chat_json(
-                generation_model(options.model),
-                build_script_messages(
-                    premise, len(outline_chunk), options.setting,
-                    result, shots, [item["outline"] for item in outline_chunk],
-                    strip_appearance=options.strip_appearance,
-                    phase=str(outline_chunk[0].get("phase") or ""),
-                    cast_hint=str(outline_chunk[0].get("cast") or ""),
-                    story_state=chunk_state, act_summary=act_summary,
-                    character_bible=bible),
-                schema=SCRIPT_SCHEMA,
-                temperature=options.temperature,
-                num_predict=16384,
-                num_ctx=32768,
-                keep_alive=options.keep_alive,
-                timeout=options.timeout,
-                retries=3,
-            )
-            script_chunk = normalize_scripts(
-                script_raw, len(outline_chunk), slugify(premise, "story") or "story",
-                start=act_start + offset,
-                used_names=[shot["name"] for shot in result])
-            for index, script in enumerate(script_chunk):
-                if index < len(outline_chunk):
-                    script["cast"] = outline_chunk[index]["cast"]
-                script["outline"] = outline_chunk[index]["outline"]
-                if outline_chunk[index].get("phase"):
-                    script["phase"] = outline_chunk[index]["phase"]
-            tag_raw = client.chat_json(
-                prompt_conversion_model(options.model),
-                build_tag_messages(
-                    script_chunk, options.style_positive, options.setting,
-                    strip_appearance=options.strip_appearance,
-                    phase=str(script_chunk[0].get("phase") or ""),
-                    cast_hint=str(script_chunk[0].get("cast") or ""),
-                    story_state=chunk_state, character_bible=bible),
-                schema=TAG_SCHEMA,
-                temperature=options.temperature,
-                num_predict=16384,
-                num_ctx=32768,
-                keep_alive=options.keep_alive,
-                timeout=options.timeout,
-                retries=3,
-            )
-            part = normalize_tagged(tag_raw, script_chunk)
-            chunk_start = len(result)
-            result.extend(part)
-            _notify_partial(options, result)
-            log("Act %d: +%d shots (%d/%d)" % (act_index, len(part), len(result), shots))
-            if not part:
-                break
-        if len(result) >= shots:
-            break
-    result = result[:shots]
-    renumber_shots(result)
-    normalize_shot_casts(result)
-    run_all_reviews(
-        client, review_model(options.model), result, premise,
-        batch_size=10, max_passes=2,
-        timeout=max(options.timeout, 600.0), log=options.log,
-        profiles=profiles)
-    _cycles, unresolved = ensure_final_gate(
-        client, review_model(options.model), result, premise,
-        timeout=max(options.timeout, 600.0), log=options.log,
-        profiles=profiles, max_cycles=5)
-    _mark_story_readiness(result, unresolved, options.log)
-    finalize_generated_story(result, premise)
-    return result
-
 def generate_storyboard(client: OllamaClient, premise: str,
                         options: StoryboardOptions,
                         initial_shots: list[dict[str, str]] | None = None) -> list[dict[str, str]]:
-    """Generate shots in chunks from the premise and current-run prior shots."""
+    """Run the three-stage waterfall (outline -> script -> tags).
+
+    Quality is closed inside each stage; the full film is never re-sent.
+    Already-complete shots (e.g. an early return) are finalized as-is.
+    """
+    from comfyui_generator.core.stages import run_waterfall
 
     initial = [dict(shot) for shot in (initial_shots or [])]
     shots = max(len(initial), int(options.shots))
-    chunk = max(1, int(options.chunk))
     log = options.log
-    result: list[dict[str, str]] = initial[:shots]
-    if len(result) >= shots:
+
+    if len(initial) >= shots:
+        result = initial[:shots]
         finalize_generated_story(result, premise)
+        for shot in result:
+            shot.setdefault("ready", True)
         return result
-    if options.full_story and not extract_premise_beats(premise):
-        return generate_full_story_pipeline(client, premise, options, result, shots)
-    if shots > max(1, int(options.max_act_shots)):
-        return _generate_long_storyboard(client, premise, options, result, shots)
 
-    profiles = strip_male_profile_details(parse_character_profiles(premise))
-    bible = character_bible_text(profiles)
-    script_base = len(result)
-    remaining = shots - script_base
-    premise_beats = extract_premise_beats(premise)
-    blueprint = ""
-    if premise_beats:
-        milestones = plan_shot_blueprint(
-            client, review_model(options.model), premise, shots,
-            timeout=max(options.timeout, 600.0), log=log, max_tries=2)
-        blueprint = blueprint_text(milestones)
-        log("Stage 0: blueprint planned, terminal locked at shot %d" % shots)
-        outline = plan_storyboard_outline(
-            client, generation_model(options.model), premise, remaining,
-            options.setting, chunk=6, timeout=max(options.timeout, 600.0),
-            strip_appearance=options.strip_appearance,
-            character_bible=bible, start_shot=script_base + 1,
-            total_shots=shots, blueprint=blueprint)
-    else:
-        log("Stage 0: planning %d numbered outline entries..." % remaining)
-        outline = plan_storyboard_outline(
-            client, generation_model(options.model), premise, remaining, options.setting,
-            chunk=6, timeout=max(options.timeout, 600.0),
-            strip_appearance=options.strip_appearance, spine=None,
-            character_bible=bible)
-    if not outline:
-        raise ValueError("Model produced no usable storyboard outline.")
-
-    chunks: list[tuple[int, list[dict[str, str]]]] = []
-    offset = 0
-    while offset < len(outline):
-        phase = outline[offset].get("phase", "")
-        end = offset + 1
-        while (end < len(outline) and end - offset < chunk
-               and outline[end].get("phase", "") == phase):
-            end += 1
-        chunks.append((offset, outline[offset:end]))
-        offset = end
-    for offset, outline_chunk in chunks:
-        beat_slice = [item["outline"] for item in outline_chunk]
-        log("Stage A: writing scripts for shots %d-%d..." % (
-            script_base + offset + 1,
-            script_base + offset + len(outline_chunk)))
-        chunk_state = _global_story_state(premise, result, profiles)
-        script_raw = client.chat_json(
-            generation_model(options.model),
-            build_script_messages(
-                premise, len(outline_chunk), options.setting,
-                result, shots, beat_slice,
-                strip_appearance=options.strip_appearance,
-                phase=str(outline_chunk[0].get("phase") or ""),
-                cast_hint=str(outline_chunk[0].get("cast") or ""),
-                story_state=chunk_state, character_bible=bible),
-            schema=SCRIPT_SCHEMA,
-            temperature=options.temperature,
-            num_predict=16384,
-            num_ctx=32768,
-            keep_alive=options.keep_alive,
-            timeout=options.timeout,
-            retries=3,
-        )
-        script_chunk = normalize_scripts(
-            script_raw, len(outline_chunk), slugify(premise, "story") or "story",
-            start=script_base + offset + 1,
-            used_names=[shot["name"] for shot in result])
-        for index, script in enumerate(script_chunk):
-            if index < len(outline_chunk):
-                script["cast"] = outline_chunk[index]["cast"]
-                script["outline"] = outline_chunk[index]["outline"]
-                if outline_chunk[index].get("phase"):
-                    script["phase"] = outline_chunk[index]["phase"]
-        log("Stage B: translating shots %d-%d to English tags..." % (
-            script_base + offset + 1,
-            script_base + offset + len(script_chunk)))
-        tag_raw = client.chat_json(
-            prompt_conversion_model(options.model),
-            build_tag_messages(
-                script_chunk, options.style_positive, options.setting,
-                strip_appearance=options.strip_appearance,
-                phase=str(script_chunk[0].get("phase") or ""),
-                cast_hint=str(script_chunk[0].get("cast") or ""),
-                story_state=chunk_state, character_bible=bible),
-            schema=TAG_SCHEMA,
-            temperature=options.temperature,
-            num_predict=16384,
-            num_ctx=32768,
-            keep_alive=options.keep_alive,
-            timeout=options.timeout,
-            retries=3,
-        )
-        part = normalize_tagged(tag_raw, script_chunk)
-        chunk_start = len(result)
-        result.extend(part)
-        _notify_partial(options, result)
-        log("Stage B: +%d shots (%d/%d)" % (len(part), len(result), shots))
-        if not part:
-            break
-    if len(result) < shots:
-        log("Note: model produced %d/%d shots" % (len(result), shots))
+    result = run_waterfall(
+        client, premise, shots,
+        generation_model_name=generation_model(options.model),
+        review_model_name=review_model(options.model),
+        tag_model_name=prompt_conversion_model(options.model),
+        setting=options.setting,
+        strip_appearance=options.strip_appearance,
+        style_positive=options.style_positive,
+        timeout=max(options.timeout, 600.0),
+        log=log)
     result = result[:shots]
     renumber_shots(result)
     normalize_shot_casts(result)
-    run_all_reviews(
-        client, review_model(options.model), result, premise,
-        batch_size=10, max_passes=2,
-        timeout=max(options.timeout, 600.0), log=options.log,
-        profiles=profiles)
-    _cycles, unresolved = ensure_final_gate(
-        client, review_model(options.model), result, premise,
-        timeout=max(options.timeout, 600.0), log=options.log,
-        profiles=profiles, max_cycles=5)
-    _mark_story_readiness(result, unresolved, options.log)
     finalize_generated_story(result, premise)
     return result
 

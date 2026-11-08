@@ -47,11 +47,44 @@ def test_save_load_list(tmp_path):
     path = save_project(project, tmp_path)
     assert path.is_file()
     loaded = load_project(path)
-    assert loaded["shots"] == project["shots"]
+    assert loaded["shots"] == [{
+        **project["shots"][0], "ready": True}]
     items = list_projects(tmp_path)
     assert len(items) == 1
     assert items[0]["name"] == "demo"
     assert items[0]["shots"] == 1
+
+
+def test_save_normalizes_missing_or_null_ready_to_true(tmp_path):
+    project = new_project("demo", "a cat", TEMPLATE)
+    project["shots"] = [
+        {"id": "01", "prompt": "a"},
+        {"id": "02", "prompt": "b", "ready": None},
+        {"id": "03", "prompt": "c", "ready": False},
+    ]
+    loaded = load_project(save_project(project, tmp_path))
+    assert loaded["shots"][0]["ready"] is True
+    assert loaded["shots"][1]["ready"] is True
+    assert loaded["shots"][2]["ready"] is False
+
+
+def test_load_project_defaults_missing_ready_to_true(tmp_path):
+    path = tmp_path / "projects" / "old.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"shots": [{"id": "01", "prompt": "x"}]}), encoding="utf-8")
+    loaded = load_project(path)
+    assert loaded["shots"][0]["ready"] is True
+
+
+def test_save_load_preserves_ready_and_findings(tmp_path):
+    project = new_project("demo", "a cat", TEMPLATE)
+    project["shots"] = [{
+        "id": "01", "name": "a", "prompt": "b", "ready": False,
+        "findings": [{"kind": "male_nude", "message": "缺少 nude male"}],
+    }]
+    loaded = load_project(save_project(project, tmp_path))
+    assert loaded["shots"][0]["ready"] is False
+    assert loaded["shots"][0]["findings"] == project["shots"][0]["findings"]
 
 
 def test_session_roundtrip_and_missing_file(tmp_path):

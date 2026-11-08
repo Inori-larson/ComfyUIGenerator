@@ -50,10 +50,12 @@ _CATEGORY_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("belt", (r"\bbelt\b", r"sash", r"waist band")),
 )
 
-# categories that are, by default, removable when present as plain clothing
+# categories that are, by default, removable when present as plain clothing.
+# fixed accessories and garment-attached trim (brooch, collar) are part of the
+# outfit design and are never required to be removed.
 _REMOVABLE_CATEGORIES = {
     "panties", "bra", "leotard", "skirt", "dress", "blazer", "coat", "shirt",
-    "vest", "collar", "brooch", "necktie", "gloves", "socks", "heels", "boots",
+    "vest", "necktie", "gloves", "socks", "heels", "boots",
     "hat", "belt",
 }
 
@@ -67,11 +69,13 @@ _OFF_RE = re.compile(
     r"fallen|folded (?:on|over)|pile of clothes)\b")
 
 _DISPLACED_RE = re.compile(
-    r"\b(pulled (?:down|up|aside|to)|around (?:thighs|knees|legs|waist|ankles)|"
+    r"\b(pulled (?:down|up|aside|to)|around (?:thighs|knees|legs|waist|ankles|"
+    r"wrists|arms|elbows)|"
     r"aside|half[- ]?removed|lowered|pushed (?:down|aside|to)|"
     r"slid(?:den)? (?:down|off|to)|one (?:breast|heel|leg)|lifted|lifted up|"
-    r"open(?:ed)?|unbuttoned|unzipped|off[- ]shoulder|askew|displaced|"
-    r"wardrobe malfunction|slipped off|rolled (?:up|down|to)|flipped up|"
+    r"open(?:ed)?|unbuttoned|unzipped|off[- ]?shoulder|askew|displaced|"
+    r"wardrobe malfunction|slipped off|slipping off|rolled (?:up|down|to)|"
+    r"flipped up|hanging|dangling|"
     r"hem at|skirt flipped|french tip|exposed (?:breast|chest|nipple|pussy))\b")
 
 _TORN_RE = re.compile(
@@ -294,6 +298,7 @@ def clothing_repair_plan(shots: list[dict[str, Any]],
         prev_state = "none"
         damaged = False
         location: str | None = None
+        displaced_run = 0
         for i, entry in enumerate(timeline):
             if entry is None:
                 continue
@@ -310,13 +315,16 @@ def clothing_repair_plan(shots: list[dict[str, Any]],
                        "保留 torn/ripped/hole 破损标签，破损永久，"
                        "不得恢复为完整基础标签")
 
-            if entry["worn"] and state in ("displaced", "off") and not is_weighted:
-                tags = _joined(entry, "worn", "displaced", "off")
-                keep = _joined(entry, "displaced", "off")
-                record(shot_id, category, False, "conflicting_states",
+            if entry["ambiguous"]:
+                tags = _joined(entry, "worn", "off")
+                keep = _joined(entry, "off")
+                record(shot_id, category, is_weighted, "conflicting_states",
                        tags,
-                       "同一服装只能保留一个与剧情阶段相符的状态；"
-                       "删除冲突的基础穿着标签", keep=keep)
+                       ("该加权服装同一镜头既穿着又离体，二者矛盾；"
+                        "只保留一个 active 状态，删除 on floor/removed 等离体标签"
+                        if is_weighted else
+                        "该服装同时既穿着又离体，二者矛盾；"
+                        "只保留与剧情阶段相符的一个状态"), keep=keep)
 
             if len(entry["locations"]) > 1:
                 record(shot_id, category, is_weighted, "multiple_locations",
@@ -339,7 +347,6 @@ def clothing_repair_plan(shots: list[dict[str, Any]],
                     if is_weighted else "常规服装脱下后保持 OFF，删除穿回标签")
                 record(shot_id, category, is_weighted, kind,
                        _joined(entry, "worn", "displaced"), expected)
-
             if entry["locations"]:
                 current = next(iter(entry["locations"]))
                 if location is not None and current != location and not restoring:
@@ -348,6 +355,19 @@ def clothing_repair_plan(shots: list[dict[str, Any]],
                            "脱后位置全片统一为 %s，把位置标签改回 %s"
                            % (location, location))
                 location = current
+            if state == "displaced":
+                displaced_run += 1
+                if (not is_weighted and displaced_run >= 3
+                        and category in _REMOVABLE_CATEGORIES):
+                    record(shot_id, category, False, "displaced_stall",
+                           _joined(entry, "worn", "displaced"),
+                           "该外衣已半脱/半挂多镜却没有继续，动作不得停在中途；"
+                           "请在本镜把它完全脱下成离体状态，并注明固定放置位置"
+                           "（如 discarded %s on chair），删除半挂/仍穿着标签"
+                           % category)
+            elif state != "none":
+                displaced_run = 0
+
             if state != "none":
                 prev_state = state
 
@@ -365,6 +385,7 @@ _FIX_KIND_TEXT = {
     "weighted_reworn": "权重服装全脱后又穿回；恢复为半脱/移位 active 状态",
     "reworn": "常规服装脱后穿回；保持 OFF",
     "location_jump": "脱后位置跳变；全片统一放置位置",
+    "displaced_stall": "外衣半脱/半挂后多镜未继续脱下；须在本镜脱成离体",
 }
 
 

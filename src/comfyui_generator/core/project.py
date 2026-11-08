@@ -62,7 +62,22 @@ def project_file(root: Path, project: dict[str, Any]) -> Path:
         "%s.json" % project["id"])
 
 
+def shot_is_ready(shot: Any) -> bool:
+    if not isinstance(shot, dict):
+        return True
+    value = shot.get("ready")
+    return "ready" not in shot or value is not False
+
+
+def _normalize_loaded_project(data: dict[str, Any]) -> dict[str, Any]:
+    for shot in data.get("shots") or []:
+        if isinstance(shot, dict):
+            shot["ready"] = shot_is_ready(shot)
+    return data
+
+
 def save_project(project: dict[str, Any], root: Path) -> Path:
+    _normalize_loaded_project(project)
     project["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S")
     path = project_file(root, project)
     tmp = path.with_suffix(".tmp")
@@ -73,7 +88,8 @@ def save_project(project: dict[str, Any], root: Path) -> Path:
 
 def load_project(path: str | Path) -> dict[str, Any]:
     path = Path(path)
-    return json.loads(path.read_text(encoding="utf-8"))
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return _normalize_loaded_project(data)
 
 
 def session_file(root: Path) -> Path:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from contextlib import contextmanager
@@ -33,7 +34,8 @@ class TraceSession:
                  meta: dict[str, Any] | None = None):
         log_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.stem = "%s_%s" % (stamp, kind or "run")
+        unique = "%d_%d" % (os.getpid(), id(self))
+        self.stem = "%s_%s_%s" % (stamp, kind or "run", unique)
         self.jsonl_path = log_dir / (self.stem + ".jsonl")
         self.text_path = log_dir / (self.stem + ".log")
         self._jsonl = self.jsonl_path.open("w", encoding="utf-8")

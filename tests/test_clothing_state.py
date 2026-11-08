@@ -49,6 +49,30 @@ def test_weighted_allowed_states_pass():
     assert clothing_gate_findings(shots, PREMISE) == {}
 
 
+def test_weighted_worn_and_off_conflict_is_detected():
+    shots = [
+        {"id": "01", "prompt": "1girl, black platform heels"},
+        {"id": "02", "prompt": "1girl, black platform heels, heels on floor"},
+    ]
+    plan = clothing_repair_plan(shots, PREMISE)
+    fixes = [f for f in plan["fixes"] if f["shot"] == "02"]
+    assert any(f["kind"] == "conflicting_states"
+               and f["category"] == "heels" for f in fixes)
+    assert any("active" in f["expected"] for f in fixes
+               if f["kind"] == "conflicting_states")
+
+
+def test_unweighted_conflicting_states_still_detected():
+    shots = [
+        {"id": "01", "prompt": "1girl, black blazer"},
+        {"id": "02", "prompt": "1girl, black blazer, blazer on chair"},
+    ]
+    plan = clothing_repair_plan(shots, PREMISE)
+    assert any(f["shot"] == "02" and f["kind"] == "conflicting_states"
+               and f["weighted"] is False for f in plan["fixes"])
+
+
+
 def test_removed_garment_location_is_stable():
     shots = [
         {"id": "01", "prompt": "1girl, black blazer on floor"},
@@ -198,35 +222,20 @@ def test_consecutive_identical_run_is_hard_blocker():
     assert any("consecutive duplicate" in b for b in blockers)
 
 
-def test_ensure_final_gate_loops_until_clear():
+def test_final_gate_clears_after_corrected_shot():
     clean_prompt = ("1girl, discarded frilled black leotard on floor, "
                     "discarded black blazer on floor, torn pantyhose, "
                     "black lace panties, panties aside, black lace bra")
-    repaired = {"shots": [
-        {"id": "01", "valid": False, "issues": ["fixed"],
-         "prompt": clean_prompt}]}
-
-    class GateClient:
-        def __init__(self):
-            self.calls = 0
-
-        def chat_json(self, *a, **k):
-            self.calls += 1
-            return repaired
-
     initial = [{"id": "01",
                 "prompt": "1girl, black blazer, frilled black leotard, "
                           "leotard skirt rolled up to waist, "
                           "torn pantyhose, black lace panties, "
                           "panties aside, black lace bra"}]
-    client = GateClient()
-    performed, remaining = ai_review.ensure_final_gate(
-        client, "deepseek-v4.1-flash", initial, PREMISE, max_cycles=3)
-    assert performed >= 1
-    assert client.calls >= 1
-    assert remaining == []
-    plan = clothing_repair_plan(initial, PREMISE)
-    assert plan["fixes"] == []
+    assert ai_review.final_gate_blockers(initial, PREMISE)
+
+    corrected = [{"id": "01", "prompt": clean_prompt}]
+    assert ai_review.final_gate_blockers(corrected, PREMISE) == []
+    assert clothing_repair_plan(corrected, PREMISE)["fixes"] == []
 
 
 def test_weighted_removed_midfilm_is_detected_even_if_it_returns():

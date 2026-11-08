@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from comfyui_generator.core.external_llm import (
     EXTERNAL_LLM_MODEL,
     ExternalLLMClient,
+    _first_json_value,
     resolve_external_model,
 )
 
@@ -46,7 +47,7 @@ def test_external_client_parses_openai_json(monkeypatch):
     assert captured["body"]["thinking"] == {"type": "disabled"}
 
 
-def test_external_client_retries_with_larger_budget_on_length(monkeypatch):
+def test_external_client_retries_without_doubling_budget(monkeypatch):
     cfg = SimpleNamespace(base_url="https://example.test/v1", api_key="",
                           model="test-model", timeout=30)
     client = ExternalLLMClient(cfg)
@@ -73,11 +74,10 @@ def test_external_client_retries_with_larger_budget_on_length(monkeypatch):
         "test-model", [{"role": "user", "content": "x"}],
         num_predict=4096, retries=1)
     assert result == {"shots": []}
-    assert resolve_external_model(cfg, "old-model") == "test-model"
-    assert resolve_external_model(None, "supplied-model") == "supplied-model"
-    assert resolve_external_model(None, "") == EXTERNAL_LLM_MODEL
     assert bodies[0]["max_tokens"] == 4096
-    assert bodies[1]["max_tokens"] == 8192
+    assert bodies[1]["max_tokens"] == 4096
+    assert len(bodies[1]["messages"]) == 2
+    assert "截断" in bodies[1]["messages"][-1]["content"]
 
 
 def test_external_client_retries_on_incomplete_json_with_stop(monkeypatch):
@@ -148,3 +148,36 @@ def test_external_client_accepts_array_root(monkeypatch):
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     assert client.chat_json("test-model", [{"role": "user", "content": "x"}]) == {
         "shots": [{"id": "01"}]}
+
+
+def test_first_json_value_ignores_trailing_braces():
+    payload = '{"shots":[{"id":7,"prompt":"a: [\\"x\\"]"}]}' + " }" * 100
+    assert json.loads(_first_json_value(payload))["shots"][0]["id"] == 7
+
+
+def test_first_json_value_respects_braces_inside_strings():
+    payload = 'noise {"a":"}{ }","b":[1]} trailing }}}'
+    assert json.loads(_first_json_value(payload)) == {"a": "}{ }", "b": [1]}
+
+
+def test_first_json_value_handles_array_root():
+    payload = '[{"id": 1}, {"id": 2}]' + "]" * 40
+    assert json.loads(_first_json_value(payload))[1]["id"] == 2
+
+
+def test_external_client_accepts_json_with_trailing_braces(monkeypatch):
+    cfg = SimpleNamespace(base_url="https://example.test/v1", api_key="",
+                          model="test-model", timeout=30)
+    client = ExternalLLMClient(cfg)
+    content = '{"shots": [{"id": 7}]}' + " }" * 100
+
+    def fake_urlopen(req, timeout):
+        return FakeResponse({
+            "choices": [{"finish_reason": "stop",
+                         "message": {"content": content}}]
+        })
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    assert client.chat_json(
+        "test-model", [{"role": "user", "content": "x"}]) == {
+            "shots": [{"id": 7}]}
