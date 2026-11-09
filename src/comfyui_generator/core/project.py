@@ -12,6 +12,8 @@ from typing import Any
 PROJECT_VERSION = 1
 SESSION_FILE = "ui_session.json"
 PARTIAL_STORY_FILE = "story_partial.json"
+PLOT_HISTORY_FILE = "plot_history.json"
+PLOT_HISTORY_LIMIT = 50
 _CONFIGURED_ROOT: Path | None = None
 _CONFIGURED_PROJECTS: Path | None = None
 _CONFIGURED_SINGLE_PROJECTS: Path | None = None
@@ -147,6 +149,46 @@ def clear_story_partial(root: Path) -> None:
     path = partial_story_file(root)
     if path.is_file():
         path.unlink()
+
+
+def plot_history_file(root: Path) -> Path:
+    path = root / "cache" / PLOT_HISTORY_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def load_plot_history(root: Path) -> list[dict[str, Any]]:
+    path = plot_history_file(root)
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    items = data.get("items") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict)]
+
+
+def add_plot_history(root: Path, plot: str,
+                     *, max_items: int = PLOT_HISTORY_LIMIT) -> list[dict[str, Any]]:
+    plot = str(plot or "").strip()
+    if not plot:
+        return load_plot_history(root)
+    items = [item for item in load_plot_history(root)
+             if str(item.get("plot", "")).strip() != plot]
+    items.insert(0, {
+        "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "plot": plot,
+    })
+    del items[max_items:]
+    path = plot_history_file(root)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"items": items}, ensure_ascii=False, indent=2),
+                   encoding="utf-8")
+    tmp.replace(path)
+    return items
 
 
 def list_projects(root: Path) -> list[dict[str, Any]]:

@@ -1,5 +1,6 @@
 from comfyui_generator.core.action_state import (
     contaminated_action_categories,
+    performed_action_categories,
     prompt_action_categories,
 )
 
@@ -71,3 +72,26 @@ def test_oral_residual_is_still_strictly_contamination():
     assert contaminated_action_categories(
         "1girl, cunnilingus, cum in mouth, swallowing",
         "男主埋头舔逼") == {"blowjob"}
+
+
+def test_negated_action_words_are_not_performed():
+    assert performed_action_categories("手指揉阴，无性交。") == set()
+    assert performed_action_categories("前戏，没有口交。") == set()
+    assert performed_action_categories("她继续自慰，并未射精。") == set()
+
+
+def test_affirmed_actions_still_performed():
+    assert "vaginal_sex" in performed_action_categories(
+        "男主鸡巴"
+        "插入阴道，阴茎没入。")
+    assert "creampie" in performed_action_categories(
+        "男主内射，精液溢出。")
+
+
+def test_penis_near_body_word_without_ejaculation_is_not_cum_shot():
+    text = ("女主蹲在男主面前握住阴茎，伸舌舔弄后含入龟头缓慢吞吐，"
+            "男主手悬在她头顶，腿部局部入镜")
+    cats = performed_action_categories(text)
+    assert "blowjob" in cats
+    assert "cum_shot" not in cats
+

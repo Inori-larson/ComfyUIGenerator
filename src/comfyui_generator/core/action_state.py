@@ -1,143 +1,214 @@
-"""Cross-stage action contamination detection.
+"""Action semantics: who does what to which target.
 
-The software never authors semantics. It only compares which high-salience
-sexual ACTIONS the English prompt asserts against the actions the locked
-script describes. A prompt tag for an action the script never performs is
-cross-stage contamination (a tag from a different beat/milestone).
+The software never authors semantics. It only *recognizes* high-salience
+actions so it can (a) verify a shot stays inside the milestone that owns
+the action and (b) check that English prompt tags are backed by the script.
 
-Both the prompt tag patterns and the script evidence patterns are language
-level (English Booru tags and generic Chinese action phrases). Nothing here
-is tied to a specific character, outfit, shot number, or story.
+Recognition is data-driven. Each action is declared ONCE as a semantic
+specification: the actor that performs it, the target it acts on, and the
+verbs that express it. Every classifier is derived from that single table,
+so there is no duplicated, hand-synced regex to drift apart.
+
+An action counts as *performed* only when the text asserts it really
+happens. Words that merely mention an action inside a negation ("无性交"),
+an intention/dialogue ("祈求…做爱"), or with a non-matching target
+("手指插入发丝", "阴茎插入口中") do not count.
 """
 
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 
-# Strict English Booru tags that explicitly assert a sexual action category.
-PROMPT_ACTION_TAGS: dict[str, tuple[str, ...]] = {
-    "blowjob": (
-        r"^cum in mouth$", r"^swallowing cum$", r"^swallowing semen$",
-        r"^fellatio$", r"^penis in mouth$", r"^deepthroat$", r"^blowjob$",
+
+# ---------------------------------------------------------------------------
+# Lexical building blocks. These describe roles/targets, never story content.
+# ---------------------------------------------------------------------------
+
+# Male / penis actors vs. the female's own hand (masturbation).
+_PENIS_ACTOR = r"(?:鸡巴|阴茎|肉棒|龟头|肉棍|阳具)"
+_MALE_PERSON = r"(?:男主|男人|男生|男孩)"
+_MALE_ACTOR = r"(?:%s|%s)" % (_PENIS_ACTOR, _MALE_PERSON)
+_FINGER_ACTOR = r"(?:手指|两根手指|两指|指尖|指头|中指|无名指|指腹)"
+
+# Targets.
+_VAGINA_TARGET = r"(?:阴道口|阴道|逼|穴|肉穴|小穴|穴口|逼口|花穴|阴户|下体|私处)"
+_MOUTH_TARGET = r"(?:嘴|嘴里|口中|口里|唇|口腔|喉咙|喉|口内)"
+_HAIR_TARGET = r"(?:发丝|头发|发间)"
+_BODY_SURFACE = r"(?:脸|面|面容|胸口|胸|乳房|乳头|双乳|乳|小腹|肚子|腹部|肚|身上|一身|大腿|腿)"
+
+# Insertion / thrusting verbs and other action verbs.  "吞入" is NOT here
+# because it is ambiguous (oral vs vaginal) and must be bound to a vaginal
+# target explicitly; see vaginal_sex phrases.
+_INSERT_VERB = r"(?:插[入进]|没入|进入|挺进|顶入|塞入|送入|纳入|套入)"
+_THRUST_VERB = r"(?:抽插|抽送|顶弄|挺送|顶撞|律动)"
+_ORAL_VERB = r"(?:吞[咽下]?|含[入住咽]?|吸吮|吮吸|吞吐)"
+_LICK_VERB = r"(?:舔[了着过]?|舔弄|舔舐|口[水活])"
+# Ejaculation / semen movement.
+_EJAC_VERB = r"(?:射精|射[出在满到进]?|喷[出溅在到满]?|迸出|涌出|溢出|溢流|流出|灌满|射出|溅[在着到满])"
+_SEMEN = r"(?:精液|白浊)"
+
+
+@dataclass(frozen=True)
+class ActionSpec:
+    """Structural declaration of one recognizable action."""
+
+    # Phrases that assert the action. Patterns bind actor/action/target by
+    # semantics rather than a fixed word window, so flexible Chinese word
+    # order is still recognized.
+    phrases: tuple[str, ...]
+    # Whole English Booru tags asserting the same action.
+    tags: tuple[str, ...] = ()
+    # Phrases that only show the *trace/residue* of an action (e.g. dried
+    # semen on skin). These back the corresponding tag but do not assert the
+    # action is happening now.
+    residual: tuple[str, ...] = ()
+
+
+# Single source of truth.
+ACTION_SPECS: dict[str, ActionSpec] = {
+    "blowjob": ActionSpec(
+        phrases=(
+            rf"深喉|口交",
+            # penis ... mouth target (either order) within a clause
+            rf"{_PENIS_ACTOR}[^，。；、,.\n]{{0,10}}{_MOUTH_TARGET}",
+            rf"{_MOUTH_TARGET}[^，。；、,.\n]{{0,8}}{_PENIS_ACTOR}",
+            rf"{_PENIS_ACTOR}[^，。；、,.\n]{{0,6}}{_ORAL_VERB}",
+            rf"{_ORAL_VERB}[^，。；、,.\n]{{0,6}}{_PENIS_ACTOR}",
+        ),
+        tags=(
+            r"^cum in mouth$", r"^swallowing cum$", r"^swallowing semen$",
+            r"^fellatio$", r"^penis in mouth$", r"^deepthroat$", r"^blowjob$",
+        ),
     ),
-    "cum_shot": (
-        r"^cum on face$", r"^facial$", r"^cum on breasts?$",
-        r"^cum on stomach$", r"^cum on body$", r"^cum in hair$",
+    "cum_shot": ActionSpec(
+        phrases=(
+            rf"颜射",
+            # semen + ejaculation/splash verb + body surface; a verb is
+            # required so mere co-occurrence ("阴茎…男主面前") cannot fire.
+            rf"{_SEMEN}[^。\n]{{0,24}}{_EJAC_VERB}[^。\n]{{0,12}}{_BODY_SURFACE}",
+            rf"{_PENIS_ACTOR}[^。\n]{{0,24}}{_EJAC_VERB}[^。\n]{{0,12}}{_BODY_SURFACE}",
+            # body surface + splash/cover verb + semen (surface-first order)
+            rf"{_BODY_SURFACE}[^。\n]{{0,12}}(?:{_EJAC_VERB})[^。\n]{{0,8}}{_SEMEN}",
+            rf"{_BODY_SURFACE}[^。\n]{{0,12}}(?:溅[着到在上]|沾[满在着]|喷[到在上溅])[^。\n]{{0,8}}{_SEMEN}",
+        ),
+        tags=(
+            r"^cum on face$", r"^facial$", r"^cum on breasts?$",
+            r"^cum on stomach$", r"^cum on body$", r"^cum in hair$",
+        ),
+        residual=(
+            # body surface carrying semen/white-turbid residue, allowing a
+            # connector such as 沾着/沾/溅上 between surface and semen word
+            rf"{_BODY_SURFACE}[^，。；、,.\n]{{0,6}}(?:沾[着了]?|溅[上到在着]?|残留|留有|有)[^，。；、,.\n]{{0,4}}(?:{_SEMEN}|精痕|精斑|精渍)",
+            # body surface carrying semen/white-turbid residue, any order
+            rf"{_BODY_SURFACE}[^，。；、,.\n]{{0,10}}(?:{_SEMEN}|精痕|精斑|精渍)",
+            rf"(?:{_SEMEN}|精痕|精斑|精渍)[^，。；、,.\n]{{0,10}}{_BODY_SURFACE}",
+            # staleness words with semen, e.g. 精液半干 / 干涸精痕
+            rf"(?:{_SEMEN})[^，。；、,.\n]{{0,6}}(?:半干|干涸|已干|干透|干了)",
+            rf"(?:干涸?|半干)[^，。；、,.\n]{{0,4}}(?:{_SEMEN}|精)",
+        ),
     ),
-    "creampie": (
-        r"^creampie$", r"^cum in pussy$", r"^cum in vagina$",
-        r"^cum overflow$", r"^cum dripping from pussy$",
+    "creampie": ActionSpec(
+        phrases=(
+            rf"内射",
+            # semen movement out of vagina; source may be named before or
+            # after within the same clause
+            rf"{_SEMEN}[^，。；、,.\n]{{0,12}}(?:涌出|汩汩[涌流]出|喷出|迸出|溢出|溢流|流出)",
+            rf"{_VAGINA_TARGET}[^，。；、,.\n]{{0,10}}{_SEMEN}[^，。；、,.\n]{{0,8}}(?:涌出|喷出|溢出|迸出|流出)",
+            rf"{_PENIS_ACTOR}[^，。；、,.\n]{{0,6}}(?:射[入满进]?|射精)[^，。；、,.\n]{{0,8}}{_VAGINA_TARGET}",
+        ),
+        tags=(
+            r"^creampie$", r"^cum in pussy$", r"^cum in vagina$",
+            r"^cum overflow$", r"^cum dripping from pussy$",
+        ),
     ),
-    "cunnilingus": (
-        r"^cunnilingus$", r"^licking pussy$", r"^licking vagina$",
-        r"^mouth on pussy$", r"^tongue in pussy$",
+    "cunnilingus": ActionSpec(
+        phrases=(
+            rf"{_MALE_ACTOR}[^，。；、,.\n]{{0,8}}{_LICK_VERB}[^，。；、,.\n]{{0,6}}{_VAGINA_TARGET}",
+            rf"埋[头首][^，。；、,.\n]{{0,4}}{_LICK_VERB}",
+            rf"{_VAGINA_TARGET}[^，。；、,.\n]{{0,6}}{_LICK_VERB}",
+        ),
+        tags=(
+            r"^cunnilingus$", r"^licking pussy$", r"^licking vagina$",
+            r"^mouth on pussy$", r"^tongue in pussy$",
+        ),
     ),
-    "vaginal_sex": (
-        r"^penis in pussy$", r"^penis in vagina$", r"^vaginal sex$",
-        r"^missionary$", r"^cowgirl position$", r"^doggystyle$",
-        r"^sex from behind$", r"^pussy penetration$", r"^intercourse$",
+    "vaginal_sex": ActionSpec(
+        phrases=(
+            # penis + insertion verb with vaginal target, allowing the shot's
+            # commas between them (whole-shot window, not single clause)
+            rf"{_PENIS_ACTOR}[^。\n]{{0,40}}{_INSERT_VERB}[^。\n]{{0,12}}{_VAGINA_TARGET}",
+            rf"{_VAGINA_TARGET}[^。\n]{{0,40}}{_PENIS_ACTOR}[^。\n]{{0,12}}{_INSERT_VERB}",
+            rf"{_VAGINA_TARGET}[^。\n]{{0,20}}{_INSERT_VERB}",
+            # "将阴茎整根吞入" counts as coitus only when a vaginal target was
+            # named earlier in the same shot (oral 吞入 without it stays blowjob)
+            rf"{_VAGINA_TARGET}[^。\n]{{0,60}}吞入",
+            # penis + insertion verb even when the target is implicit, e.g.
+            # "阴茎没入" (penis entering is itself the coital signal)
+            rf"{_PENIS_ACTOR}[^。\n]{{0,6}}{_INSERT_VERB}",
+            # penis thrusting; actor may be in a preceding clause
+            rf"{_PENIS_ACTOR}[^。\n]{{0,40}}{_THRUST_VERB}",
+            rf"(?:{_MALE_PERSON})[^。\n]{{0,40}}{_THRUST_VERB}",
+            # bare nouns accepted only when a penis/male actor is also present
+            rf"{_PENIS_ACTOR}[^。\n]{{0,16}}(?:后入|骑乘|性交)",
+            rf"{_MALE_PERSON}[^。\n]{{0,16}}(?:后入|骑乘|性交)",
+        ),
+        tags=(
+            r"^penis in pussy$", r"^penis in vagina$", r"^vaginal sex$",
+            r"^missionary$", r"^cowgirl position$", r"^doggystyle$",
+            r"^sex from behind$", r"^pussy penetration$", r"^intercourse$",
+        ),
     ),
 }
 
-# Explicit performed-action phrases in a Chinese script (strong evidence).
-SCRIPT_STRONG_PATTERNS: dict[str, tuple[str, ...]] = {
-    "blowjob": (
-        r"含[住入]?[他的]?鸡巴", r"鸡巴含[入在]?", r"舔[他的]?龟头",
-        r"深喉", r"吞吐[鸡巴]?", r"口交", r"吞[入咽下][了]?精",
-        r"鸡巴整根吞", r"嘴[里中]含",
-    ),
-    "cum_shot": (
-        r"颜射", r"射[在满][了]?[她]?.{0,6}(脸|面|胸|肚子|身)",
-        r"喷[了满][她]?.{0,3}(脸|身|胸口)", r"精液[沾溅射][在满]",
-        r"精液.{0,4}(半干|干涸|已干|干透|干了|干)",
-        r"(沾着|沾|挂着|挂|残留|留着|留有|带).{0,4}(精液|白浊)",
-        r"(精痕|精斑|精渍|干涸精)",
-    ),
-    "creampie": (
-        r"内射", r"射[满进][了]?.{0,4}(逼|阴道|穴)",
-        r"精液.{0,8}(溢出|溢流|涌出|喷出|迸出)",
-        r"(大量)?精液.{0,3}(涌出|喷出|迸出)",
-        r"射在逼里",
-        r"逼口.{0,4}精", r"从逼口.{0,3}精",
-    ),
-    "cunnilingus": (
-        r"舔[^，。；、,.]{0,4}逼",
-        r"舔[她的]?阴", r"舔.{0,3}(阴唇|阴蒂|阴部|花穴)",
-        r"埋[头首].{0,3}舔", r"口[水活].{0,3}舔",
-    ),
-    "vaginal_sex": (
-        r"鸡巴.{0,2}插[入进]",
-        r"阴茎.{0,3}(插[入进]|没入|进入|挺进|顶)",
-        r"龟头[刚]?没入",
-        r"(鸡巴|阴茎|肉棒).{0,6}(抽插|抽送|顶弄|挺送)",
-        r"鸡巴.{0,3}抵.{0,3}逼口",
-        r"阴茎.{0,4}(逼口|阴道口|穴口)",
-        r"性交", r"后入", r"骑乘", r"疯狂顶[弄撞]",
-        r"挺[腰身].{0,3}(插|顶|送)",
-    ),
+
+
+# Compile every phrase once.
+_COMPILED: dict[str, tuple[re.Pattern[str], ...]] = {
+    category: tuple(re.compile(p) for p in spec.phrases)
+    for category, spec in ACTION_SPECS.items()
 }
-
-# Clauses where an insertion/thrusting verb is present. Vaginal intercourse
-# requires the male/penis as the actor and a vaginal/coital action; finger
-# verbs are masturbation and oral "swallow" must not count as penetration.
-_PENETRATION_VERB_RE = re.compile(
-    r"(插[入进]|抽插|抽送|顶弄|挺送|没入|进入|"
-    r"纳入|套入|坐沉|沉腰|沉入)")
-_ORAL_SWALLOW_RE = re.compile(r"(吞[入咽]|含[入住]?)")
-_VAGINAL_CONTEXT_RE = re.compile(r"(阴道|逼|穴|阴户|下体|腰|胯|交合|骑)")
-_PENIS_ACTOR_RE = re.compile(r"(鸡巴|阴茎|肉棒|龟头|男主)")
-_FINGER_ACTOR_RE = re.compile(r"(手指|两指|两根手指|指尖|指头)")
-_CLAUSE_SPLIT_RE = re.compile(r"[，。；、,.\n]")
-
-# Broader, still action-specific phrases (any topic reference at all,
-# including dialogue or nouns). Presence suppresses the contamination flag.
-SCRIPT_WEAK_PATTERNS: dict[str, tuple[str, ...]] = {
-    "blowjob": (
-        r"口交", r"含.{0,3}鸡巴", r"鸡巴.{0,3}(嘴|口|唇|喉)",
-        r"(嘴|唇|口).{0,4}鸡巴", r"舔.{0,3}龟头", r"深喉", r"吞吐",
-        r"吞[入咽].{0,3}精",
-    ),
-    "cum_shot": (
-        r"颜射", r"射.{0,6}(脸|面)", r"喷.{0,4}(脸|面|一身)",
-        r"精液.{0,4}(脸|面|胸)",
-        r"精液.{0,4}(半干|干涸|已干|干透|干了|干)",
-        r"(沾着|沾|挂着|挂|残留|留着|留有).{0,4}(精液|白浊)",
-        r"(精痕|精斑|精渍|干涸精)",
-    ),
-    "creampie": (
-        r"内射", r"射.{0,3}(逼|阴道|穴)", r"精液.{0,8}(溢出|溢流)",
-        r"逼里", r"逼口.{0,4}精",
-    ),
-    "cunnilingus": (
-        r"舔.{0,3}(逼|阴|阴唇|阴蒂|阴部|花穴)", r"舔[舐弄]",
-        r"(嘴|舌|唇).{0,3}(逼|阴|阴部)", r"口[水活]",
-    ),
-    "vaginal_sex": (
-        r"做[爱]", r"性交", r"抽插", r"鸡巴.{0,3}插", r"插入.{0,3}(阴道|逼|穴)",
-        r"阴茎.{0,2}插", r"(顶|挺).{0,3}(插|弄|送)", r"骑乘", r"跨坐.{0,3}插",
-        r"龟头.{0,3}没入", r"(抵|插).{0,3}逼口",
-    ),
+_RESIDUAL_COMPILED: dict[str, tuple[re.Pattern[str], ...]] = {
+    category: tuple(re.compile(p) for p in spec.residual)
+    for category, spec in ACTION_SPECS.items()
 }
 
 
 # ---------------------------------------------------------------------------
-# Presence (who is in the shot). This is orthogonal to action category and is
-# the master gate: a later action cannot happen before its character exists.
+# Context masking. Before recognition, remove text where an action word does
+# not assert performance: negations and intentions/dialogue.
 # ---------------------------------------------------------------------------
 
-FEMALE_TOKENS = (
-    "1girl", "女主", "女孩", "少女", "她",
-)
-MALE_TOKENS_EN = (
-    "1boy", "male", "boy", "man",
-)
-MALE_TOKENS_ZH = (
-    "男主", "男人", "男生", "男孩",
-)
-# Body parts / nouns that, without a male token, are only references and must
-# not by themselves prove the male is present.
-_MENTION_ONLY_RE = re.compile(
-    r"(他的|鸡巴|阴茎|肉棒|龟头|男主|男人|男生|男孩)")
+_NEGATION_RE = re.compile(
+    r"(?:无|没有|并未|并无|未|不是|并没有|还没有|尚未|毫不)"
+    r"[^，。；、,.\n]{0,8}")
+
+_INTRODUCER_RE = re.compile(
+    r"(?:想|想要|希望|渴望|幻想|想象|脑补|期待|打算|计划|准备|预谋|暗自|心中|"
+    r"祈求|哀求|恳求|请求|要求|求|低语|低声说|说|说道|问|叫|喊|呢喃|低吟)"
+    r"[^，。；、,.\n]{0,10}")
+
+# A span masked by one of these is replaced with neutral characters so that
+# action words inside it cannot match.
+def _mask_spans(text: str, regex: re.Pattern[str]) -> str:
+    def blank(match: re.Match[str]) -> str:
+        return "〇" * len(match.group(0))
+
+    return regex.sub(blank, str(text or ""))
+
+
+def _without_nonperforming_context(text: str) -> str:
+    value = _mask_spans(text, _NEGATION_RE)
+    value = _mask_spans(value, _INTRODUCER_RE)
+    return value
+
+
+# ---------------------------------------------------------------------------
+# Presence (who is in the shot). Orthogonal to action category.
+# ---------------------------------------------------------------------------
+
+MALE_TOKENS_EN = ("1boy", "male", "boy", "man")
+MALE_TOKENS_ZH = ("男主", "男人", "男生", "男孩")
 
 
 def _tokens(text: str) -> set[str]:
@@ -145,14 +216,9 @@ def _tokens(text: str) -> set[str]:
             if t.strip()}
 
 
-def male_is_present(*, cast: str = "", present_characters: Any = None,
+def male_is_present(*, cast: str = "", present_characters=None,
                     text: str = "") -> bool:
-    """Whether the male is actually present in a shot.
-
-    Requires an explicit male token in the cast/present_characters, or an
-    explicit male actor in the text. A bare body-part mention inside a
-    female-only clause is not enough.
-    """
+    """Whether the male is actually present (explicit token required)."""
     cast_tokens = _tokens(cast)
     if any(tok in cast_tokens for tok in MALE_TOKENS_EN):
         return True
@@ -175,113 +241,57 @@ def female_is_present(*, cast: str = "", text: str = "") -> bool:
     return any(tok in str(text) for tok in ("女主", "女孩", "少女", "她"))
 
 
+# ---------------------------------------------------------------------------
+# Public classifiers.
+# ---------------------------------------------------------------------------
+
 def _prompt_tags(prompt: str) -> list[str]:
     return [tag.strip().lower() for tag in str(prompt or "").split(",")
             if tag.strip()]
 
 
-
 def prompt_action_categories(prompt: str) -> set[str]:
-    """High-salience action categories asserted by the English prompt tags."""
+    """High-salience actions asserted by English Booru tags."""
     categories: set[str] = set()
     for tag in _prompt_tags(prompt):
-        for category, patterns in PROMPT_ACTION_TAGS.items():
-            if any(re.search(pattern, tag) for pattern in patterns):
+        for category, spec in ACTION_SPECS.items():
+            if any(re.search(pattern, tag) for pattern in spec.tags):
                 categories.add(category)
     return categories
 
 
-def _script_categories(script: str,
-                       table: dict[str, tuple[str, ...]]) -> set[str]:
-    text = str(script or "")
-    return {category for category, patterns in table.items()
-            if any(re.search(pattern, text) for pattern in patterns)}
-
-
-# Semen landing on a body surface (face/chest/stomach) is strong evidence
-# an external cumshot already happened.
-_BODY_SURFACE_RE = re.compile(
-    r"(脸|面|胸口|胸|小腹|肚子|腹部|肚|身[上体]|大腿|腿)")
-_SEMEN_LANDING_RE = re.compile(r"(精液|白浊)")
-_SEMEN_LANDING_VERB_RE = re.compile(
-    r"(喷溅|喷[在到满溅]|溅[在着到满]|射[在满到]|"
-    r"沾满?|沾[在满]|溅到|喷到)")
-
-
-def _has_external_cumshot(text: str) -> bool:
-    semen_seen = False
-    for clause in _CLAUSE_SPLIT_RE.split(str(text or "")):
-        if _SEMEN_LANDING_RE.search(clause):
-            semen_seen = True
-        landing = _SEMEN_LANDING_VERB_RE.search(clause)
-        surface = _BODY_SURFACE_RE.search(clause)
-        oral = _ORAL_CONTEXT_RE.search(clause)
-        if landing and surface and (semen_seen or _SEMEN_LANDING_RE.search(clause)):
-            if oral and not re.search(
-                    r"(脸|胸口|胸|小腹|肚子|腹部|身|大腿|腿)", clause):
-                continue
-            return True
-    return False
-
-
-# Semen flowing/ejaculated from the vagina is strong evidence ejaculation
-# already happened internally. Detection is source-aware (must reference a
-# vaginal source), so oral semen or residual touch is not mistaken for it.
-_VAGINAL_SOURCE_RE = re.compile(r"(阴道口|阴道|逼口|穴口|穴内|体内|阴部|阴户)")
-_SEMEN_FLOW_RE = re.compile(r"(精液|白浊)")
-_SEMEN_DIRECTION_RE = re.compile(
-    r"(涌出|汩汩涌出|喷出|迸出|溢出|溢流|流出|往外流|灌满|射出|喷溅)")
-_ORAL_CONTEXT_RE = re.compile(r"(嘴[角里]|口[腔内]|喉咙|下巴)")
-
-
-def _has_internal_ejaculation(text: str) -> bool:
-    source = _VAGINAL_SOURCE_RE.search(str(text or ""))
-    if not source:
-        return False
-    after = str(text or "")[source.start():]
-    before = str(text or "")[:source.start()]
-    if _SEMEN_DIRECTION_RE.search(after) and _SEMEN_FLOW_RE.search(after):
-        return True
-    if _SEMEN_FLOW_RE.search(before) and _SEMEN_DIRECTION_RE.search(after):
-        return True
-    return False
-
-
-def _has_penile_penetration(text: str) -> bool:
-    penis_seen = False
-    for clause in _CLAUSE_SPLIT_RE.split(str(text or "")):
-        has_verb = bool(_PENETRATION_VERB_RE.search(clause))
-        has_penis = bool(_PENIS_ACTOR_RE.search(clause))
-        has_finger = bool(_FINGER_ACTOR_RE.search(clause))
-        is_oral = bool(_ORAL_SWALLOW_RE.search(clause)) and not bool(
-            _VAGINAL_CONTEXT_RE.search(clause))
-        if has_penis and not is_oral:
-            penis_seen = True
-        if has_verb and not is_oral:
-            if has_penis or (penis_seen and not has_finger):
-                return True
-            if has_finger and not has_penis:
-                penis_seen = False
-    return False
+def residual_action_categories(text: str) -> set[str]:
+    """Actions whose residue/trace is present (e.g. dried semen on skin)."""
+    cleaned = _without_nonperforming_context(text)
+    categories: set[str] = set()
+    for category, patterns in _RESIDUAL_COMPILED.items():
+        if any(pattern.search(cleaned) for pattern in patterns):
+            categories.add(category)
+    return categories
 
 
 def performed_action_categories(text: str) -> set[str]:
-    """High-salience actions asserted as performed by a Chinese text."""
-    categories = _script_categories(text, SCRIPT_STRONG_PATTERNS)
-    if _has_penile_penetration(text):
-        categories.add("vaginal_sex")
-    if _has_internal_ejaculation(text):
-        categories.add("creampie")
-    if _has_external_cumshot(text):
-        categories.add("cum_shot")
+    """Actions a Chinese text asserts as really performed."""
+    cleaned = _without_nonperforming_context(text)
+    categories: set[str] = set()
+    for category, patterns in _COMPILED.items():
+        if any(pattern.search(cleaned) for pattern in patterns):
+            categories.add(category)
     return categories
 
 
 def contaminated_action_categories(prompt: str, script: str) -> set[str]:
-    """Prompt-asserted actions that the script never performs or references."""
+    """Prompt tags whose action the script never performs, shows, or references."""
     asserted = prompt_action_categories(prompt)
     if not asserted:
         return set()
     performed = performed_action_categories(script)
-    weak = _script_categories(script, SCRIPT_WEAK_PATTERNS)
-    return asserted - performed - weak
+    residual = residual_action_categories(script)
+    # A mere mention (dialogue/noun) in the script also clears the tag.
+    referenced: set[str] = set()
+    for category, spec in ACTION_SPECS.items():
+        if category in performed or category in residual:
+            continue
+        if any(re.search(p, script) for p in spec.phrases):
+            referenced.add(category)
+    return asserted - performed - residual - referenced

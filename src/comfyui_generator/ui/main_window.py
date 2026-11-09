@@ -48,7 +48,8 @@ from comfyui_generator.core.pose import (
     save_pose_presets,
 )
 from comfyui_generator.core.project import (
-    clear_story_partial, configure_projects_dir, list_projects, load_project,
+    add_plot_history, clear_story_partial, configure_projects_dir,
+    list_projects, load_plot_history, load_project,
     load_session, load_story_partial, move_to_trash, new_project, save_project,
     save_session, save_story_partial, shot_is_ready,
 )
@@ -410,6 +411,7 @@ class MainWindow(QMainWindow):
         self._single_prompt_en = ""
         self._single_prompt_zh = ""
         self._restoring_state = False
+        self._session_hires_preference: bool | None = None
         self._loading_style_profile = True
         self._pose_custom = load_pose_presets(
             self.cfg.root / "pose_presets.json")
@@ -706,6 +708,9 @@ class MainWindow(QMainWindow):
         self.story_premise.setPlaceholderText("例：01. 她回家…… 02. 她坐在沙发上……")
         self.story_premise.setFixedHeight(76)
         form_layout.addWidget(self.story_premise)
+        self.btn_plot_history = QPushButton("查看历史剧情")
+        self.btn_plot_history.clicked.connect(self.show_plot_history)
+        form_layout.addWidget(self.btn_plot_history)
 
         form_layout.addWidget(_label("其它（可选）"))
         self.story_extra = QPlainTextEdit()
@@ -1805,7 +1810,8 @@ class MainWindow(QMainWindow):
             self.scheduler_combo.selectValue(
                 str(config.get("scheduler") or "normal"))
             hires = config.get("hires") or {}
-            self.hires_check.setChecked(bool(hires.get("enabled", False)))
+            if self._session_hires_preference is None:
+                self.hires_check.setChecked(bool(hires.get("enabled", False)))
             self.hires_scale.setValue(float(hires.get("scale", 1.5)))
             self.hires_steps.setValue(int(hires.get("steps", 20)))
             self.hires_denoise.setValue(float(hires.get("denoise", 0.4)))
@@ -3508,6 +3514,46 @@ class MainWindow(QMainWindow):
             "external", bool(self.cfg.external_llm.base_url and self.cfg.external_llm.model)))
         self.generate_story(external=external, initial_shots=shots)
 
+    def show_plot_history(self) -> None:
+        items = load_plot_history(self.cfg.root)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("历史剧情输入")
+        dialog.resize(640, 480)
+        layout = QVBoxLayout(dialog)
+        hint = QLabel("选择一条历史剧情，点“恢复”填入剧情输入框（共 %d 条）。"
+                      % len(items))
+        layout.addWidget(hint)
+        lst = QListWidget()
+        for item in items:
+            plot = str(item.get("plot", "")).strip().replace("\n", " ")
+            row = "[%s] %s" % (item.get("time", ""), plot[:110])
+            list_item = QListWidgetItem(row)
+            list_item.setToolTip(str(item.get("plot", "")))
+            lst.addItem(list_item)
+        lst.setCurrentRow(0 if items else -1)
+        layout.addWidget(lst, 1)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        btn_restore = QPushButton("恢复选中")
+        btn_cancel = QPushButton("取消")
+        buttons.addWidget(btn_restore)
+        buttons.addWidget(btn_cancel)
+        layout.addLayout(buttons)
+        btn_cancel.clicked.connect(dialog.reject)
+
+        def restore() -> None:
+            row = lst.currentRow()
+            if row < 0 or row >= len(items):
+                return
+            plot = str(items[row].get("plot", ""))
+            self.story_premise.setPlainText(plot)
+            dialog.accept()
+            self.append_log("已恢复历史剧情（%s）。" % items[row].get("time", ""))
+
+        btn_restore.clicked.connect(restore)
+        lst.itemDoubleClicked.connect(lambda _it: restore())
+        dialog.exec()
+
     def generate_story(self, external: bool = False,
                        initial_shots: list[dict[str, Any]] | None = None) -> None:
         if self.prompt_worker and self.prompt_worker.isRunning():
@@ -3533,6 +3579,12 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "提示", "没有可用的 Ollama 模型，请先在设置/模型页选择。")
                 return
         total = int(self.story_shots.value())
+        plot_only = self.story_premise.toPlainText().strip()
+        if plot_only:
+            try:
+                add_plot_history(self.cfg.root, plot_only)
+            except Exception as exc:
+                self.append_log("剧情历史保存失败：%s" % exc)
         options = StoryboardOptions(
             model=self._llm(), shots=total,
             chunk=2 if external else 3,
@@ -6711,7 +6763,8 @@ class MainWindow(QMainWindow):
         self.clip_skip.setValue(-2)
         self.sampler_combo.selectValue("euler")
         self.scheduler_combo.selectValue("normal")
-        self.hires_check.setChecked(True)
+        if self._session_hires_preference is None:
+            self.hires_check.setChecked(True)
         self.hires_scale.setValue(1.5)
         self.hires_steps.setValue(20)
         self.hires_denoise.setValue(0.35)
@@ -6744,6 +6797,9 @@ class MainWindow(QMainWindow):
         state = load_session(self.cfg.root)
         if not state:
             return
+        options = state.get("options") if isinstance(state, dict) else None
+        if isinstance(options, dict) and "hires_enabled" in options:
+            self._session_hires_preference = bool(options.get("hires_enabled"))
         self._restoring_state = True
         try:
             self._apply_ui_state(state)

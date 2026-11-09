@@ -26,8 +26,6 @@ import re
 from typing import Any, Callable
 
 from .action_state import (
-    PROMPT_ACTION_TAGS,
-    contaminated_action_categories,
     male_is_present,
     performed_action_categories,
 )
@@ -271,12 +269,54 @@ def _shot_blueprint_findings(
                 "kind": "future_character",
                 "category": "male",
                 "message": "提前出现了里程碑%d才登场的男主" % male_intro,
-                "correct": "男主只允许在里程碑%d（%s）登场，本镜不得出现男主" % (
-                    male_intro, specs[male_intro]["title"]),
+                "correct": (
+                    "男主只允许在里程碑%d（%s）登场，本镜不得出现男主；"
+                    "请把 cast 改为只含女主（如 1girl），"
+                    "present_characters 中只保留女主、删除 male/男主，"
+                    "正文里也不得写男主的动作或在场" % (
+                        male_intro, specs[male_intro]["title"])),
             })
     for finding in _future_action_findings(milestones, allowed_index, text):
         findings.append(finding)
     return findings
+
+
+def _shot_guidance(milestones: list[dict[str, Any]],
+                   allowed_index: int,
+                   prev_outline: str = "") -> str:
+    """Positive, per-shot instruction telling the model exactly what to write.
+
+    Derived structurally from the owning milestone: which actors may be on
+    screen and what the milestone is supposed to accomplish. This gives the
+    model a concrete target instead of only a list of forbidden things.
+    """
+    specs = _milestone_specs(milestones)
+    spec = specs.get(int(allowed_index))
+    if spec is None:
+        return ""
+    title = str(spec.get("title") or "").strip()
+    lines = ["本镜硬性要求（必须遵守）："]
+    if not spec["male_present"]:
+        male_intro = next((i for i, s in specs.items()
+                           if s["male_introduced"]), None)
+        lines.append(
+            "- 本镜只有女主一个人，cast 只能写 1girl，present_characters 只保留女主；"
+            + ("男主到里程碑%d才登场，本镜绝对不能出现男主、门不能开、不能有任何人。"
+               % male_intro if male_intro is not None else
+               "本镜不得出现男主或任何人。"))
+        lines.append(
+            "- 请只推进女主独处时的剧情（对应里程碑：%s），"
+            "例如延续/加强她自身的动作、表情、呼吸、临近高潮或情绪变化；"
+            "不要写插入、性交、口交等需要男主的动作。" % title)
+    else:
+        lines.append(
+            "- 本镜属于里程碑（%s）：cast 按该里程碑写，只表现该里程碑的动作，"
+            "不要提前写更晚里程碑才发生的动作（如后续性交、射精）。" % title)
+    if prev_outline:
+        lines.append(
+            "- 要在上一镜基础上继续推进，不得复制上一镜：%s"
+            % prev_outline[:80])
+    return "\n".join(lines)
 
 
 
@@ -284,7 +324,7 @@ def _plan_outline(client: Any, model: str,
                   premise: str, total: int, *,
                   setting: str, strip_appearance: bool,
                   milestones: list[dict[str, Any]],
-                  timeout: float, log: LogFn) -> list[dict[str, str]]:
+                  timeout: float, log: LogFn) -> list[dict[str, Any]]:
     """Stage 1b: numbered outline, verified one entry at a time."""
     from .storyboard import (
         build_outline_messages,
@@ -305,6 +345,9 @@ def _plan_outline(client: Any, model: str,
                 build_outline_messages(
                     premise, 1, setting, outline, total, shot_number,
                     strip_appearance=strip_appearance,
+                    story_state=_shot_guidance(
+                        milestones, int(spec["milestone_index"]),
+                        str(outline[-1].get("outline")) if outline else ""),
                     blueprint=blueprint_text(milestones)),
                 schema={"type": "object", "properties": {
                     "shots": {"type": "array", "items": {
@@ -407,28 +450,6 @@ def _write_scripts(client: Any, model: str,
                 log("脚本第%d镜第%d次无正文，明确要求后重发。" % (
                     shot_number, attempt + 1))
                 continue
-            try:
-                allowed_index = int(outline_entry.get("milestone_index"))
-            except (TypeError, ValueError):
-                allowed_index = None
-            script_findings: list[dict[str, str]] = []
-            if allowed_index is not None:
-                script_findings = _shot_blueprint_findings(
-                    milestones,
-                    allowed_index,
-                    text=str(item.get("script") or ""),
-                    cast=str(item.get("cast")
-                             or outline_entry.get("cast") or ""),
-                    present_characters=item.get("present_characters"))
-            if script_findings:
-                last_error = "；".join(
-                    "%s（%s）" % (finding["message"], finding["correct"])
-                    for finding in script_findings)
-                log("脚本第%d镜未忠于大纲：%s —— 告知正确后重发。" % (
-                    shot_number,
-                    "；".join(finding["message"]
-                              for finding in script_findings)))
-                continue
             part = normalize_scripts(
                 {"shots": [item]}, 1, "story",
                 start=shot_number, used_names=used_names)
@@ -501,26 +522,6 @@ def _shot_findings(accepted: list[dict[str, str]],
                 "correct": "在该镜 positive 中加入 faceless male，并删除露脸标签",
                 "tags": "", "keep": "",
             })
-
-    contaminated = contaminated_action_categories(
-        str(candidate.get("prompt") or ""),
-        str(candidate.get("script") or ""))
-    for category in sorted(contaminated):
-        prompt_tags = sorted({
-            tag.strip()
-            for tag in str(candidate.get("prompt") or "").split(",")
-            for pattern in PROMPT_ACTION_TAGS.get(category, ())
-            if re.search(pattern, tag.strip().lower())
-        })
-        findings.append({
-            "kind": "action_contamination",
-            "category": category,
-            "message": "出现本镜脚本未发生的动作标签（%s）：%s" % (
-                category, ", ".join(prompt_tags)),
-            "correct": "删除这些跨阶段动作标签，只保留脚本在本镜实际发生的动作；"
-                       "不要用其它阶段的动作标签",
-            "tags": ", ".join(prompt_tags), "keep": "",
-        })
 
     if accepted:
         prev_tags = {t.strip() for t in str(
