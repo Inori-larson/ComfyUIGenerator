@@ -62,3 +62,44 @@ def test_blueprint_text_mentions_ranges_and_terminal():
         {"index":2,"title":"end","start":26,"end":50,"terminal":True}]
     text=sb.blueprint_text(milestones)
     assert "镜01-25" in text and "终局" in text
+
+
+SECTION_PREMISE = (
+    "角色：x\n初始服装：school uniform, black lace panties(1.2)\n"
+    "大场景：办公室\n"
+    "剧情：\n"
+    "**第1–8镜：试探与自慰**- 两人独处暧昧- 女主隔衣抚摸\n"
+    "**第9–16镜：口交**- 女主跪到男主腿间\n"
+    "其它：傍晚")
+
+
+def test_plot_section_returns_full_plot_and_excludes_config():
+    body = sb.plot_section(SECTION_PREMISE)
+    assert "试探与自慰" in body
+    assert "女主跪到男主腿间" in body
+    assert "角色：x" not in body
+    assert "其它" not in body
+    assert "初始服装" not in body
+
+
+def test_blueprint_messages_carry_plot_text_without_numbered():
+    msgs = sb.build_blueprint_messages(SECTION_PREMISE, 50)
+    payload = json.loads(msgs[1]["content"])
+    assert payload["total_shots"] == 50
+    assert "试探与自慰" in payload["plot_text"]
+    assert "numbered_milestones" not in payload
+
+
+def test_blueprint_messages_keep_numbered_when_present():
+    msgs = sb.build_blueprint_messages(PREMISE, 50)
+    payload = json.loads(msgs[1]["content"])
+    assert [m["title"] for m in payload["numbered_milestones"]] == [
+        "独处", "做爱", "射精收尾"]
+    assert "做爱" in payload["plot_text"]
+
+
+def test_plot_section_without_marker_returns_remaining_body():
+    premise = "角色：x\n剧情在下面\n1. 第一件\n2. 第二件"
+    body = sb.plot_section(premise)
+    assert "第一件" in body and "第二件" in body
+

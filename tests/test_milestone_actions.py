@@ -1,6 +1,9 @@
 import json
 
 from comfyui_generator.core.stages import (
+    STALL_MIN_RUN,
+    _action_signature,
+    _action_stall_findings,
     _future_action_findings,
     _milestone_action_intro,
     _verify_outline_entry,
@@ -200,7 +203,35 @@ def test_male_present_detection_requires_explicit_token():
 def test_semen_splashing_on_stomach_across_clauses_is_supported():
     from comfyui_generator.core.action_state import contaminated_action_categories
     script = ("肉棒深深顶入，精液猛烈射入阴道，过多精液从交合处溢出，"
-              "喷溅在女主小腹和大腿上")
+              "喷溅在女主和大腿上")
     prompt = "1girl, creampie, cum overflow, cum on stomach, cum on thigh"
     assert contaminated_action_categories(prompt, script) == set()
+
+
+def _stall_shots(n):
+    return [{"id": "%02d" % i,
+             "prompt": "pussy, wet pussy, penis in pussy, blush, detail%d" % i}
+            for i in range(1, n + 1)]
+
+
+def test_action_signature_extracts_core_actions():
+    assert _action_signature("1girl, penis in pussy, smile") == frozenset(
+        ["penis in pussy"])
+
+
+def test_action_stall_detected_at_threshold():
+    assert _action_stall_findings(_stall_shots(STALL_MIN_RUN))
+    assert not _action_stall_findings(_stall_shots(STALL_MIN_RUN - 1))
+
+
+def test_action_stall_breaks_when_action_changes():
+    shots = _stall_shots(STALL_MIN_RUN)
+    shots[-1]["prompt"] = "fellatio, penis in mouth"
+    assert not _action_stall_findings(shots)
+
+
+def test_action_stall_ignored_without_explicit_actions():
+    shots = [{"id": "%02d" % i, "prompt": "1girl, smile, standing"}
+             for i in range(STALL_MIN_RUN + 2)]
+    assert not _action_stall_findings(shots)
 

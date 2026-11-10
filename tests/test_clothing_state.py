@@ -1,8 +1,12 @@
 from comfyui_generator.core.clothing_state import (
+    anatomy_conflicts,
     clothing_gate_blockers,
     clothing_gate_findings,
     clothing_repair_plan,
     initial_weighted_categories,
+    lower_occlusion_open,
+    script_clothing_conflicts,
+    upper_occlusion_open,
 )
 from comfyui_generator.core import ai_review
 
@@ -276,3 +280,138 @@ def test_aftermath_rank_zero_has_no_note():
     ]
     assert ai_review.story_structure_findings(shots) == []
 
+
+BEACH_PREMISE = (
+    "初始服装：school uniform, red blazer, blue bowtie, white collared shirt, "
+    "white pleated skirt, zettai ryouiki, black thighhighs, "
+    "black lace panties(1.2), black lace bra(1.2), black platform heels(1.2)\n"
+    "大场景：海滩\n剧情：x")
+
+
+def test_panties_missing_under_skirt_with_exposure_cue():
+    shots = [
+        {"id": "01", "prompt": "1girl, red blazer, white shirt, "
+                               "white pleated skirt, sitting, knees up, "
+                               "fingers twisting skirt"},
+        {"id": "02", "prompt": "1girl, white pleated skirt, "
+                               "skirt fluttering, rubbing thighs"},
+    ]
+    plan = clothing_repair_plan(shots, BEACH_PREMISE)
+    fixes = {(f["shot"], f["kind"]) for f in plan["fixes"]}
+    assert ("01", "undergarment_visible_missing") in fixes
+    assert ("02", "undergarment_visible_missing") in fixes
+    off = next(f for f in plan["fixes"]
+               if f["shot"] == "01" and f["kind"]
+               == "undergarment_visible_missing")
+    assert "black lace panties(1.2)" in off["keep"]
+
+
+def test_present_panties_do_not_trigger_missing_fix():
+    shots = [{"id": "01", "prompt": "1girl, white pleated skirt, "
+                                    "black lace panties, sitting, knees up"}]
+    plan = clothing_repair_plan(shots, BEACH_PREMISE)
+    assert not [f for f in plan["fixes"]
+                if f["kind"] == "undergarment_visible_missing"]
+
+
+def test_bra_not_required_while_shirt_closed():
+    shots = [{"id": "01", "prompt": "1girl, red blazer, white shirt, "
+                                    "white pleated skirt, standing"}]
+    plan = clothing_repair_plan(shots, BEACH_PREMISE)
+    assert not [f for f in plan["fixes"]
+                if f["kind"] == "undergarment_visible_missing"
+                and f["category"] == "bra"]
+
+
+def test_bra_required_when_shirt_open():
+    shots = [{"id": "01", "prompt": "1girl, white shirt, unbuttoned shirt, "
+                                    "white pleated skirt, sitting"}]
+    plan = clothing_repair_plan(shots, BEACH_PREMISE)
+    assert any(f["kind"] == "undergarment_visible_missing"
+               and f["category"] == "bra" for f in plan["fixes"])
+
+
+def test_panties_never_required_under_pants():
+    shots = [{"id": "01", "prompt": "1girl, white shirt, black pants, "
+                                    "sitting, knees up"}]
+    plan = clothing_repair_plan(shots, BEACH_PREMISE)
+    assert not [f for f in plan["fixes"]
+                if f["kind"] == "undergarment_visible_missing"
+                and f["category"] == "panties"]
+
+
+def test_standing_skirt_without_exposure_cue_ok():
+    shots = [{"id": "01", "prompt": "1girl, white shirt, "
+                                    "white pleated skirt, standing, smile"}]
+    plan = clothing_repair_plan(shots, BEACH_PREMISE)
+    assert not [f for f in plan["fixes"]
+                if f["kind"] == "undergarment_visible_missing"
+                and f["category"] == "panties"]
+
+
+def test_bottomless_intent_suppresses_panties_missing():
+    shots = [{"id": "01", "prompt": "1girl, white pleated skirt, "
+                                    "skirt lifted, bottomless"}]
+    plan = clothing_repair_plan(shots, BEACH_PREMISE)
+    assert not [f for f in plan["fixes"]
+                if f["kind"] == "undergarment_visible_missing"
+                and f["category"] == "panties"]
+
+
+def test_no_initial_undergarment_means_no_visibility_check():
+    premise = "初始服装：t-shirt, jeans\n剧情：x"
+    shots = [{"id": "01", "prompt": "1girl, t-shirt, jeans, sitting"}]
+    plan = clothing_repair_plan(shots, premise)
+    assert not [f for f in plan["fixes"]
+                if f["kind"] == "undergarment_visible_missing"]
+
+
+COVERED = "1girl, red jacket, white shirt, white pleated skirt, standing"
+EXPOSED = ("1girl, white shirt, white pleated skirt, skirt lifted, "
+           "panties aside, wet pussy")
+
+
+def test_lower_occlusion_open_reflects_state():
+    assert lower_occlusion_open({"prompt": COVERED}) is False
+    assert lower_occlusion_open({"prompt": EXPOSED}) is True
+
+
+def test_upper_occlusion_open_reflects_state():
+    assert upper_occlusion_open({"prompt": COVERED}) is False
+    open_shirt = "1girl, unbuttoned shirt, white pleated skirt, nipples"
+    assert upper_occlusion_open({"prompt": open_shirt}) is True
+
+
+def test_anatomy_conflict_flagged_when_covered():
+    shot = {"prompt": COVERED + ", pussy"}
+    conflicts = anatomy_conflicts(shot)
+    assert "genital_exposed_while_covered" in conflicts
+    assert "pussy" in conflicts["genital_exposed_while_covered"]
+
+
+def test_anatomy_conflict_absent_when_exposed():
+    assert anatomy_conflicts({"prompt": EXPOSED}) == {}
+
+
+def test_plan_includes_anatomy_conflict():
+    plan = clothing_repair_plan(
+        [{"id": "01", "prompt": COVERED + ", pussy"}], BEACH_PREMISE)
+    assert any(f["kind"] == "genital_exposed_while_covered"
+               for f in plan["fixes"])
+
+
+
+
+def test_tag_discarded_while_script_keeps_garment_is_flagged():
+    shot = {
+        "script": "服装：蓝色领结垂在领口两侧，白色百褶裙堆在腰间；",
+        "prompt": "discarded necktie on armrest, discarded skirt on chair"}
+    conflicts = script_clothing_conflicts(shot)["garment_removed_vs_script"]
+    assert set(conflicts) == {"necktie", "skirt"}
+
+
+def test_tag_discarded_when_script_confirms_removal_is_allowed():
+    shot = {
+        "script": "服装：红色外套搭在沙发扶手；",
+        "prompt": "discarded coat on armrest"}
+    assert script_clothing_conflicts(shot) == {}

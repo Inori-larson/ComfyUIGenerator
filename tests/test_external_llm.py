@@ -150,6 +150,30 @@ def test_external_client_accepts_array_root(monkeypatch):
         "shots": [{"id": "01"}]}
 
 
+def test_external_client_wall_clock_timeout_aborts_hung_request(monkeypatch):
+    import time as _time
+    cfg = SimpleNamespace(base_url="https://example.test/v1", api_key="",
+                          model="test-model", timeout=30)
+    client = ExternalLLMClient(cfg)
+
+    def hanging_urlopen(req, timeout):
+        _time.sleep(2.0)
+        return FakeResponse({
+            "choices": [{"message": {"content": "{\"shots\": []}"}}]
+        })
+
+    monkeypatch.setattr("urllib.request.urlopen", hanging_urlopen)
+    started = _time.time()
+    try:
+        client.chat_json(
+            "test-model", [{"role": "user", "content": "x"}],
+            timeout=0.3, retries=0)
+        assert False, "expected timeout"
+    except Exception as exc:
+        assert "timed out" in str(exc)
+        assert _time.time() - started < 1.5
+
+
 def test_first_json_value_ignores_trailing_braces():
     payload = '{"shots":[{"id":7,"prompt":"a: [\\"x\\"]"}]}' + " }" * 100
     assert json.loads(_first_json_value(payload))["shots"][0]["id"] == 7

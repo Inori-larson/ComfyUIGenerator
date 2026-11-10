@@ -23,8 +23,13 @@ from typing import Any, Callable
 
 BLUEPRINT_SYSTEM = (
     "你是 NSFW 连续分镜的结构规划师。只做镜头预算分配，不写具体画面。\n"
+    "输入 plot_text 是用户的剧情原文，可能采用数字编号、破折号小节、"
+    "“**第X–Y镜：标题**”等分节格式，且可能整段挤在一行。\n"
+    "你必须先从 plot_text 中识别出有序里程碑：按剧情的自然推进切分，"
+    "保持原有顺序，不得调换、遗漏或合并；若同时给出 numbered_milestones，"
+    "以其为优先参考。\n"
     "硬性规则：\n"
-    "1. 把用户编号剧情（milestone）按原有顺序映射到目标镜数，不得调换、遗漏或合并其顺序。\n"
+    "1. 把识别出的里程碑按原有顺序映射到目标镜数。\n"
     "2. “终局”仅指剧本的最后一个里程碑；它必须且只能落在最后一镜。"
     "射精本身不是终局判据：口交内射、颜射、射在身上等可以发生在中段，故事仍可继续。\n"
     "3. 当镜数多于里程碑数时，多出的镜头在最后一个里程碑之前把相关动作拆成更细微节拍，"
@@ -66,14 +71,41 @@ def _milestone_titles(premise: str) -> list[str]:
     return [titles[n] for n in sorted(titles)]
 
 
+_PLOT_MARK_RE = re.compile(r"^\s*(?:剧情|情节|故事|plot)\s*[::：]?\s*$", re.I)
+
+
+def plot_section(premise: str) -> str:
+    """Raw plot body after a 剧情 marker, excluding config/其它 lines.
+
+    Preserves the user's original formatting (numbered lists, dash bullets,
+    bold section headers, single-line blocks); semantic parsing is the AI's
+    job, so this only locates and returns the plot region verbatim.
+    """
+    lines = str(premise or "").splitlines()
+    start = 0
+    for i, line in enumerate(lines):
+        if _PLOT_MARK_RE.match(line):
+            start = i + 1
+            break
+    body: list[str] = []
+    for line in lines[start:]:
+        if re.match(r"^\s*(?:其它|备注|补充|note)\s*[::：]", line, re.I):
+            break
+        body.append(line)
+    return "\n".join(body).strip()
+
+
 def build_blueprint_messages(premise: str, total_shots: int) -> list[dict[str, str]]:
-    milestones = _milestone_titles(premise)
-    payload = {
-        "ordered_milestones": [
-            {"index": i + 1, "title": title}
-            for i, title in enumerate(milestones)],
+    numbered = _milestone_titles(premise)
+    plot = plot_section(premise)
+    payload: dict[str, Any] = {
         "total_shots": int(total_shots),
+        "plot_text": plot,
     }
+    if numbered:
+        payload["numbered_milestones"] = [
+            {"index": i + 1, "title": title}
+            for i, title in enumerate(numbered)]
     return [
         {"role": "system", "content": BLUEPRINT_SYSTEM},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},

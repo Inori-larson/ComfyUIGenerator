@@ -354,8 +354,30 @@ def _scope_trigger_tags(cfg: dict[str, Any], shot: dict[str, Any],
                 seen.add(key)
                 tags.append(text)
     return ", ".join(tags)
+def _filter_body_tags(text: str, shot: dict[str, Any]) -> str:
+    if not text:
+        return ""
+    from .clothing_state import lower_occlusion_open, upper_occlusion_open
+    lower_open = lower_occlusion_open(shot)
+    upper_open = upper_occlusion_open(shot)
+    kept = []
+    for tag in split_tags(text):
+        low = tag.lower()
+        is_lower = bool(re.search(
+            r"puss|vagina|vulva|labia|clit|crotch|ass|anus|anal|butt|"
+            r"juice|squirt|wet|drip|cum|ejaculat", low))
+        is_upper = bool(re.search(
+            r"nipple|areola|breast|boob|topless", low))
+        if is_lower and not lower_open:
+            continue
+        if is_upper and not upper_open:
+            continue
+        kept.append(tag)
+    return ", ".join(kept)
+
+
 def _body_trigger_tags(cfg: dict[str, Any], shot: dict[str, Any]) -> str:
-    return _scope_trigger_tags(cfg, shot, "body")
+    return _filter_body_tags(_scope_trigger_tags(cfg, shot, "body"), shot)
 def compose_prompts(cfg: dict[str, Any], shot: dict[str, Any]) -> tuple[str, str]:
     style = apply_style_profile(cfg.get("style") or {},
                                 cfg.get("style_profile") or {})
@@ -380,10 +402,9 @@ def compose_prompts(cfg: dict[str, Any], shot: dict[str, Any]) -> tuple[str, str
         clothing_source = join_tags(
             shot.get("clothing_tags"), shot.get("clothing"),
             clothing.get("tags", ""))
-    if any(_is_body_lora(lora) for lora in chain):
-        body_source = _body_trigger_tags(cfg, shot)
-    else:
-        body_source = shot.get("body_tags", body.get("tags", ""))
+    body_source = _filter_body_tags(
+        join_tags(_body_trigger_tags(cfg, shot),
+                 shot.get("body_tags", body.get("tags", ""))), shot)
     style_tags = shot.get("style_positive", style.get("positive", ""))
     style_lora = shot.get("style_lora_tags", style.get("lora_tags", ""))
     style_suffix = shot.get("style_suffix", style.get("suffix", ""))

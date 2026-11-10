@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -61,6 +62,37 @@ class ExternalLLMError(RuntimeError):
     pass
 
 
+def _urlopen_with_deadline(req: Any, wall_timeout: float,
+                           socket_timeout: float) -> bytes:
+    """Fetch with a hard wall-clock cap covering connect + full response read.
+
+    urllib's own timeout applies per socket operation, so a server that keeps
+    the connection open without completing the response can stall far beyond
+    it. The worker thread is daemonized; the caller is unblocked at the
+    deadline regardless of server behavior.
+    """
+    result: dict[str, Any] = {}
+    done = threading.Event()
+
+    def worker() -> None:
+        try:
+            with urllib.request.urlopen(req, timeout=socket_timeout) as resp:
+                result["data"] = resp.read()
+        except BaseException as exc:
+            result["error"] = exc
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    if not done.wait(timeout=wall_timeout):
+        raise TimeoutError(
+            "request exceeded wall-clock timeout %.0fs" % wall_timeout)
+    if "error" in result:
+        raise result["error"]
+    return result["data"]
+
+
 class ExternalLLMClient:
     def __init__(self, cfg: Any):
         self.cfg = cfg
@@ -96,6 +128,8 @@ class ExternalLLMClient:
         if key:
             headers["Authorization"] = "Bearer " + key
         effective_timeout = float(timeout or getattr(self.cfg, "timeout", 240.0) or 240.0)
+        wall_timeout = max(1.0, effective_timeout)
+        socket_timeout = max(1.0, min(wall_timeout, max(15.0, wall_timeout / 2)))
         last = ""
         finish = ""
         token_budget = max(256, min(32768, int(num_predict or 4096)))
@@ -116,8 +150,9 @@ class ExternalLLMClient:
                 self._url(), data=json.dumps(payload).encode("utf-8"),
                 headers=headers, method="POST")
             try:
-                with urllib.request.urlopen(req, timeout=effective_timeout) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
+                raw = _urlopen_with_deadline(
+                    req, wall_timeout, socket_timeout)
+                data = json.loads(raw.decode("utf-8"))
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", "replace")[:2000]
                 if exc.code == 400 and json_forced:

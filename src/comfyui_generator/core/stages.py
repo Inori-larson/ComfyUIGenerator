@@ -494,6 +494,16 @@ def _shot_findings(accepted: list[dict[str, str]],
             continue
         if fix["kind"] == "must_be_off" and not is_last:
             continue
+        if fix["kind"] == "undergarment_visible_missing":
+            findings.append({
+                "kind": "clothing:" + fix["kind"],
+                "message": "%s：按服装层级当前应可见但缺少标签（%s）" % (
+                    fix["category"], ", ".join(fix["keep"])),
+                "correct": fix["expected"],
+                "tags": "",
+                "keep": ", ".join(fix["keep"]),
+            })
+            continue
         findings.append({
             "kind": "clothing:" + fix["kind"],
             "message": "%s：冲突标签 %s" % (
@@ -538,7 +548,54 @@ def _shot_findings(accepted: list[dict[str, str]],
                     "correct": "推进动作/姿势/构图，使本镜与上一镜明确区分，不要复制",
                     "tags": "", "keep": "",
                 })
+
+    for message in _action_stall_findings(sequence):
+        findings.append({
+            "kind": "action_stall",
+            "message": message,
+            "correct": "本镜必须改变至少一个维度：体位、施动者、身体部位、"
+                       "场景位置或镜头机位；给出明确的新动作，不得换词复述同一动作",
+            "tags": "", "keep": "",
+        })
     return findings
+
+
+STALL_MIN_RUN = 4
+
+_ACTION_SIGNATURE_RE = re.compile(
+    r"\b(?:penis in (?:pussy|mouth)|penis between buttocks|"
+    r"(?:vaginal|standing|standing )?(?:sex)|fellatio|blowjob|"
+    r"(?:deep )?throat(?:ing)?|cunnilingus|"
+    r"(?:fast |slow |hard )?thrusting|hip thrusts?|"
+    r"hand job|ahegao|orgasm|cum(?:min)? shot|"
+    r"cum (?:in|on|swallowing)|cum swallowing|creampie|"
+    r"panties aside|rubbing through panties|groping|"
+    r"fingers? inside (?:panties|pussy)|masturbation|"
+    r"fingering|sex from behind|penetration)\b")
+
+
+def _action_signature(prompt: str) -> frozenset[str]:
+    return frozenset(
+        m.group(0) for m in _ACTION_SIGNATURE_RE.finditer(
+            str(prompt or "").lower()))
+
+
+def _action_stall_findings(sequence: list[dict[str, Any]]) -> list[str]:
+    """Count a trailing run of shots sharing one explicit-action signature."""
+    sigs = [_action_signature(s.get("prompt", "")) for s in sequence]
+    if not sigs or not sigs[-1]:
+        return []
+    run = 1
+    current = sigs[-1]
+    for sig in reversed(sigs[:-1]):
+        if sig and sig == current:
+            run += 1
+        else:
+            break
+    if run < STALL_MIN_RUN:
+        return []
+    return ["连续 %d 镜动作标签完全相同（%s）" % (
+        run, ", ".join(sorted(current)))]
 
 
 def _constraint_key(finding: dict[str, Any]) -> str:

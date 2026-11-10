@@ -29,6 +29,8 @@ _CATEGORY_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("stockings", (r"\bstockings?", r"thighhighs?", r"hold[- ]?ups", r"garter")),
     ("panties", (r"pant(?:ies|y)", r"\bunderwear\b", r"\bbriefs?\b",
                  r"labia", r"crotchless")),
+    ("pants", (r"\bpants?\b", r"trousers", r"\bjeans\b", r"\bshorts?\b",
+               r"\bbottoms\b")),
     ("bra", (r"\bbra\b", r"brassiere", r"bikini top")),
     ("leotard", (r"leotard", r"bodysuit", r"unitard",
                  r"skirt flipped|skirt rolled|skirt lifted|hem at waist")),
@@ -54,10 +56,38 @@ _CATEGORY_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
 # fixed accessories and garment-attached trim (brooch, collar) are part of the
 # outfit design and are never required to be removed.
 _REMOVABLE_CATEGORIES = {
-    "panties", "bra", "leotard", "skirt", "dress", "blazer", "coat", "shirt",
-    "vest", "necktie", "gloves", "socks", "heels", "boots",
+    "panties", "bra", "leotard", "skirt", "dress", "blazer", "coat",
+    "shirt", "vest", "necktie", "gloves", "socks", "heels", "boots",
     "hat", "belt",
 }
+
+# Layer/occlusion model (parsing knowledge, not story content).
+# Upper layers (outer -> inner): coat/blazer -> shirt -> bra.
+# Lower layers: occluding bottoms (pants) hide panties; non-occluding
+# bottoms (skirt/dress) let panties show when an exposure cue is present.
+_UPPER_OCCLUDERS = ("blazer", "coat", "shirt", "vest", "leotard")
+_LOWER_OCCLUDING = ("pants",)
+_LOWER_NON_OCCLUDING = ("skirt", "dress")
+
+_OPEN_CUE_RE = re.compile(
+    r"\b(?:open(?:ed)?|unbuttoned|unzipped|parted|open shirt|open clothes)\b")
+
+_EXPOSURE_CUE_RE = re.compile(
+    r"\b(?:sitting|seated|sit|squatting|kneeling|on knees|knees up|"
+    r"legs up|legs spread|spread legs|lying(?:\s+on)?(?:\s+(?:back|side|ground|floor|sand|bed))?|"
+    r"on (?:back|side)|hugging own legs|hugging legs|"
+    r"skirt (?:lift|lifted|up|raised|flip|flipped|flutter|fluttering|wind|blowing)|"
+    r"lifted skirt|upskirt|pov upskirt|wind lift|updraft|"
+    r"hand(?:s)? (?:under|up) skirt|under skirt|clothes lifting|"
+    r"from below|low angle)\b")
+
+_NO_PANTIES_RE = re.compile(
+    r"\b(?:no panties|pantyless|panties removed|panties off|bottomless|"
+    r"no underwear|commando|pussy peek|pussy exposed|exposed pussy|naked lower body)\b")
+
+_NO_BRA_RE = re.compile(
+    r"\b(?:no bra|braless|bra removed|bra off|topless|breasts out|"
+    r"nipples out|exposed breasts|nude breasts)\b")
 
 # state markers --------------------------------------------------------------
 _WEIGHT_RE = re.compile(r"^([^():]+)\(([0-9]*\.?[0-9]+)\)$")
@@ -76,7 +106,8 @@ _DISPLACED_RE = re.compile(
     r"open(?:ed)?|unbuttoned|unzipped|off[- ]?shoulder|askew|displaced|"
     r"wardrobe malfunction|slipped off|slipping off|rolled (?:up|down|to)|"
     r"flipped up|hanging|dangling|"
-    r"hem at|skirt flipped|french tip|exposed (?:breast|chest|nipple|pussy))\b")
+    r"hem at|skirt flipped|french tip|exposed (?:breast|chest|nipple|pussy)|"
+    r"loose|loosened|untied|untie|undone|hanging loose)\b")
 
 _TORN_RE = re.compile(
     r"\b(torn|tore|ripped|shredded|slit|cut open|frayed|damaged|crotch hole|"
@@ -146,6 +177,109 @@ def initial_weighted_categories(premise: str) -> set[str]:
         if category:
             weighted.add(category)
     return weighted
+
+
+def initial_clothing_region(premise: str) -> str:
+    """Raw initial-clothing text after the 初始服装/initial clothing marker."""
+    for line in str(premise or "").splitlines():
+        if re.search(r"initial\s*clothing|初始服装", line, re.I):
+            return re.sub(r".*?(?:initial\s*clothing|初始服装)\s*[::]?",
+                          "", line, flags=re.I)
+    return ""
+
+
+def initial_undergarment_tags(premise: str) -> dict[str, list[str]]:
+    """Exact initial bra/panties tags (weights preserved) if declared.
+
+    Returned tags are evidence passed back to the AI; the app never injects
+    them into prompts itself.
+    """
+    out: dict[str, list[str]] = {"panties": [], "bra": []}
+    for raw in split_tags(strip_cjk_segments(initial_clothing_region(premise))):
+        core, _weight = _strip_weight(raw)
+        category = classify_category(core)
+        if category in out:
+            out[category].append(raw)
+    return out
+
+
+def _open_cue(text: str) -> bool:
+    for match in _OPEN_CUE_RE.finditer(text):
+        start = match.start()
+        window = text[max(0, start - 25):start]
+        if not _NEGATION_RE.search(window):
+            return True
+    return False
+
+
+def _exposure_cue(text: str) -> bool:
+    for match in _EXPOSURE_CUE_RE.finditer(text):
+        start = match.start()
+        window = text[max(0, start - 25):start]
+        if not _NEGATION_RE.search(window):
+            return True
+    return False
+
+
+def undergarment_visibility(shot: dict[str, Any],
+                            premise: str) -> dict[str, dict[str, Any]]:
+    """Decide whether panties/bra should be visible in this shot.
+
+    Layer rules:
+      bra: only required once a worn upper layer opens or every upper
+           occluder is displaced/off; a closed shirt/blazer hides it.
+      panties: never required under occluding pants; required under a
+           skirt/dress only when an exposure cue is present.
+    Explicit intentional-absence tags (bottomless/topless/...) suppress.
+    Returns {category: {"tags": [initial tags...], "cue": str}}.
+    """
+    initial = initial_undergarment_tags(premise)
+    if not initial["panties"] and not initial["bra"]:
+        return {}
+
+    raw_tags = _tags_of(shot)
+    text = " ".join(_strip_weight(t)[0].lower() for t in raw_tags)
+    states = _category_states(shot)
+    result: dict[str, dict[str, Any]] = {}
+
+    if initial["bra"]:
+        open_layer = False
+        seen_occluder = False
+        for layer in _UPPER_OCCLUDERS:
+            entry = states.get(layer)
+            if not entry:
+                continue
+            seen_occluder = True
+            if entry["displaced"] or entry["off"]:
+                open_layer = True
+            if entry["worn"] and _open_cue(" ".join(entry["worn"]).lower()):
+                open_layer = True
+        bra_present = bool(states.get("bra"))
+        intentional = bool(_NO_BRA_RE.search(text))
+        if (not bra_present and not intentional and seen_occluder
+                and open_layer):
+            result["bra"] = {"tags": initial["bra"],
+                             "cue": "upper layer opened or removed"}
+
+    if initial["panties"]:
+        occluding = False
+        for layer in _LOWER_OCCLUDING:
+            entry = states.get(layer)
+            if entry and (entry["worn"] or entry["displaced"]):
+                occluding = True
+        non_occluding = False
+        for layer in _LOWER_NON_OCCLUDING:
+            entry = states.get(layer)
+            if entry and (entry["worn"] or entry["displaced"]):
+                non_occluding = True
+        panties_present = bool(states.get("panties"))
+        intentional = bool(_NO_PANTIES_RE.search(text))
+        if (not panties_present and not intentional and not occluding
+                and non_occluding and _exposure_cue(text)):
+            result["panties"] = {"tags": initial["panties"],
+                                 "cue": "skirt/dress with exposure cue"}
+
+    return result
 
 
 # --- per-shot, per-category state -------------------------------------------
@@ -233,6 +367,107 @@ def _joined(entry: dict[str, Any], *groups: str) -> list[str]:
     out: list[str] = []
     for group in groups:
         out.extend(entry.get(group) or [])
+    return out
+
+
+_CN_CATEGORY_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("necktie", ("领结", "蝴蝶结", "领带")),
+    ("coat", ("外套", "西装外套", "夹克")),
+    ("shirt", ("衬衫",)),
+    ("bra", ("胸罩", "文胸", "胸衣")),
+    ("skirt", ("百褶裙", "裙子")),
+    ("panties", ("内裤",)),
+    ("stockings", ("过膝袜", "长袜", "丝袜", "袜子")),
+    ("heels", ("玛丽珍鞋", "厚底鞋", "高跟鞋", "鞋子")),
+)
+
+
+_CN_EXPLICIT_OFF = re.compile(
+    r"(?:丢弃|脱下放在|脱下并放在|脱下.{0,4}放在|扔在|扔到|脱在|"
+    r"搭在|挂在|放在(?:椅|桌|沙发|地|扶手))")
+
+
+def _script_field(text: str, wanted: tuple[str, ...]) -> str:
+    for field in re.split(r"[；;]", text):
+        match = re.match(r"^\s*([^：:]+)[：:](.*)$", field)
+        if match and match.group(1).strip() in wanted:
+            return match.group(2).strip()
+    return ""
+
+
+def script_clothing_conflicts(shot: dict[str, Any],
+                              prior_script_states: Any = None
+                              ) -> dict[str, list[str]]:
+    """Detect objective contradiction between tags and the shot's script.
+
+    Only flags garments the tags mark as off-body ('discarded ... on ...')
+    while the script keeps them worn/displaced. No state is carried across
+    shots, so garments genuinely removed earlier are not re-flagged.
+    """
+    text = str(shot.get("script") or "")
+    clothing_field = _script_field(text, ("服装", "衣物", "装束"))
+    if not clothing_field:
+        return {}
+    tag_states = _category_states(shot)
+    out: dict[str, list[str]] = {}
+    for category, terms in _CN_CATEGORY_TERMS:
+        entry = tag_states.get(category)
+        if not entry or not entry["off"]:
+            continue
+        mentioned = next((t for t in terms if t in clothing_field), None)
+        if mentioned is None:
+            continue
+        idx = clothing_field.find(mentioned)
+        window = clothing_field[max(0, idx - 14):idx + 14]
+        if not _CN_EXPLICIT_OFF.search(window):
+            out.setdefault("garment_removed_vs_script", []).append(category)
+    return out
+
+
+def lower_occlusion_open(shot: dict[str, Any]) -> bool:
+    """Whether the lower body is exposed given current clothing state."""
+    states = _category_states(shot)
+    if states.get("panties") and not states["panties"]["worn"]:
+        return True
+    if states.get("pants", {}).get("worn") or states.get(
+            "pants", {}).get("displaced"):
+        return False
+    for layer in _LOWER_NON_OCCLUDING:
+        entry = states.get(layer)
+        if entry and not entry["worn"]:
+            return True
+    return False
+
+
+def upper_occlusion_open(shot: dict[str, Any]) -> bool:
+    """Whether the chest is exposed given current clothing state."""
+    states = _category_states(shot)
+    if states.get("bra") and not states["bra"]["worn"]:
+        return True
+    return not any(states.get(l, {}).get("worn") for l in _UPPER_OCCLUDERS)
+
+
+def anatomy_conflicts(shot: dict[str, Any]) -> dict[str, list[str]]:
+    """Anatomical nudity tags that contradict current clothing occlusion.
+
+    Lower body: pussy/vagina/labia are only allowed once the lower
+    occlusion is removed. Upper body: nipples/areola only once every
+    covering upper layer is open/off or the bra is pulled down/off.
+    Returns {kind: [offending tags...]}.
+    """
+    raw = [_strip_weight(t)[0].lower() for t in _tags_of(shot)]
+    out: dict[str, list[str]] = {}
+
+    pussy_tags = [t for t in raw if re.fullmatch(
+        r"(?:wet |spread |exposed |open )?(?:pussy|vagina|labia)", t)]
+    if pussy_tags and not lower_occlusion_open(shot):
+        out["genital_exposed_while_covered"] = sorted(set(pussy_tags))
+
+    nipple_tags = [t for t in raw if re.search(
+        r"(?:^|\s)nipples?(?:$|\s)|areola", t)]
+    if nipple_tags and not upper_occlusion_open(shot):
+        out["nipple_exposed_while_covered"] = sorted(set(nipple_tags))
+
     return out
 
 
@@ -371,6 +606,27 @@ def clothing_repair_plan(shots: list[dict[str, Any]],
             if state != "none":
                 prev_state = state
 
+    for shot in shots:
+        visibility = undergarment_visibility(shot, premise)
+        for category, info in visibility.items():
+            record(shot.get("id"), category,
+                   category in weighted_init,
+                   "undergarment_visible_missing",
+                   [],
+                   "补回当前应可见的内层标签：%s（依据：%s）；不得新增其它剧情内容"
+                   % (", ".join(info["tags"]), info["cue"]),
+                   keep=info["tags"])
+        for kind, tags in anatomy_conflicts(shot).items():
+            record(shot.get("id"), "anatomy", False, kind, tags,
+                   "删除与当前服装遮挡矛盾的裸露标签，或先解除对应衣物遮挡；"
+                   "二者择一，不得同时保留")
+        for kind, categories in script_clothing_conflicts(shot).items():
+            record(shot.get("id"), ", ".join(categories), False, kind, [],
+                   "英文标签的服装状态须与中文脚本一致：%s（脚本为权威）；"
+                   "不得把脚本中仍穿着/半挂的衣物写成丢弃"
+                   % ", ".join(categories),
+                   keep=categories)
+
     return {"weighted": sorted(weighted_init), "ledger": ledger,
             "fixes": fixes}
 
@@ -386,6 +642,12 @@ _FIX_KIND_TEXT = {
     "reworn": "常规服装脱后穿回；保持 OFF",
     "location_jump": "脱后位置跳变；全片统一放置位置",
     "displaced_stall": "外衣半脱/半挂后多镜未继续脱下；须在本镜脱成离体",
+    "undergarment_visible_missing": "按服装层级当前应可见的内衣缺失；须补回",
+    "genital_exposed_while_covered": "衣物仍遮挡却出现阴部裸露标签；二者矛盾",
+    "nipple_exposed_while_covered": "上衣/胸罩仍遮挡却出现乳头标签；二者矛盾",
+    "garment_missing_vs_script": "脚本中在场的衣物在英文标签里缺失；须补回",
+    "garment_removed_vs_script": "标签把脚本中仍穿着/半挂的衣物写成丢弃；须改回",
+    "garment_state_behind_script": "标签服装状态落后于脚本；须推进到一致",
 }
 
 

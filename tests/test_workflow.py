@@ -106,6 +106,20 @@ def test_compose_prompts_keeps_ai_scene(cfg):
     assert "balcony" in positive
 
 
+def test_compose_prompts_filters_body_tag_when_covered(cfg):
+    shot = {"prompt": "1girl, red jacket, white shirt, white pleated skirt",
+            "body_tags": "pussy"}
+    positive, _ = compose_prompts(cfg, shot)
+    assert "pussy" not in positive
+
+
+def test_compose_prompts_keeps_body_tag_when_exposed(cfg):
+    shot = {"prompt": "1girl, white shirt, skirt lifted, panties aside",
+            "body_tags": "pussy, wet pussy"}
+    positive, _ = compose_prompts(cfg, shot)
+    assert "pussy" in positive
+
+
 # ------------------------------------------------------------------ lora chain
 
 def test_lora_chain_filters_empty_and_supports_legacy():
