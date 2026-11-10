@@ -19,6 +19,7 @@ from comfyui_generator.core.comfy import ComfyClient
 from comfyui_generator.core.config import AppConfig
 from comfyui_generator.core.external_llm import (
     EXTERNAL_LLM_MODEL,
+    ContentFilterError,
     ExternalLLMClient,
     resolve_external_model,
 )
@@ -32,7 +33,6 @@ from comfyui_generator.core.rewrite import rewrite_shot_prompt
 from comfyui_generator.core.single import SingleOptions, generate_single_prompt
 from comfyui_generator.core.tag_cache import load_tag_cache, update_tag_cache
 from comfyui_generator.core.translate import translate_prompts, translate_tag_list, translate_to_tags
-from comfyui_generator.core.stages import repair_tagged_shots
 from comfyui_generator.core.storyboard import (
     StoryboardOptions, generate_storyboard, parse_character_profiles)
 from comfyui_generator.core.trace import (
@@ -105,6 +105,8 @@ class PromptWorker(QThread):
     failed = Signal(str)
     canceled = Signal(str)
     log = Signal(str)
+    request_started = Signal(str, str)
+    request_finished = Signal(str, str)
 
     def __init__(self, cfg: AppConfig, kind: str, text: str, *,
                  single_options: SingleOptions | None = None,
@@ -176,88 +178,21 @@ class PromptWorker(QThread):
         except Exception as exc:
             trace, trace_token = None, None
             self.log.emit("日志初始化失败：%s" % exc)
-        client = TracedClient(client, self.kind)
+        client = TracedClient(
+            client, self.kind,
+            on_request_start=self.request_started.emit,
+            on_request_end=self.request_finished.emit)
         trace_event("request", {"kind": self.kind, "text": self.text,
                                 "model": model})
         try:
-            if self._canceled():
-                raise InterruptedError
-            if self.kind == "single":
-                result = generate_single_prompt(client, self.text, self.single_options)
-                if self._canceled():
-                    raise InterruptedError
-                tags = self._split_tags(result["prompt"])
-                if local_model:
-                    result["prompt_zh"] = self._translate_tags(
-                        local_client, local_model, tags)
-                else:
-                    result["prompt_zh"] = "，".join(tags)
-                if self._canceled():
-                    raise InterruptedError
-                trace_event("single.result", result)
-                self.single_ready.emit(result)
-            elif self.kind == "rewrite":
-                prompt = rewrite_shot_prompt(
-                    client, model, self.current_prompt, self.instruction,
-                    character_tags=self.character_tags,
-                    style_positive=self.style_positive,
-                    strip_appearance=self.strip_appearance)
-                if self._canceled():
-                    raise InterruptedError
-                if local_model:
-                    prompt_zh = self._translate_tags(
-                        local_client, local_model, self._split_tags(prompt))
-                else:
-                    prompt_zh = prompt
-                if self._canceled():
-                    raise InterruptedError
-                trace_event("rewrite.result", {
-                    "prompt": prompt, "prompt_zh": prompt_zh,
-                    "instruction": self.instruction,
-                })
-                self.rewritten.emit({"prompt": prompt, "prompt_zh": prompt_zh})
-            elif self.kind == "story_repair":
-                shots = repair_tagged_shots(
-                    client, model, self.repair_shots or [], self.text,
-                    setting="",
-                    strip_appearance=self.strip_appearance,
-                    style_positive=self.style_positive,
-                    timeout=600.0,
-                    log=self.log.emit)
-                if self._canceled():
-                    raise InterruptedError
-                all_tags: list[str] = []
-                for shot in shots:
-                    all_tags += self._split_tags(shot.get("prompt", ""))
-                mapping = (self._translate_map(local_client, local_model, all_tags)
-                           if local_model else {})
-                if self._canceled():
-                    raise InterruptedError
-                for shot in shots:
-                    zh_tags = [mapping.get(tag, tag) for tag in self._split_tags(shot.get("prompt", ""))]
-                    shot["prompt_zh"] = "，".join(zh_tags)
-                trace_event("story.repair_result", shots)
-                self.story_ready.emit(shots)
-            else:
-                shots = generate_storyboard(
-                    client, self.text, self.story_options, initial_shots=self.initial_shots)
-                if self._canceled():
-                    raise InterruptedError
-                all_tags: list[str] = []
-                for shot in shots:
-                    all_tags += self._split_tags(shot.get("prompt", ""))
-                mapping = (self._translate_map(local_client, local_model, all_tags)
-                           if local_model else {})
-                if self._canceled():
-                    raise InterruptedError
-                for shot in shots:
-                    zh_tags = [mapping.get(tag, tag) for tag in self._split_tags(shot.get("prompt", ""))]
-                    shot["prompt_zh"] = "，".join(zh_tags)
-                trace_event("story.result", shots)
-                self.story_ready.emit(shots)
+            self._run_generation(client, model, local_client, local_model,
+                                 fell_back=False)
         except InterruptedError:
             trace_event("canceled", {"kind": self.kind})
             self.canceled.emit("已打断生成")
+        except ContentFilterError as exc:
+            trace_event("failed", {"kind": self.kind, "error": repr(exc)})
+            self.failed.emit("外部模型内容审核拒绝：%s" % exc)
         except Exception as exc:
             trace_event("failed", {"kind": self.kind, "error": repr(exc)})
             self.failed.emit(str(exc))
@@ -273,6 +208,68 @@ class PromptWorker(QThread):
                     pass
             if trace is not None:
                 stop_trace(trace, trace_token)
+
+    def _run_generation(self, client, model, local_client, local_model,
+                        fell_back: bool = False):
+        if self._canceled():
+            raise InterruptedError
+        if self.kind == "single":
+            result = generate_single_prompt(client, self.text, self.single_options)
+            if self._canceled():
+                raise InterruptedError
+            tags = self._split_tags(result["prompt"])
+            if local_model:
+                result["prompt_zh"] = self._translate_tags(
+                    local_client, local_model, tags)
+            else:
+                result["prompt_zh"] = "，".join(tags)
+            if self._canceled():
+                raise InterruptedError
+            trace_event("single.result", result)
+            self.single_ready.emit(result)
+        elif self.kind == "rewrite":
+            prompt = rewrite_shot_prompt(
+                client, model, self.current_prompt, self.instruction,
+                character_tags=self.character_tags,
+                style_positive=self.style_positive,
+                strip_appearance=self.strip_appearance)
+            if self._canceled():
+                raise InterruptedError
+            if local_model:
+                prompt_zh = self._translate_tags(
+                    local_client, local_model, self._split_tags(prompt))
+            else:
+                prompt_zh = prompt
+            if self._canceled():
+                raise InterruptedError
+            trace_event("rewrite.result", {
+                "prompt": prompt, "prompt_zh": prompt_zh,
+                "instruction": self.instruction})
+            self.rewritten.emit({"prompt": prompt, "prompt_zh": prompt_zh})
+        else:
+            shots = generate_storyboard(
+                client, self.text, self.story_options,
+                initial_shots=self.initial_shots,
+                model_override=(model if fell_back else ""))
+            self._finalize_story_shots(
+                shots, local_client, local_model, "story.result")
+
+    def _finalize_story_shots(self, shots, local_client, local_model, event):
+        if self._canceled():
+            raise InterruptedError
+        all_tags: list[str] = []
+        for shot in shots:
+            all_tags += self._split_tags(shot.get("prompt", ""))
+        mapping = (self._translate_map(local_client, local_model, all_tags)
+                   if local_model else {})
+        if self._canceled():
+            raise InterruptedError
+        for shot in shots:
+            zh_tags = [mapping.get(tag, tag)
+                       for tag in self._split_tags(shot.get("prompt", ""))]
+            shot["prompt_zh"] = "，".join(zh_tags)
+        trace_event(event, shots)
+        self.story_ready.emit(shots)
 
     @staticmethod
     def _split_tags(text: str) -> list[str]:
@@ -291,7 +288,8 @@ class PromptWorker(QThread):
             self.log.emit("中文标签翻译跳过（不影响就绪）：%s" % exc)
             return {}
 
-    def _translate_tags(self, client: OllamaClient, model: str, tags: list[str]) -> str:
+    def _translate_tags(self, client: OllamaClient, model: str,
+                        tags: list[str]) -> str:
         mapping = self._translate_map(client, model, tags)
         return "，".join(mapping.get(tag, tag) for tag in tags)
 

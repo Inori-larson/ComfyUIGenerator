@@ -16,25 +16,25 @@ from comfyui_generator.core.pose import (
 
 def test_pose_presets_follow_action_text():
     assert pose_preset_for_shot({"prompt": "cowgirl, riding"}) == "cowgirl"
-    assert pose_preset_for_shot({"script": "她跨坐到我腿上"}) == "cowgirl"
-    assert pose_preset_for_shot({"script": "男主从后面抱起她"}) == "rear_carry"
+    assert pose_preset_for_shot({"description": "她跨坐到我腿上"}) == "cowgirl"
+    assert pose_preset_for_shot({"description": "男主从后面抱起她"}) == "rear_carry"
     assert pose_preset_for_shot({"prompt": "doggystyle, from behind"}) == "classic_doggystyle"
-    assert pose_preset_for_shot({"script": "两人上下叠在一起"}) == "stacked"
-    assert pose_preset_for_shot({"script": "男主在她上方"}) == "stacked"
-    assert pose_preset_for_shot({"script": "男主在她下面"}) == "cowgirl"
+    assert pose_preset_for_shot({"description": "两人上下叠在一起"}) == "stacked"
+    assert pose_preset_for_shot({"description": "男主在她上方"}) == "stacked"
+    assert pose_preset_for_shot({"description": "男主在她下面"}) == "cowgirl"
     assert pose_preset_for_shot({"prompt": "missionary, legs up"}) == "classic_missionary"
     assert pose_preset_for_shot({"prompt": "69"}) == "classic_69"
     assert pose_preset_for_shot({"prompt": "blowjob"}) == "classic_bj_front"
-    assert pose_preset_for_shot({"script": "她坐在他脸上"}) == "classic_facesitting"
+    assert pose_preset_for_shot({"description": "她坐在他脸上"}) == "classic_facesitting"
     assert pose_preset_for_shot({"prompt": "milking table"}) == "classic_sex_under_table"
     assert pose_preset_for_shot({"prompt": "under table blowjob"}) == "classic_under_table_bj"
     assert pose_preset_for_shot({"prompt": "footjob"}) == "classic_footjob"
     assert pose_preset_for_shot({"prompt": "lying cunnilingus"}) == "classic_lying_cunnilingus"
     assert pose_preset_for_shot({"prompt": "front facing doggystyle"}) == "classic_front_doggy"
     assert pose_preset_for_shot({"prompt": "virtual sex, pov sex"}) == "classic_virtual_sex"
-    assert pose_preset_for_shot({"script": "他前倾插入"}) == "classic_leaning_vaginal"
+    assert pose_preset_for_shot({"description": "他前倾插入"}) == "classic_leaning_vaginal"
     assert pose_preset_for_shot({"prompt": "standing behind"}) == "classic_standing_behind"
-    assert pose_preset_for_shot({"script": "舔肛"}) == "classic_rimming"
+    assert pose_preset_for_shot({"description": "舔肛"}) == "classic_rimming"
     assert pose_preset_for_shot({"prompt": "standing"}) == "standing"
     assert pose_preset_for_shot({"prompt": "smile"}) == "side_by_side"
     assert pose_preset_for_shot({"prompt": "smile"}, "spooning") == "spooning"
@@ -69,9 +69,9 @@ def test_generate_classic_json_pose(tmp_path):
 
 
 def test_pose_is_skipped_for_partial_male_framing():
-    assert not pose_should_apply({"script": "男主只露出手"})
+    assert not pose_should_apply({"description": "男主只露出手"})
     assert not pose_should_apply({"prompt": "only his hand"})
-    assert pose_should_apply({"script": "两人抱在一起"})
+    assert pose_should_apply({"description": "两人抱在一起"})
 
 
 def test_custom_pose_keypoints_override_and_roundtrip(tmp_path):

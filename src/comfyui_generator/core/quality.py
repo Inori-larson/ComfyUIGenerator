@@ -68,8 +68,6 @@ def check_project(project: dict[str, Any]) -> QualityReport:
             report.critical.append("已启用画风参考图，但没有填写图片路径")
         _check_file(report, "画风参考图", style_ref.get("image"))
 
-    grammar = continuity.get("grammar") or {}
-    grammar_auto = bool(grammar.get("auto", True))
     shots = project.get("shots") or []
     if not shots:
         report.warnings.append("项目没有可生成的分镜")
@@ -80,15 +78,6 @@ def check_project(project: dict[str, Any]) -> QualityReport:
             report.warnings.append("镜头 %s 提示词为空" % shot_id)
         elif _CHINESE.search(prompt):
             report.warnings.append("镜头 %s 提示词含中文" % shot_id)
-        if grammar_auto and not (
-                str(shot.get("shot_size") or "").strip()
-                and str(shot.get("camera_angle") or "").strip()):
-            report.info.append("镜头 %s 没有景别/机位，将使用默认构图" % shot_id)
-        for key, label in (("continuity_state", "连续性台账"),
-                           ("continuity_scene", "场景锚点")):
-            if _CHINESE.search(str(shot.get(key) or "")):
-                report.warnings.append(
-                    "镜头 %s 的%s含中文，建议改英文标签" % (shot_id, label))
     if not str(continuity.get("character") or "").strip():
         report.info.append("未填写角色锚点；跨镜人物一致性只能依赖角色 LoRA/参考图")
     if not str(continuity.get("scene") or "").strip():

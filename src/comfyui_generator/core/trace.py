@@ -102,9 +102,12 @@ def trace_session(log_dir: Path, kind: str,
 
 
 class TracedClient:
-    def __init__(self, client: Any, label: str = ""):
+    def __init__(self, client: Any, label: str = "",
+                 on_request_start: Any = None, on_request_end: Any = None):
         self._client = client
         self._label = label
+        self._on_request_start = on_request_start
+        self._on_request_end = on_request_end
 
     def chat_json(self, model: str, messages: list[dict[str, str]],
                   **kwargs: Any) -> Any:
@@ -115,6 +118,11 @@ class TracedClient:
             "messages": messages,
             "options": kwargs,
         })
+        if callable(self._on_request_start):
+            try:
+                self._on_request_start(self._label, model)
+            except Exception:
+                pass
         try:
             result = self._client.chat_json(model, messages, **kwargs)
         except Exception as exc:
@@ -124,6 +132,11 @@ class TracedClient:
                 "duration": round(time.time() - started, 3),
                 "error": repr(exc),
             })
+            if callable(self._on_request_end):
+                try:
+                    self._on_request_end(self._label, model)
+                except Exception:
+                    pass
             raise
         trace_event("ai.response", {
             "label": self._label,
@@ -131,6 +144,11 @@ class TracedClient:
             "duration": round(time.time() - started, 3),
             "response": result,
         })
+        if callable(self._on_request_end):
+            try:
+                self._on_request_end(self._label, model)
+            except Exception:
+                pass
         return result
 
     def __getattr__(self, name: str) -> Any:

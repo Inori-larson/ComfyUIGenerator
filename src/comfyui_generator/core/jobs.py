@@ -149,11 +149,6 @@ def cross_shot_allowed(previous: Task | None, current: Task,
         return False
     if str(current.shot.get("init_image") or "").strip():
         return False
-    prev_scene = str(previous.shot.get("scene") or "").strip().lower()
-    curr_scene = str(current.shot.get("scene") or "").strip().lower()
-    if (prev_scene and curr_scene and prev_scene != curr_scene
-            and prev_scene not in curr_scene and curr_scene not in prev_scene):
-        return False
     return True
 
 

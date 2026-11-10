@@ -219,7 +219,7 @@ def cmd_story(args: argparse.Namespace) -> int:
 
     _print("[1/2] Ollama 模型（%s）正在写 %d 镜分镜 ..." % (llm, args.shots))
     options = StoryboardOptions(
-        model=llm, shots=args.shots, chunk=args.chunk, temperature=args.temperature,
+        model=llm, shots=args.shots, temperature=args.temperature,
         setting=args.setting, character_tags=character_tags,
         style_positive=style_positive, full_story=True,
         log=lambda msg: _print("      " + msg))
@@ -360,7 +360,6 @@ def _expand_from_project(cfg: AppConfig, source: dict[str, Any],
     options = StoryboardOptions(
         model=llm,
         shots=total,
-        chunk=getattr(args, "chunk", 12),
         temperature=getattr(args, "temperature", 0.8),
         setting=getattr(args, "setting", ""),
         character_tags=(source.get("character") or {}).get("tags", ""),

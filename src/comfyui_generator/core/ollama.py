@@ -97,22 +97,33 @@ class OllamaClient:
                   schema: dict[str, Any] | None = None,
                   retries: int = 1,
                   **kwargs: Any) -> dict[str, Any]:
+        base_convo = list(messages)
         last = ""
-        convo = list(messages)
         for attempt in range(retries + 1):
-            last = self.chat(model, convo, schema=schema, **kwargs)
+            convo = list(base_convo)
+            call_kwargs = dict(kwargs)
+            if attempt > 0:
+                # Retry from the original request: appending the degenerate
+                # output would anchor the model to continue its own loop.
+                convo[-1] = dict(convo[-1])
+                convo[-1]["content"] += (
+                    "\n上一条输出无法解析，可能重复或未写完。"
+                    "请只返回一个简短、结构完整、可被 json.loads 解析的 JSON 对象，"
+                    "任何字段都不要重复堆砌内容。")
+                try:
+                    call_kwargs["temperature"] = min(
+                        float(call_kwargs.get("temperature", 0.6)), 0.3)
+                except (TypeError, ValueError):
+                    call_kwargs["temperature"] = 0.3
+            last = self.chat(model, convo, schema=schema, **call_kwargs)
             try:
                 data = json.loads(extract_json(last))
                 if isinstance(data, dict):
                     return data
                 raise ValueError("JSON root is not an object")
-            except (ValueError, json.JSONDecodeError) as exc:
+            except (ValueError, json.JSONDecodeError):
                 if attempt >= retries:
                     break
-                convo = convo + [
-                    {"role": "assistant", "content": last},
-                    {"role": "user", "content": f"That was invalid JSON ({exc}). Return ONLY the JSON object."},
-                ]
         raise OllamaError("Model did not return usable JSON:\n" + last[:2000])
 
     def unload(self, model: str) -> None:

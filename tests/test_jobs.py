@@ -100,8 +100,6 @@ def test_cross_shot_skips_same_shot_and_double_shot():
         "scene": "bedroom",
     }], 1, "fixed", 1)[0]
     assert not cross_shot_allowed(prev, double, {"enabled": True, "cross_shot": True})
-    curr.shot["scene"] = "kitchen"
-    assert not cross_shot_allowed(prev, curr, {"enabled": True, "cross_shot": True})
     curr.shot["scene"] = "bedroom, night"
     assert cross_shot_allowed(prev, curr, {"enabled": True, "cross_shot": True})
     curr.shot["scene"] = "bedroom"

@@ -235,7 +235,7 @@ def _people(preset: str) -> dict[str, dict[str, tuple[float, float]]]:
 
 def pose_should_apply(shot: dict[str, Any]) -> bool:
     text = " ".join(str(shot.get(key) or "") for key in
-                    ("script", "outline", "prompt", "scene")).lower()
+                    ("prompt", "description")).lower()
     return not bool(re.search(
         r"only (?:his |her )?(?:hand|hands|arm|arms|chest|shoulder)|"
         r"hands? only|disembodied|只露(?:出)?手|只露(?:出)?手臂|"
@@ -248,7 +248,7 @@ def pose_preset_for_shot(shot: dict[str, Any], override: str = "auto") -> str:
     if override in POSE_PRESET_LABELS or override in CLASSIC_POSE_LABELS:
         return override
     text = " ".join(str(shot.get(key) or "") for key in
-                    ("script", "outline", "prompt", "scene")).lower()
+                    ("prompt", "description")).lower()
     if re.search(r"\b69\b|sixty[- ]?nine|六九", text):
         return "classic_69"
     if re.search(r"facesitting|face sitting|squat.*face|坐在.{0,6}脸上|"

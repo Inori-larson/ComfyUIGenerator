@@ -78,18 +78,6 @@ def test_compose_prompts_dedupes_exact_tags(cfg):
     assert positive.count("1girl") == 1
 
 
-def test_compose_prompts_strips_grammar_when_shot_metadata(cfg):
-    shot = {
-        "prompt": "wide shot, 1girl",
-        "shot_size": "close-up",
-        "camera_angle": "from above",
-    }
-    positive, _ = compose_prompts(cfg, shot)
-    assert "wide shot" not in positive
-    assert "close-up" in positive
-    assert "from above" in positive
-
-
 # ------------------------------------------------------------- no hidden policy
 
 def test_compose_prompts_does_not_inject_scene_or_male_tags(cfg):
@@ -106,11 +94,13 @@ def test_compose_prompts_keeps_ai_scene(cfg):
     assert "balcony" in positive
 
 
-def test_compose_prompts_filters_body_tag_when_covered(cfg):
+def test_compose_prompts_passes_body_tag_through(cfg):
+    # Keyword suppression removed: body tags are composed verbatim; clothing
+    # continuity is validated by the AI judge, not by regex.
     shot = {"prompt": "1girl, red jacket, white shirt, white pleated skirt",
             "body_tags": "pussy"}
     positive, _ = compose_prompts(cfg, shot)
-    assert "pussy" not in positive
+    assert "pussy" in positive
 
 
 def test_compose_prompts_keeps_body_tag_when_exposed(cfg):

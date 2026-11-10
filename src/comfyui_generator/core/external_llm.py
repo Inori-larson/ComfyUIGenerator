@@ -62,6 +62,11 @@ class ExternalLLMError(RuntimeError):
     pass
 
 
+class ContentFilterError(ExternalLLMError):
+    """Raised when the provider refuses the request (finish_reason=content_filter)."""
+    pass
+
+
 def _urlopen_with_deadline(req: Any, wall_timeout: float,
                            socket_timeout: float) -> bytes:
     """Fetch with a hard wall-clock cap covering connect + full response read.
@@ -179,6 +184,9 @@ class ExternalLLMClient:
             message = choice.get("message") or {}
             finish = str(choice.get("finish_reason") or "")
             last = str(message.get("content") or "")
+            if finish == "content_filter":
+                raise ContentFilterError(
+                    "External provider blocked the request (content_filter).")
             try:
                 text = last.strip()
                 if text.startswith("```"):

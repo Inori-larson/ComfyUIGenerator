@@ -1,39 +1,21 @@
 from comfyui_generator.core.continuity import (
-    apply_auto_grammar,
-    auto_shot_grammar,
     character_sheet_prompt,
     continuity_negative,
     continuity_positive,
     normalize_continuity,
-    strip_shot_grammar,
 )
 from comfyui_generator.core.workflow import compose_prompts
 
 
 def test_normalize_continuity_defaults():
     data = normalize_continuity(None)
-    assert data["grammar"] == {"auto": True, "style": "cinematic"}
-    assert normalize_continuity({"grammar": {"style": "missing"}})[
-        "grammar"]["style"] == "cinematic"
+    assert data == {"character": "", "scene": "", "state": "", "negative": ""}
 
 
-def test_auto_shot_grammar_cycles():
-    first = auto_shot_grammar(0, 3, {"grammar": {"style": "cinematic"}})
-    second = auto_shot_grammar(1, 3, {"grammar": {"style": "cinematic"}})
-    assert first["shot_size"] == "wide shot"
-    assert second["shot_size"] == "medium shot"
-    assert second["camera_angle"] == "from side"
-
-
-def test_apply_auto_grammar_preserves_manual_values():
-    shots = [{"shot_size": "close-up", "camera_angle": "from below"},
-             {"shot_size": "", "camera_angle": ""}]
-    apply_auto_grammar(shots, {"grammar": {"style": "cinematic"}})
-    assert shots[0]["shot_size"] == "close-up"
-    assert shots[1]["shot_size"] == "medium shot"
-    apply_auto_grammar(shots, {"grammar": {"style": "cinematic"}},
-                       overwrite=True)
-    assert shots[0]["shot_size"] == "wide shot"
+def test_normalize_continuity_strips_fields():
+    data = normalize_continuity({"character": "silver hair", "extra": 1})
+    assert data["character"] == "silver hair"
+    assert "extra" not in data
 
 
 def test_character_sheet_prompt_contains_views_and_character():
@@ -44,14 +26,12 @@ def test_character_sheet_prompt_contains_views_and_character():
         assert expected in text
 
 
-def test_continuity_prompt_includes_bible_state_and_grammar():
+def test_continuity_prompt_includes_bible_state():
     text = continuity_positive(
         {"character": "silver hair, red eyes",
          "scene": "bedroom, night, warm lamp",
-         "state": "torn stockings, sweat"},
-        {"shot_size": "close-up", "camera_angle": "from above"})
-    for expected in ("silver hair", "bedroom", "torn stockings", "close-up",
-                     "from above"):
+         "state": "torn stockings, sweat"})
+    for expected in ("silver hair", "bedroom", "torn stockings"):
         assert expected in text
 
 
@@ -69,33 +49,22 @@ def test_continuity_negative():
         "different hair, extra people")
 
 
-def test_strip_old_framing_tags():
-    assert strip_shot_grammar(
-        "close-up, full-body, from below, bedroom, smiling") == (
-        "bedroom, smiling")
-
-
-def test_workflow_injects_continuity_and_shot_grammar():
+def test_workflow_injects_continuity():
     cfg = {
-        "style": {"positive": "masterpiece", "negative": "bad quality"},
+        "style": {"positive": "anime style", "negative": "bad quality"},
         "continuity": {
             "character": "silver hair",
             "scene": "bedroom",
             "state": "sweat",
             "negative": "different location",
-            "grammar": {"style": "cinematic"},
         },
     }
     shot = {
         "prompt": "standing, wide shot, from below",
-        "shot_size": "close-up",
-        "camera_angle": "from above",
     }
     positive, negative = compose_prompts(cfg, shot)
     assert "silver hair" in positive
     assert "bedroom" in positive
     assert "sweat" in positive
-    assert "close-up" in positive
-    assert "from above" in positive
-    assert "wide shot" not in positive
+    assert "wide shot" in positive
     assert "different location" in negative

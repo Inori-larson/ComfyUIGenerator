@@ -32,7 +32,7 @@ from comfyui_generator.core.config import (
     AppConfig, load_config, load_template, resolve_template, save_config,
 )
 from comfyui_generator.core.continuity import (
-    GRAMMAR_STYLE_CHOICES, auto_shot_grammar, character_sheet_prompt,
+    character_sheet_prompt,
     normalize_continuity,
 )
 from comfyui_generator.core.detailers import build_detailer_choices, filter_detector_models, local_detectors
@@ -51,7 +51,7 @@ from comfyui_generator.core.project import (
     add_plot_history, clear_story_partial, configure_projects_dir,
     list_projects, load_plot_history, load_project,
     load_session, load_story_partial, move_to_trash, new_project, save_project,
-    save_session, save_story_partial, shot_is_ready,
+    save_session, save_story_partial,
 )
 from comfyui_generator.core.quality import check_project, format_report, repair_project
 from comfyui_generator.core.services import ComfyService
@@ -61,7 +61,7 @@ from comfyui_generator.core.style_profile import (
     normalize_style_profile, style_profile_apply_settings,
 )
 from comfyui_generator.core.storyboard import (
-    StoryboardOptions, REVIEW_MODEL, extract_premise_beats,
+    StoryboardOptions, extract_premise_beats,
     normalize_shot_casts, parse_character_profiles,
     premise_from_json, shots_from_json, slugify,
 )
@@ -196,8 +196,6 @@ GALLERY_META_ROLE = GALLERY_IMAGE_ROLE + 1
 GALLERY_FAVORITE_ROLE = GALLERY_META_ROLE + 1
 GALLERY_INDEX_ROLE = GALLERY_FAVORITE_ROLE + 1
 NEGATIVE_ROLE = GALLERY_INDEX_ROLE + 1
-READY_ROLE = NEGATIVE_ROLE + 1
-FINDINGS_ROLE = READY_ROLE + 1
 
 
 class GalleryViewerDialog(QDialog):
@@ -430,6 +428,13 @@ class MainWindow(QMainWindow):
         self._state_timer.setInterval(15000)
         self._state_timer.timeout.connect(self._save_ui_state)
         self._state_timer.start()
+        self._req_label = ""
+        self._req_model = ""
+        self._req_started = 0.0
+        self._request_timer = QTimer(self)
+        self._request_timer.setInterval(500)
+        self._request_timer.timeout.connect(self._tick_request_elapsed)
+        self._request_timer.stop()
         if os.environ.get("CUI_NO_AUTOCONNECT") != "1":
             QTimer.singleShot(300, self.connect_services)
 
@@ -738,17 +743,14 @@ class MainWindow(QMainWindow):
         self.btn_continue_partial.clicked.connect(self.continue_partial_story)
         form_layout.addWidget(self.btn_continue_partial)
 
-        self.shot_table = QTableWidget(0, 7)
+        self.shot_table = QTableWidget(0, 4)
         self.shot_table.setHorizontalHeaderLabels([
-            "锁", "镜号", "名称", "画面提示词（中文，可编辑）", "状态", "景别", "机位",
+            "锁", "镜号", "名称", "画面提示词（中文，可编辑）",
         ])
         self.shot_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.shot_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.shot_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.shot_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        self.shot_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        self.shot_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
-        self.shot_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
         self.shot_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.shot_table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked
                                         | QAbstractItemView.EditTrigger.EditKeyPressed)
@@ -782,12 +784,6 @@ class MainWindow(QMainWindow):
             btn = QPushButton(text)
             btn.clicked.connect(slot)
             tools.addWidget(btn)
-        self.btn_story_repair = QPushButton("修复失败分镜")
-        self.btn_story_repair.clicked.connect(self.repair_not_ready_shots)
-        tools.addWidget(self.btn_story_repair)
-        self.btn_story_revalidate = QPushButton("复检提示词")
-        self.btn_story_revalidate.clicked.connect(self.revalidate_current_shots)
-        tools.addWidget(self.btn_story_revalidate)
         layout.addLayout(tools)
 
         move_tools = QHBoxLayout()
@@ -1458,19 +1454,6 @@ class MainWindow(QMainWindow):
         self.continuity_negative.setPlaceholderText(
             "different hairstyle, different location, extra characters")
         layout.addWidget(self.continuity_negative)
-        layout.addWidget(_label("镜头语法", "Section"))
-        self.continuity_auto = QCheckBox("新分镜自动分配景别和机位")
-        self.continuity_auto.setChecked(True)
-        layout.addWidget(self.continuity_auto)
-        row = QHBoxLayout()
-        row.addWidget(_label("语法风格", "Hint"))
-        self.continuity_style = SearchComboBox()
-        self.continuity_style.setItems(GRAMMAR_STYLE_CHOICES)
-        row.addWidget(self.continuity_style, 1)
-        layout.addLayout(row)
-        self.btn_regenerate_grammar = QPushButton("按当前分镜重新分配镜头语法")
-        self.btn_regenerate_grammar.clicked.connect(self.regenerate_shot_grammar)
-        layout.addWidget(self.btn_regenerate_grammar)
         quality_row = QHBoxLayout()
         self.btn_quality_check = QPushButton("运行连贯质检")
         self.btn_quality_check.clicked.connect(self.run_quality_check)
@@ -1498,8 +1481,8 @@ class MainWindow(QMainWindow):
         self.btn_similarity.clicked.connect(self.run_similarity_check)
         layout.addWidget(self.btn_similarity)
         hint = _label(
-            "连续性标签会追加到每镜，不会覆盖角色/动作/服装状态机；"
-            "分镜表新增“景别 / 机位”两列，可直接编辑；角色参考表在“角色”页设置。"
+            "连续性标签会追加到每镜，不会覆盖剧情提示词；"
+            "角色参考表在“角色”页设置。"
             "CLIP 相似度以角色参考图（没有则用第一张成品）为基准，"
             "会同时受服装和背景影响；低于 0.55 建议人工检查。",
             "Hint")
@@ -2983,10 +2966,6 @@ class MainWindow(QMainWindow):
             "scene": self.continuity_scene.toPlainText(),
             "state": self.continuity_state.toPlainText(),
             "negative": self.continuity_negative.toPlainText(),
-            "grammar": {
-                "auto": self.continuity_auto.isChecked(),
-                "style": self.continuity_style.currentValue(),
-            },
         })
 
     def _set_continuity_settings(self, value: Any) -> None:
@@ -3001,8 +2980,6 @@ class MainWindow(QMainWindow):
                 field.setPlainText(text)
             finally:
                 field.blockSignals(False)
-        self.continuity_auto.setChecked(data["grammar"]["auto"])
-        self.continuity_style.selectValue(data["grammar"]["style"])
 
     def _style_positive(self) -> str:
         style = apply_style_profile(
@@ -3432,6 +3409,7 @@ class MainWindow(QMainWindow):
         worker.canceled.connect(self._on_prompt_canceled)
         worker.log.connect(self.append_log)
         worker.finished.connect(self._on_prompt_worker_finished)
+        self._bind_request_timer(worker)
         self.prompt_worker = worker
         self.statusBar().showMessage("Ollama 模型正在生成单图提示词…")
         worker.start()
@@ -3587,7 +3565,6 @@ class MainWindow(QMainWindow):
                 self.append_log("剧情历史保存失败：%s" % exc)
         options = StoryboardOptions(
             model=self._llm(), shots=total,
-            chunk=2 if external else 3,
             setting="",
             character_tags=self._combined_character_tags("story"),
             style_positive=self._style_positive(),
@@ -3605,6 +3582,7 @@ class MainWindow(QMainWindow):
         worker.canceled.connect(self._on_prompt_canceled)
         worker.log.connect(self.append_log)
         worker.finished.connect(self._on_prompt_worker_finished)
+        self._bind_request_timer(worker)
         self.prompt_worker = worker
         self.statusBar().showMessage("Ollama 模型正在生成分镜…")
         worker.start()
@@ -3614,93 +3592,9 @@ class MainWindow(QMainWindow):
         self._update_partial_button()
         self._fill_shot_table(shots)
         self.append_log("分镜已生成：%d 镜" % len(shots))
-        ready = all(shot_is_ready(shot) for shot in shots if isinstance(shot, dict))
-        not_ready = [str(shot.get("id") or "") for shot in shots
-                     if isinstance(shot, dict) and not shot_is_ready(shot)]
-        if ready:
-            self.statusBar().showMessage("分镜已就绪（共 %d 镜），可直接渲染" % len(shots))
-        else:
-            self.statusBar().showMessage(
-                "%d 镜未通过：%s；可点「修复失败分镜」，也可直接渲染" % (
-                    len(not_ready), ", ".join(not_ready)))
-            self.append_log(
-                "未通过分镜：%s；可在“状态”列悬停查看原因，或点「修复失败分镜」。" %
-                ", ".join(not_ready))
-            for shot in shots:
-                if isinstance(shot, dict) and not shot_is_ready(shot):
-                    for finding in shot.get("findings") or []:
-                        self.append_log("  镜头%s · %s" % (
-                            shot.get("id") or "",
-                            finding.get("message") if isinstance(finding, dict) else finding))
+        self.statusBar().showMessage("分镜已生成（共 %d 镜），可直接渲染" % len(shots))
         self._autosave_generated_story()
         self._start_auto_continuity(shots)
-
-    def revalidate_current_shots(self) -> None:
-        shots = self._collect_shots(False, allow_empty=True)
-        if not shots:
-            QMessageBox.information(self, "提示", "还没有分镜。")
-            return
-        premise = self._story_premise_text() or self._current_text() or ""
-        from comfyui_generator.core.stages import revalidate_tagged_shots
-
-        result = revalidate_tagged_shots(shots, premise)
-        self._fill_shot_table(result)
-        failed = [str(shot.get("id") or "") for shot in result if not shot_is_ready(shot)]
-        if failed:
-            self.append_log("复检未通过：%s" % ", ".join(failed))
-            for shot in result:
-                if not shot_is_ready(shot):
-                    for finding in shot.get("findings") or []:
-                        self.append_log("  镜头%s · %s" % (
-                            shot.get("id"), finding.get("message")))
-        else:
-            self.append_log("复检通过：%d 镜全部就绪。" % len(result))
-        self._autosave_generated_story()
-
-    def repair_not_ready_shots(self) -> None:
-        if self.prompt_worker and self.prompt_worker.isRunning():
-            return
-        shots = self._collect_shots(False, allow_empty=True)
-        not_ready = [shot for shot in shots if not shot_is_ready(shot)]
-        if not shots:
-            QMessageBox.information(self, "提示", "还没有分镜。")
-            return
-        if not not_ready:
-            QMessageBox.information(self, "提示", "全部分镜均已就绪。")
-            return
-        external = self._external_llm_ready()
-        if external:
-            if not (self.cfg.external_llm.base_url and self.cfg.external_llm.model):
-                QMessageBox.information(
-                    self, "提示", "请先在设置里填写外部 API 的 Base URL 和模型。")
-                return
-        else:
-            if not self.connected or not self._llm():
-                QMessageBox.information(self, "提示", "请先连接 ComfyUI / Ollama 并选择模型。")
-                return
-        text = self._story_premise_text() or self._current_text() or "story repair"
-        self._set_generation_enabled(False)
-        worker = PromptWorker(
-            self.cfg, "story_repair", text,
-            model=self._llm(),
-            style_positive=self._style_positive(),
-            strip_appearance=self._has_character_lora(),
-            use_external=external,
-            repair_shots=shots)
-        worker.story_ready.connect(self._on_story_repaired)
-        worker.failed.connect(self._on_prompt_failed)
-        worker.canceled.connect(self._on_prompt_canceled)
-        worker.log.connect(self.append_log)
-        worker.finished.connect(self._on_prompt_worker_finished)
-        self.prompt_worker = worker
-        self.statusBar().showMessage("正在修复失败分镜：%s" % ", ".join(
-            str(shot.get("id") or "") for shot in not_ready))
-        worker.start()
-
-    def _on_story_repaired(self, shots: list[dict[str, Any]]) -> None:
-        self._fill_shot_table(shots)
-        self.append_log("失败分镜修复流程结束：%d 镜" % len(shots))
-        self._autosave_generated_story()
 
     def _external_llm_ready(self) -> bool:
         external = self.cfg.external_llm
@@ -3802,61 +3696,15 @@ class MainWindow(QMainWindow):
             self.shot_table.setItem(row, 1, QTableWidgetItem(str(shot.get("id", "%02d" % (row + 1)))))
             self.shot_table.setItem(row, 2, QTableWidgetItem(str(shot.get("name", ""))))
             prompt = str(shot.get("prompt", ""))
-            prompt_zh = str(shot.get("prompt_zh") or prompt)
+            prompt_zh = str(shot.get("prompt_zh") or shot.get("description") or prompt)
             prompt_item = QTableWidgetItem(prompt_zh)
             prompt_item.setData(PROMPT_EN_ROLE, prompt)
             prompt_item.setData(PROMPT_ZH_ROLE, prompt_zh)
-            prompt_item.setData(OUTLINE_ROLE, str(shot.get("outline", "")))
-            prompt_item.setData(CAST_ROLE, str(shot.get("cast", "")))
-            prompt_item.setData(SCRIPT_ROLE, str(shot.get("script", "")))
-            prompt_item.setData(PHASE_ROLE, str(shot.get("phase", "")))
-            prompt_item.setData(BEAT_ROLE, str(shot.get("beat", "")))
-            prompt_item.setData(CLOTHING_ROLE, str(shot.get("clothing", "")))
-            prompt_item.setData(NEGATIVE_ROLE, str(shot.get("negative", "")))
-            prompt_item.setData(CHARACTERS_ROLE, str(shot.get("characters", "")))
-            states = shot.get("character_states") or {}
-            if isinstance(states, str):
-                try:
-                    states = json.loads(states)
-                except (TypeError, ValueError):
-                    states = {}
-            prompt_item.setData(CHARACTER_STATES_ROLE, json.dumps(
-                states, ensure_ascii=False))
-            prompt_item.setData(SCENE_ROLE, str(shot.get("scene", "")))
-            prompt_item.setData(CLOTHING_DETAILS_ROLE, json.dumps(
-                shot.get("clothing_details") or {}, ensure_ascii=False))
-            prompt_item.setData(PROMPT_GROUPS_ROLE, json.dumps(
-                shot.get("prompt_groups") or [], ensure_ascii=False))
-            prompt_item.setData(CONTINUITY_STATE_ROLE,
-                                str(shot.get("continuity_state") or ""))
-            prompt_item.setData(CONTINUITY_SCENE_ROLE,
-                                str(shot.get("continuity_scene") or ""))
             prompt_item.setData(KEYFRAME_PROMPT_ROLE,
                                 str(shot.get("keyframe_prompt") or ""))
             prompt_item.setData(AI_EXPANSIONS_ROLE, json.dumps(
                 shot.get("ai_expansions") or [], ensure_ascii=False))
             self.shot_table.setItem(row, 3, prompt_item)
-            ready = shot_is_ready(shot)
-            findings = shot.get("findings") or []
-            if isinstance(findings, str):
-                try:
-                    findings = json.loads(findings)
-                except (TypeError, ValueError):
-                    findings = []
-            status_item = QTableWidgetItem("就绪" if ready else "未通过")
-            status_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            status_item.setData(READY_ROLE, ready)
-            status_item.setData(FINDINGS_ROLE, json.dumps(
-                findings, ensure_ascii=False))
-            if not ready:
-                status_item.setForeground(QBrush(Qt.GlobalColor.red))
-                status_item.setToolTip("\n".join(
-                    str(item.get("message") or item) for item in findings))
-            self.shot_table.setItem(row, 4, status_item)
-            self.shot_table.setItem(row, 5, QTableWidgetItem(
-                str(shot.get("shot_size") or "")))
-            self.shot_table.setItem(row, 6, QTableWidgetItem(
-                str(shot.get("camera_angle") or "")))
         finally:
             self._syncing_shots = False
 
@@ -3870,40 +3718,6 @@ class MainWindow(QMainWindow):
         if self.shot_table.rowCount():
             self.shot_table.setCurrentCell(0, 3)
         self._update_shot_stats()
-
-    def _autofill_shot_grammar(self, overwrite: bool = False) -> None:
-        if not hasattr(self, "continuity_auto"):
-            return
-        settings = self._continuity_settings()
-        if not settings["grammar"]["auto"] and not overwrite:
-            return
-        total = self.shot_table.rowCount()
-        self.shot_table.blockSignals(True)
-        try:
-            for row in range(total):
-                size_item = self.shot_table.item(row, 5)
-                angle_item = self.shot_table.item(row, 6)
-                if (not overwrite and size_item and angle_item
-                        and size_item.text().strip() and angle_item.text().strip()):
-                    continue
-                grammar = auto_shot_grammar(row, total, settings)
-                if not size_item:
-                    size_item = QTableWidgetItem()
-                    self.shot_table.setItem(row, 5, size_item)
-                if not angle_item:
-                    angle_item = QTableWidgetItem()
-                    self.shot_table.setItem(row, 6, angle_item)
-                size_item.setText(grammar["shot_size"])
-                angle_item.setText(grammar["camera_angle"])
-        finally:
-            self.shot_table.blockSignals(False)
-
-    def regenerate_shot_grammar(self) -> None:
-        if not self.shot_table.rowCount():
-            QMessageBox.information(self, "提示", "还没有分镜。")
-            return
-        self._autofill_shot_grammar(overwrite=True)
-        self.append_log("已按当前镜头语法重新分配景别和机位。")
 
     def _quality_report_for_current(self):
         mode = self._current_mode()
@@ -4147,42 +3961,8 @@ class MainWindow(QMainWindow):
     def _row_data(self, row: int) -> dict[str, Any]:
         lock_item = self.shot_table.item(row, 0)
         prompt_item = self.shot_table.item(row, 3)
-        status_item = self.shot_table.item(row, 4)
-        states: dict[str, Any] = {}
-        details: dict[str, Any] = {}
-        prompt_groups: list[Any] = []
         ai_expansions: list[Any] = []
-        findings: list[Any] = []
-        if status_item:
-            raw_findings = status_item.data(FINDINGS_ROLE)
-            if isinstance(raw_findings, str) and raw_findings.strip():
-                try:
-                    parsed = json.loads(raw_findings)
-                    findings = parsed if isinstance(parsed, list) else []
-                except (TypeError, ValueError):
-                    findings = []
         if prompt_item:
-            raw_states = prompt_item.data(CHARACTER_STATES_ROLE)
-            if isinstance(raw_states, str) and raw_states.strip():
-                try:
-                    parsed = json.loads(raw_states)
-                    states = parsed if isinstance(parsed, dict) else {}
-                except (TypeError, ValueError):
-                    states = {}
-            raw_details = prompt_item.data(CLOTHING_DETAILS_ROLE)
-            if isinstance(raw_details, str) and raw_details.strip():
-                try:
-                    parsed = json.loads(raw_details)
-                    details = parsed if isinstance(parsed, dict) else {}
-                except (TypeError, ValueError):
-                    details = {}
-            raw_groups = prompt_item.data(PROMPT_GROUPS_ROLE)
-            if isinstance(raw_groups, str) and raw_groups.strip():
-                try:
-                    parsed = json.loads(raw_groups)
-                    prompt_groups = parsed if isinstance(parsed, list) else []
-                except (TypeError, ValueError):
-                    prompt_groups = []
             raw_expansions = prompt_item.data(AI_EXPANSIONS_ROLE)
             if isinstance(raw_expansions, str) and raw_expansions.strip():
                 try:
@@ -4190,41 +3970,20 @@ class MainWindow(QMainWindow):
                     ai_expansions = parsed if isinstance(parsed, list) else []
                 except (TypeError, ValueError):
                     ai_expansions = []
-        shot_status = status_item.data(READY_ROLE) if status_item else None
-        ready = shot_is_ready({"ready": shot_status}) if shot_status is not None else True
-        return {
+        result = {
             "locked": bool(lock_item and lock_item.checkState() == Qt.CheckState.Checked),
             "id": self.shot_table.item(row, 1).text() if self.shot_table.item(row, 1) else "",
             "name": self.shot_table.item(row, 2).text() if self.shot_table.item(row, 2) else "",
-            "prompt": prompt_item.text() if prompt_item else "",
-            "prompt_en": (prompt_item.data(PROMPT_EN_ROLE) or "") if prompt_item else "",
-            "prompt_zh": (prompt_item.data(PROMPT_ZH_ROLE) or "") if prompt_item else "",
-            "outline": (prompt_item.data(OUTLINE_ROLE) or "") if prompt_item else "",
-            "cast": (prompt_item.data(CAST_ROLE) or "") if prompt_item else "",
-            "script": (prompt_item.data(SCRIPT_ROLE) or "") if prompt_item else "",
-            "phase": (prompt_item.data(PHASE_ROLE) or "") if prompt_item else "",
-            "beat": (prompt_item.data(BEAT_ROLE) or "") if prompt_item else "",
-            "clothing": (prompt_item.data(CLOTHING_ROLE) or "") if prompt_item else "",
-            "negative": (prompt_item.data(NEGATIVE_ROLE) or "") if prompt_item else "",
-            "characters": (prompt_item.data(CHARACTERS_ROLE) or "") if prompt_item else "",
-            "character_states": states,
-            "clothing_details": details,
-            "prompt_groups": prompt_groups,
-            "scene": (prompt_item.data(SCENE_ROLE) or "") if prompt_item else "",
-            "continuity_state": (prompt_item.data(CONTINUITY_STATE_ROLE) or ""
-                                 if prompt_item else ""),
-            "continuity_scene": (prompt_item.data(CONTINUITY_SCENE_ROLE) or ""
-                                 if prompt_item else ""),
-            "keyframe_prompt": (prompt_item.data(KEYFRAME_PROMPT_ROLE) or ""
-                                if prompt_item else ""),
+            "prompt": "",
+            "description": "",
+            "keyframe_prompt": "",
             "ai_expansions": ai_expansions,
-            "ready": ready,
-            "findings": findings,
-            "shot_size": (self.shot_table.item(row, 5).text()
-                          if self.shot_table.item(row, 5) else ""),
-            "camera_angle": (self.shot_table.item(row, 6).text()
-                             if self.shot_table.item(row, 6) else ""),
         }
+        if prompt_item:
+            result["prompt"] = prompt_item.data(PROMPT_EN_ROLE) or ""
+            result["description"] = prompt_item.text() or ""
+            result["keyframe_prompt"] = prompt_item.data(KEYFRAME_PROMPT_ROLE) or ""
+        return result
 
     def _on_shot_item_changed(self, item: QTableWidgetItem) -> None:
         if self._syncing_shots or item.column() != 3:
@@ -4426,17 +4185,8 @@ class MainWindow(QMainWindow):
             shots.append({
                 "id": item["id"],
                 "name": item["name"],
-                "prompt": item["prompt_en"] or item["prompt"] or "",
-                "prompt_zh": item["prompt_zh"] or item["prompt"] or "",
-                "outline": item.get("outline", ""),
-                "cast": item.get("cast", ""),
-                "script": item.get("script", ""),
-                "phase": item.get("phase", ""),
-                "beat": item.get("beat", ""),
-                "shot_size": item.get("shot_size", ""),
-                "camera_angle": item.get("camera_angle", ""),
-                "continuity_state": item.get("continuity_state", ""),
-                "continuity_scene": item.get("continuity_scene", ""),
+                "prompt": item["prompt"],
+                "description": item.get("description", ""),
                 "keyframe_prompt": item.get("keyframe_prompt", ""),
                 "ai_expansions": item.get("ai_expansions") or [],
             })
@@ -4590,7 +4340,7 @@ class MainWindow(QMainWindow):
                     "prompt": prompt,
                     "prompt_zh": self.single_prompt.toPlainText().strip() or prompt}]
         options = StoryboardOptions(
-            model=self._llm(), shots=total, chunk=3,
+            model=self._llm(), shots=total,
             setting="",
             character_tags=self._combined_character_tags("single"),
             style_positive=self._style_positive(),
@@ -4604,6 +4354,7 @@ class MainWindow(QMainWindow):
         worker.canceled.connect(self._on_prompt_canceled)
         worker.log.connect(self.append_log)
         worker.finished.connect(self._on_prompt_worker_finished)
+        self._bind_request_timer(worker)
         self.prompt_worker = worker
         self.statusBar().showMessage("Ollama 模型正在扩写分镜…")
         worker.start()
@@ -4632,7 +4383,36 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("生成失败（可点“恢复上次未完成分镜”）")
         QMessageBox.warning(self, "生成失败", message)
 
+    def _bind_request_timer(self, worker: PromptWorker) -> None:
+        worker.request_started.connect(self._on_llm_request_started)
+        worker.request_finished.connect(self._on_llm_request_finished)
+
+    def _on_llm_request_started(self, label: str, model: str) -> None:
+        self._req_label = label or ""
+        self._req_model = model or ""
+        self._req_started = time.monotonic()
+        self._request_timer.start()
+        self._tick_request_elapsed()
+
+    def _on_llm_request_finished(self, label: str, model: str) -> None:
+        self._request_timer.stop()
+
+    def _tick_request_elapsed(self) -> None:
+        if not self._req_started:
+            return
+        elapsed = time.monotonic() - self._req_started
+        kind_name = {
+            "single": "单图提示词",
+            "story": "分镜",
+            "story_repair": "修复分镜",
+            "rewrite": "改写提示词",
+        }.get(self._req_label, "AI 生成")
+        self.statusBar().showMessage(
+            "正在请求模型生成%s（%s）…已等待 %.0f 秒" % (
+                kind_name, self._req_model, elapsed))
+
     def _on_prompt_worker_finished(self) -> None:
+        self._request_timer.stop()
         busy = any(
             worker is not None and worker.isRunning()
             for worker in (self.render_worker, self.reference_sheet_worker,
@@ -4698,85 +4478,26 @@ class MainWindow(QMainWindow):
         rows = self._selected_shot_rows() if selected_only \
             else list(range(self.shot_table.rowCount()))
         shots: list[dict[str, Any]] = []
-        pending: list[tuple[int, int, str, str]] = []
         for row in rows:
             data = self._row_data(row)
-            display = data["prompt"].strip()
-            if not display and not allow_empty:
+            prompt = str(data.get("prompt") or "").strip()
+            description = str(data.get("description") or "").strip()
+            if not prompt and not description and not allow_empty:
                 continue
-            index = len(shots)
-            if not display:
-                shots.append({"id": data["id"].strip() or "%02d" % (index + 1),
-                              "name": data["name"].strip() or "shot_%02d" % (index + 1),
-                              "prompt": "",
-                              "prompt_zh": "",
-                              "outline": data.get("outline", ""),
-                              "cast": data.get("cast", ""),
-                "script": data.get("script", ""),
-                "phase": data.get("phase", ""),
-                "beat": data.get("beat", ""),
-                              "clothing": data.get("clothing", ""),
-                              "negative": data.get("negative", ""),
-                              "characters": data.get("characters", ""),
-                              "character_states": data.get("character_states") or {},
-                              "clothing_details": data.get("clothing_details") or {},
-                              "prompt_groups": data.get("prompt_groups") or [],
-                              "scene": data.get("scene", ""),
-                              "continuity_state": data.get("continuity_state", ""),
-                              "continuity_scene": data.get("continuity_scene", ""),
-                              "keyframe_prompt": data.get("keyframe_prompt", ""),
-                              "ai_expansions": data.get("ai_expansions") or [],
-                              "shot_size": data.get("shot_size", ""),
-                              "camera_angle": data.get("camera_angle", ""),
-                              "ready": data.get("ready", True),
-                              "findings": data.get("findings", []),
-                              "locked": data["locked"]})
-                continue
-            prompt_en = data.get("prompt_en", "").strip()
-            prompt_zh = data.get("prompt_zh", "").strip()
-            resolved = prompt_en if display == prompt_zh and prompt_en else ""
-            if not resolved:
-                pending.append((row, index, display, prompt_en))
-            shots.append({"id": data["id"].strip() or "%02d" % (index + 1),
-                          "name": data["name"].strip() or "shot_%02d" % (index + 1),
-                          "prompt": resolved,
-                          "prompt_zh": display,
-                          "outline": data.get("outline", ""),
-                          "cast": data.get("cast", ""),
-                          "script": data.get("script", ""),
-                          "phase": data.get("phase", ""),
-                          "beat": data.get("beat", ""),
-                          "clothing": data.get("clothing", ""),
-                          "negative": data.get("negative", ""),
-                          "characters": data.get("characters", ""),
-                          "character_states": data.get("character_states") or {},
-                          "clothing_details": data.get("clothing_details") or {},
-                          "prompt_groups": data.get("prompt_groups") or [],
-                          "scene": data.get("scene", ""),
-                          "continuity_state": data.get("continuity_state", ""),
-                          "continuity_scene": data.get("continuity_scene", ""),
-                          "keyframe_prompt": data.get("keyframe_prompt", ""),
-                          "ai_expansions": data.get("ai_expansions") or [],
-                          "shot_size": data.get("shot_size", ""),
-                          "camera_angle": data.get("camera_angle", ""),
-                          "ready": data.get("ready", True),
-                          "findings": data.get("findings", []),
-                          "locked": data["locked"]})
-        if pending:
-            translations = self._resolve_chinese_texts([item[2] for item in pending])
-            for (row, index, display, fallback), resolved in zip(pending, translations):
-                text = resolved or fallback or display
-                shots[index]["prompt"] = text
-                item = self.shot_table.item(row, 3)
-                if item:
-                    self._syncing_shots = True
-                    try:
-                        item.setData(PROMPT_EN_ROLE, text)
-                        item.setData(PROMPT_ZH_ROLE, display)
-                    finally:
-                        self._syncing_shots = False
+            shot = {
+                "id": str(data["id"]).strip() or "%02d" % (len(shots) + 1),
+                "name": str(data["name"]).strip() or "shot_%02d" % (len(shots) + 1),
+                "prompt": prompt,
+                "description": description,
+                "ai_expansions": data.get("ai_expansions") or [],
+            }
+            keyframe = str(data.get("keyframe_prompt") or "").strip()
+            if keyframe:
+                shot["keyframe_prompt"] = keyframe
+            shots.append(shot)
         self._update_shot_stats()
         return shots
+
 
     def _run_prefix_for(self, mode: str, text: str) -> str:
         signature = "%s\n%s" % (mode, text.strip())
@@ -4845,20 +4566,6 @@ class MainWindow(QMainWindow):
                 self.append_log("自动连贯修复 · " + change)
         if not self._preflight_quality(project):
             return
-        if mode != "single":
-            not_ready = [
-                str(shot.get("id") or "")
-                for shot in shots
-                if isinstance(shot, dict) and not shot_is_ready(shot)]
-            if not_ready:
-                self.append_log(
-                    "提示：以下镜头未通过生成期确定性校验（%s），不影响渲染，已按当前分镜继续生成图片。" % ", ".join(not_ready))
-                for shot in shots:
-                    if str(shot.get("id") or "") in not_ready:
-                        for finding in shot.get("findings") or []:
-                            self.append_log("  镜头%s · %s" % (
-                                shot.get("id") or "",
-                                finding.get("message") if isinstance(finding, dict) else finding))
         self._continue_render(mode, project, shots, text, previous_prefix)
 
     def _continue_render(self, mode: str, project: dict[str, Any],
@@ -6121,6 +5828,7 @@ class MainWindow(QMainWindow):
         worker.canceled.connect(self._on_prompt_canceled)
         worker.log.connect(self.append_log)
         worker.finished.connect(self._on_prompt_worker_finished)
+        self._bind_request_timer(worker)
         self.prompt_worker = worker
         self._set_generation_enabled(False)
         self.statusBar().showMessage("Ollama 模型正在改写镜头…")
@@ -6632,27 +6340,14 @@ class MainWindow(QMainWindow):
             "id": shot.get("id", ""),
             "name": shot.get("name", ""),
             "prompt": shot.get("prompt_en") or shot.get("prompt", ""),
-            "prompt_zh": shot.get("prompt") or shot.get("prompt_zh", ""),
-            "outline": shot.get("outline", ""),
-            "cast": shot.get("cast", ""),
-            "script": shot.get("script", ""),
-            "phase": shot.get("phase", ""),
-            "beat": shot.get("beat", ""),
-            "continuity_state": shot.get("continuity_state", ""),
-            "continuity_scene": shot.get("continuity_scene", ""),
+            "description": (
+                shot.get("description")
+                or shot.get("prompt_zh") or shot.get("outline") or ""),
             "keyframe_prompt": shot.get("keyframe_prompt", ""),
             "ai_expansions": shot.get("ai_expansions") or [],
-            "shot_size": shot.get("shot_size", ""),
-            "camera_angle": shot.get("camera_angle", ""),
             "locked": bool(shot.get("locked")),
         } for shot in saved_shots if isinstance(shot, dict)]
         self._fill_shot_table(restored_shots)
-        for row, shot in enumerate(saved_shots):
-            if row >= self.shot_table.rowCount() or not isinstance(shot, dict):
-                break
-            item = self.shot_table.item(row, 3)
-            if item:
-                item.setData(PROMPT_ZH_ROLE, str(shot.get("prompt_zh") or ""))
         self.chk_selected.setChecked(bool(story.get("selected_only")))
 
         options = state.get("options") or {}

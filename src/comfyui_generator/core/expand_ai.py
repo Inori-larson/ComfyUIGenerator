@@ -97,28 +97,17 @@ def _shot_payload(shot: dict[str, Any], next_shot: dict[str, Any] | None,
     payload = {
         "id": str(shot.get("id") or ""),
         "prompt": str(shot.get("prompt") or ""),
-        "script": str(shot.get("script") or shot.get("outline") or ""),
-        "cast": str(shot.get("cast") or ""),
-        "scene": str(shot.get("scene") or ""),
-        "clothing": str(shot.get("clothing") or ""),
-        "clothing_details": shot.get("clothing_details") or {},
+        "description": str(shot.get("description") or ""),
         "prev": None,
         "next": None,
     }
     if prev_shot:
         payload["prev"] = {
             "prompt": str(prev_shot.get("prompt") or ""),
-            "script": str(prev_shot.get("script") or prev_shot.get("outline") or ""),
-            "scene": str(prev_shot.get("scene") or ""),
         }
     if next_shot:
         payload["next"] = {
             "prompt": str(next_shot.get("prompt") or ""),
-            "script": str(next_shot.get("script") or next_shot.get("outline") or ""),
-            "cast": str(next_shot.get("cast") or ""),
-            "scene": str(next_shot.get("scene") or ""),
-            "clothing": str(next_shot.get("clothing") or ""),
-            "clothing_details": next_shot.get("clothing_details") or {},
         }
     return payload
 
