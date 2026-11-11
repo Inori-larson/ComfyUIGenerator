@@ -4224,7 +4224,6 @@ class MainWindow(QMainWindow):
                 "id": item["id"],
                 "name": item["name"],
                 "prompt": item["prompt"],
-                "description": item.get("description", ""),
                 "keyframe_prompt": item.get("keyframe_prompt", ""),
                 "ai_expansions": item.get("ai_expansions") or [],
             })
@@ -4346,6 +4345,16 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("已粘贴导入 %d 个分镜" % len(shots))
         self._autosave_generated_story()
         self._save_ui_state()
+        changes: list[tuple[int, str]] = []
+        for row in range(self.shot_table.rowCount()):
+            item = self.shot_table.item(row, 3)
+            prompt = str(item.data(PROMPT_EN_ROLE) or "") if item else ""
+            if prompt:
+                changes.append((row, prompt))
+        if changes and self._llm():
+            self._translate_changed_shot_prompts(changes)
+        elif changes:
+            self.append_log("没有可用 Ollama 模型，表格先显示英文标签。")
 
     def _translate_changed_shot_prompts(self, changes: list[tuple[int, str]]) -> None:
         model = self._llm()

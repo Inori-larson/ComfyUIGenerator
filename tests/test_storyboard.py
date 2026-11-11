@@ -25,8 +25,8 @@ def make_options(**kwargs):
     return StoryboardOptions(**base)
 
 
-def shot(id, prompt, description="desc"):
-    return {"id": id, "prompt": prompt, "description": description}
+def shot(id, prompt):
+    return {"id": id, "prompt": prompt}
 
 
 def raw(*items):
@@ -46,6 +46,7 @@ def test_messages_include_clothing_rules():
     assert "颜色" in system
     assert "不允许全脱" in system
     assert "禁止跳变" in system
+    assert "逐步脱掉" in system
     assert "体液状态" in system
 
 
@@ -56,19 +57,18 @@ def test_messages_strip_appearance():
 
 def test_normalize_keeps_only_core_fields():
     out = normalize_shots(raw(
-        shot("01", "1girl, solo, smile", "第一个"),
-        shot("02", "1girl, 1boy, hug", "第二个")), 2)
+        shot("01", "1girl, solo, smile"),
+        shot("02", "1girl, 1boy, hug")), 2)
     assert [s["id"] for s in out] == ["01", "02"]
     assert out[0]["prompt"] == "1girl, solo, smile"
-    assert out[0]["description"] == "第一个"
     assert out[0]["name"] == "shot_01"
     assert "cast" not in out[0]
 
 
 def test_normalize_derives_name_and_renumbers():
     out = normalize_shots(raw(
-        {"id": "9", "prompt": "1girl", "description": "x"},
-        {"id": "x", "prompt": "1boy", "description": "y"}), 0)
+        {"id": "9", "prompt": "1girl"},
+        {"id": "x", "prompt": "1boy"}), 0)
     assert out[0]["id"] == "01"
     assert out[0]["name"] == "shot_01"
     assert out[1]["id"] == "02"
@@ -76,14 +76,14 @@ def test_normalize_derives_name_and_renumbers():
 
 def test_normalize_drops_empty_prompt():
     out = normalize_shots(raw(
-        shot("01", "1girl", "a"),
-        shot("02", "   ", "b"),
-        shot("03", "1boy", "c")), 3)
+        shot("01", "1girl"),
+        shot("02", "   "),
+        shot("03", "1boy")), 3)
     assert [s["id"] for s in out] == ["01", "02"]
 
 
 def test_normalize_strips_cjk_from_prompt():
-    out = normalize_shots(raw(shot("01", "1girl, 中文, smile", "d")), 1)
+    out = normalize_shots(raw(shot("01", "1girl, 中文, smile")), 1)
     assert out[0]["prompt"] == "1girl, smile"
 
 
@@ -96,9 +96,9 @@ def test_normalize_no_shots_raises():
 
 def test_generate_calls_client_with_schema():
     client = ScriptedLLMClient([raw(
-        shot("01", "1girl", "a"),
-        shot("02", "1girl", "b"),
-        shot("03", "1girl", "c"))])
+        shot("01", "1girl"),
+        shot("02", "1girl"),
+        shot("03", "1girl"))])
     out = generate_storyboard(client, "premise", make_options())
     assert len(out) == 3
     model, messages, kwargs = client.calls[0]
@@ -109,7 +109,7 @@ def test_generate_calls_client_with_schema():
 
 def test_generate_returns_all_requested_shots():
     client = ScriptedLLMClient([raw(
-        shot("01", "1girl", "a"), shot("02", "1girl", "b"))])
+        shot("01", "1girl"), shot("02", "1girl"))])
     out = generate_storyboard(client, "p", make_options(shots=2))
     assert len(out) == 2
 
