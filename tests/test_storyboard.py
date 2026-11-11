@@ -192,3 +192,13 @@ def test_scene_is_emphasized_in_user_message():
     msgs = build_storyboard_messages(premise, 3)
     assert "本片大场景固定为『电影院』" in msgs[1]["content"]
     assert "大场景必须严格使用" in msgs[0]["content"]
+
+
+def test_clothing_colour_is_emphasized_in_user_message():
+    premise = "角色：girl\n初始服装：white skirt, pleated skirt\n剧情：跑步"
+    msgs = build_storyboard_messages(premise, 3)
+    user = msgs[1]["content"]
+    assert "初始服装（逐字使用，不得改色）" in user
+    assert "white skirt" in user
+    assert "禁止写成 hiked skirt" in user
+    assert "颜色 + 款式" in msgs[0]["content"]

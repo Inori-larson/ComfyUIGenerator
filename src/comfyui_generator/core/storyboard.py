@@ -33,6 +33,10 @@ STORYBOARD_SYSTEM = (
     "4. 服装只能使用用户给出的初始服装里实际列出的单品，禁止发明或添加初始服装之外的"
     "衣物、内衣、丝袜、裤袜、鞋、配饰等；颜色、材质、款式必须与初始服装完全一致，"
     "不能更换颜色、改色或替换成同类其他款式。\n"
+    "4b. 每一镜的服装标签都必须写全『颜色 + 款式』，不能只写款式或裸写 skirt、"
+    "miniskirt、shirt、bra 这类词；即使处于掀起、半脱、拨开、破损、挂腿状态，"
+    "也要保留颜色，例如写 white pleated skirt hiked up、white miniskirt at hips，"
+    "禁止写 hiked skirt、skirt lifted、miniskirt at hips 这种省略颜色的形式。\n"
     "5. 情趣服装（丝袜、裤袜、高跟鞋、内裤等）只允许破坏、半脱、拨开或挂腿，"
     "不允许全脱或消失。\n"
     "6. 非情趣服装（外套、制服、上衣、裙子、裤子等）必须按剧情逐步脱掉："
@@ -77,6 +81,18 @@ def _scene_from_premise(premise: str) -> str:
     return ""
 
 
+def _clothing_from_premise(premise: str) -> str:
+    for line in str(premise or "").splitlines():
+        stripped = line.strip()
+        for label in ("初始服装", "初始装扮"):
+            if not stripped.startswith(label):
+                continue
+            remainder = stripped[len(label):]
+            if not remainder or remainder[0] in "：: ":
+                return remainder.lstrip("：: ").strip()
+    return ""
+
+
 def build_storyboard_messages(premise: str, total: int,
                               setting: str = "",
                               strip_appearance: bool = False
@@ -90,6 +106,13 @@ def build_storyboard_messages(premise: str, total: int,
         user.append(
             "本片大场景固定为『%s』：全部镜头都必须在这个场景里，"
             "不得更换地点或另起场景；只有剧情明确写出移动时才换。" % scene)
+    clothing = _clothing_from_premise(premise)
+    if clothing:
+        user.append(
+            "初始服装（逐字使用，不得改色）：%s\n"
+            "每一镜都要写出完整的『颜色+款式』服装标签；即使是掀起/半脱/破损状态，"
+            "也必须保留颜色，例如 white pleated skirt hiked up，"
+            "禁止写成 hiked skirt 这种省略颜色的形式。" % clothing)
     if setting.strip():
         user.append("附加要求：%s" % setting.strip())
     if strip_appearance:
