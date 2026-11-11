@@ -27,20 +27,23 @@ STORYBOARD_SYSTEM = (
     "1. 按用户指定的镜数生成，id 从 01 连续编号到最后一镜，不能少、重、跳。\n"
     "2. 每镜的 prompt 只写英文 Danbooru 标签，用英文逗号分隔；镜头之间的剧情、"
     "服装、动作、场景自然连贯，并按顺序覆盖用户剧情中的全部情节。\n"
-    "3. 服装只能使用用户给出的初始服装里实际列出的单品，禁止发明或添加初始服装之外的"
+    "3. 大场景必须严格使用用户给出的场景（例如“大场景：电影院”就整片都在电影院），"
+    "禁止换成其他地点或另起场景；只有剧情明确写出移动时才换场景；"
+    "同一场景内可以自然扩展家具、光线、天气等细节。用户没有给场景时才自行设定并保持一致。\n"
+    "4. 服装只能使用用户给出的初始服装里实际列出的单品，禁止发明或添加初始服装之外的"
     "衣物、内衣、丝袜、裤袜、鞋、配饰等；颜色、材质、款式必须与初始服装完全一致，"
     "不能更换颜色、改色或替换成同类其他款式。\n"
-    "4. 情趣服装（丝袜、裤袜、高跟鞋、内裤等）只允许破坏、半脱、拨开或挂腿，"
+    "5. 情趣服装（丝袜、裤袜、高跟鞋、内裤等）只允许破坏、半脱、拨开或挂腿，"
     "不允许全脱或消失。\n"
-    "5. 非情趣服装（外套、制服、上衣、裙子、裤子等）必须按剧情逐步脱掉："
+    "6. 非情趣服装（外套、制服、上衣、裙子、裤子等）必须按剧情逐步脱掉："
     "不能一开场就全裸，也不能一次脱完；每镜只脱一件或一个层级，"
     "从外到内依次进行。\n"
-    "6. 服装状态必须连贯、逐镜递进，禁止跳变：已脱下、半脱或破损的衣物不得无故复原；"
+    "7. 服装状态必须连贯、逐镜递进，禁止跳变：已脱下、半脱或破损的衣物不得无故复原；"
     "还没脱的不能突然消失；相邻镜头之间不能反复穿脱或来回变化破损位置。\n"
-    "7. 体液状态（精液、淫水、唾液、汗等）也必须连贯：一旦出现就保留在对应部位或"
+    "8. 体液状态（精液、淫水、唾液、汗等）也必须连贯：一旦出现就保留在对应部位或"
     "逐渐累积、变化，直到剧情明确清理；不能在相邻镜头无故消失；未发生对应行为前"
     "不能提前出现。\n"
-    "8. 只输出 JSON：{\"shots\":[{\"id\":\"01\",\"prompt\":\"英文标签\"}]}，不要中文描述，不要解释。"
+    "9. 只输出 JSON：{\"shots\":[{\"id\":\"01\",\"prompt\":\"英文标签\"}]}，不要中文描述，不要解释。"
 )
 
 STORYBOARD_SCHEMA: dict[str, Any] = {
@@ -62,6 +65,18 @@ STORYBOARD_SCHEMA: dict[str, Any] = {
 }
 
 
+def _scene_from_premise(premise: str) -> str:
+    for line in str(premise or "").splitlines():
+        stripped = line.strip()
+        for label in ("大场景", "场景"):
+            if not stripped.startswith(label):
+                continue
+            remainder = stripped[len(label):]
+            if not remainder or remainder[0] in "：: ":
+                return remainder.lstrip("：: ").strip()
+    return ""
+
+
 def build_storyboard_messages(premise: str, total: int,
                               setting: str = "",
                               strip_appearance: bool = False
@@ -70,6 +85,11 @@ def build_storyboard_messages(premise: str, total: int,
         "用户剧情：\n%s" % premise,
         "目标镜数：%d" % total,
     ]
+    scene = _scene_from_premise(premise)
+    if scene:
+        user.append(
+            "本片大场景固定为『%s』：全部镜头都必须在这个场景里，"
+            "不得更换地点或另起场景；只有剧情明确写出移动时才换。" % scene)
     if setting.strip():
         user.append("附加要求：%s" % setting.strip())
     if strip_appearance:

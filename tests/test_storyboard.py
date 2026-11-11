@@ -185,3 +185,10 @@ def test_shots_from_json_string_shots():
 def test_shots_from_json_empty_raises():
     with pytest.raises(ValueError):
         shots_from_json({"shots": []})
+
+
+def test_scene_is_emphasized_in_user_message():
+    premise = "角色：girl\n大场景：电影院\n剧情：自慰"
+    msgs = build_storyboard_messages(premise, 3)
+    assert "本片大场景固定为『电影院』" in msgs[1]["content"]
+    assert "大场景必须严格使用" in msgs[0]["content"]
