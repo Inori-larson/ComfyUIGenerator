@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 from comfyui_generator.ui.widgets import SearchComboBox
 
 from comfyui_generator.core.external_llm import EXTERNAL_LLM_MODEL
+from comfyui_generator.core.opencode_config import endpoint_for_model, model_choices
 
 from comfyui_generator.core.config import AppConfig, save_config
 
@@ -111,21 +112,42 @@ class SettingsDialog(QDialog):
 
         external_box = QGroupBox("外部 OpenAI 兼容 API（提示词生成）")
         external_form = QFormLayout(external_box)
+        current_model = cfg.external_llm.model or EXTERNAL_LLM_MODEL
+        choices = model_choices()
+        has_catalog = bool(choices)
+        if not choices:
+            choices = [(current_model, current_model)]
+        if all(value != current_model for _label, value in choices):
+            choices.insert(0, (current_model, current_model))
         self.external_base = QLineEdit(cfg.external_llm.base_url)
         self.external_base.setPlaceholderText("https://api.openai.com/v1")
+        self.external_base.setReadOnly(True)
         external_form.addRow("Base URL", self.external_base)
         self.external_key = QLineEdit(cfg.external_llm.api_key)
         self.external_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.external_key.setPlaceholderText("sk-...（也可用 OPENAI_API_KEY）")
+        self.external_key.setReadOnly(True)
         external_form.addRow("API Key", self.external_key)
-        self.external_model = QLineEdit(cfg.external_llm.model or EXTERNAL_LLM_MODEL)
-        self.external_model.setPlaceholderText(EXTERNAL_LLM_MODEL)
+        self.external_model = SearchComboBox(
+            placeholder="选择 opencode 中配置的模型",
+            allow_free_text=not has_catalog)
+        self.external_model.setItems(choices)
+        self.external_model.selectValue(current_model)
+        self.external_model.currentIndexChanged.connect(
+            self._sync_external_endpoint)
         external_form.addRow("模型", self.external_model)
+        self._sync_external_endpoint()
         self.external_no_thinking = QCheckBox("关闭模型推理输出（DeepSeek/豆包结构化 JSON）")
         self.external_no_thinking.setChecked(bool(
             getattr(cfg.external_llm, "disable_thinking", True)))
         external_form.addRow("", self.external_no_thinking)
-        external_hint = QLabel("只用于外部提示词生成，不调用 Ollama；Key 仅保存在本机 config.json。")
+        if has_catalog:
+            external_hint = QLabel(
+                "模型列表读取自 opencode 配置（%s 个模型），选择后自动套用对应网关地址和 Key；"
+                "Key 仅保存在本机 config.json。" % len(choices))
+        else:
+            external_hint = QLabel(
+                "未找到 opencode 配置（~/.config/opencode/opencode.json），"
+                "当前只能使用已保存的模型；请先配置 opencode。")
         external_hint.setWordWrap(True)
         external_form.addRow("", external_hint)
         form.addWidget(external_box)
@@ -185,6 +207,14 @@ class SettingsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
 
+    def _sync_external_endpoint(self) -> None:
+        model = str(self.external_model.currentValue() or "").strip()
+        endpoint = endpoint_for_model(model) if model else {}
+        if endpoint.get("base_url"):
+            self.external_base.setText(endpoint["base_url"])
+        if endpoint.get("api_key"):
+            self.external_key.setText(endpoint["api_key"])
+
     def _save(self) -> None:
         c = self.cfg
         c.comfy.mode = self.mode.currentValue()
@@ -204,9 +234,13 @@ class SettingsDialog(QDialog):
         c.ollama.port = self.ollama_port.value()
         c.ollama.exe = self.ollama_exe.text().strip()
         c.ollama.default_model = self.ollama_model.currentValue() or ""
-        c.external_llm.base_url = self.external_base.text().strip()
-        c.external_llm.api_key = self.external_key.text().strip()
-        c.external_llm.model = self.external_model.text().strip() or EXTERNAL_LLM_MODEL
+        c.external_llm.model = str(
+            self.external_model.currentValue() or "").strip() or EXTERNAL_LLM_MODEL
+        endpoint = endpoint_for_model(c.external_llm.model)
+        c.external_llm.base_url = (
+            endpoint.get("base_url") or self.external_base.text().strip())
+        c.external_llm.api_key = (
+            endpoint.get("api_key") or self.external_key.text().strip())
         c.external_llm.disable_thinking = self.external_no_thinking.isChecked()
         c.lora.character_dir = self.character_lora_dir.text().strip()
         c.lora.style_dir = self.style_lora_dir.text().strip()

@@ -433,9 +433,11 @@ class ShotDetailsDialog(QDialog):
             return
         shot = self._shots[row]
         self.heading.setText("分镜 %s · %s" % (shot.get("id", ""), shot.get("name", "")))
-        self.zh_edit.setPlainText(str(shot.get("prompt_zh") or shot.get("prompt") or ""))
+        self.zh_edit.setPlainText(str(
+            shot.get("description") or shot.get("prompt_zh")
+            or shot.get("prompt") or ""))
         outline = self._outlines[row] if row < len(self._outlines) else ""
-        self.outline_edit.setPlainText(outline or "（剧情没有按编号提供对应大纲）")
+        self.outline_edit.setPlainText(outline or "（该镜没有额外说明）")
         self.json_edit.setPlainText(self._raw[row])
 
     def _save(self) -> None:

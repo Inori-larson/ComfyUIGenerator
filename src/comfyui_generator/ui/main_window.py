@@ -61,7 +61,8 @@ from comfyui_generator.core.style_profile import (
     normalize_style_profile, style_profile_apply_settings,
 )
 from comfyui_generator.core.storyboard import (
-    StoryboardOptions, extract_premise_beats,
+    StoryboardOptions, build_storyboard_messages,
+    extract_premise_beats,
     normalize_shot_casts, parse_character_profiles,
     premise_from_json, shots_from_json, slugify,
 )
@@ -813,6 +814,15 @@ class MainWindow(QMainWindow):
         json_row.addWidget(self.btn_export_shots)
         json_row.addWidget(self.btn_import_shots)
         layout.addLayout(json_row)
+
+        paste_row = QHBoxLayout()
+        self.btn_copy_story_prompt = QPushButton("复制分镜提示词（给网页版）")
+        self.btn_copy_story_prompt.clicked.connect(self.copy_storyboard_prompt)
+        self.btn_paste_shots = QPushButton("粘贴 JSON 导入")
+        self.btn_paste_shots.clicked.connect(self.import_shots_from_clipboard)
+        paste_row.addWidget(self.btn_copy_story_prompt)
+        paste_row.addWidget(self.btn_paste_shots)
+        layout.addLayout(paste_row)
 
         self.chk_selected = QCheckBox("只生成选中的镜头")
         layout.addWidget(self.chk_selected)
@@ -2734,21 +2744,43 @@ class MainWindow(QMainWindow):
             "extra": self.story_extra.toPlainText().strip(),
         }
 
+    @staticmethod
+    def _has_label_line(text: str, labels: tuple[str, ...]) -> bool:
+        for line in str(text or "").splitlines():
+            stripped = line.strip()
+            for label in labels:
+                if not stripped.startswith(label):
+                    continue
+                remainder = stripped[len(label):]
+                if not remainder or remainder[0] in "：: ":
+                    return True
+        return False
+
     def _story_premise_text(self) -> str:
         fields = self._story_fields()
         parts: list[str] = []
         if fields["role"]:
-            parts.append("角色：%s" % fields["role"])
+            parts.append(fields["role"] if self._has_label_line(
+                fields["role"], ("角色设定", "角色标签", "角色", "人物设定",
+                                 "人物")) else "角色：%s" % fields["role"])
         if fields["appearance"]:
-            parts.append("外貌身材：%s" % self._resolved_appearance("story"))
+            appearance = self._resolved_appearance("story")
+            parts.append(appearance if self._has_label_line(
+                appearance, ("外貌身材", "角色外貌", "人物外貌", "外貌", "外形",
+                             "身材", "体型")) else "外貌身材：%s" % appearance)
         if fields["clothing"]:
-            parts.append("初始服装：%s" % fields["clothing"])
+            parts.append(fields["clothing"] if self._has_label_line(
+                fields["clothing"], ("初始服装标签", "初始服装", "初始装扮",
+                                     "服装")) else "初始服装：%s" % fields["clothing"])
         if fields["scene"]:
-            parts.append("大场景：%s" % fields["scene"])
+            parts.append(fields["scene"] if self._has_label_line(
+                fields["scene"], ("大场景", "场景")) else "大场景：%s" % fields["scene"])
         if fields["plot"]:
-            parts.append("剧情：\n%s" % fields["plot"])
+            parts.append(fields["plot"] if self._has_label_line(
+                fields["plot"], ("剧情", "画面")) else "剧情：\n%s" % fields["plot"])
         if fields["extra"]:
-            parts.append("其它：%s" % fields["extra"])
+            parts.append(fields["extra"] if self._has_label_line(
+                fields["extra"], ("其它", "其他", "额外")) else "其它：%s" % fields["extra"])
         return "\n".join(parts)
 
     @staticmethod
@@ -2782,10 +2814,13 @@ class MainWindow(QMainWindow):
                 matched = (key, rest)
                 break
             if matched:
-                current = matched[0]
+                key, rest = matched
+                current = key
                 found = True
-                if matched[1]:
-                    fields[current] = matched[1]
+                if rest:
+                    existing = fields[current]
+                    fields[current] = (
+                        existing + "\n" + rest).strip() if existing else rest
             else:
                 fields[current] = (fields[current] + "\n" + line).strip()
         if not found:
@@ -4125,14 +4160,15 @@ class MainWindow(QMainWindow):
         for index, row in enumerate(range(self.shot_table.rowCount())):
             item = self._row_data(row)
             rows.append(row)
-            outline = item.get("outline", "") or (
+            outline = item.get("description", "") or (
                 outlines[index] if index < len(outlines) else "")
             row_outlines.append(outline)
             data.append({
                 "id": item["id"],
                 "name": item["name"],
-                "prompt": item["prompt_en"] or item["prompt"] or "",
-                "prompt_zh": item["prompt_zh"] or item["prompt"] or "",
+                "prompt": item["prompt"],
+                "prompt_zh": item.get("description", "") or item["prompt"],
+                "description": item.get("description", ""),
             })
         dialog = ShotDetailsDialog(data, row_outlines, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -4226,6 +4262,88 @@ class MainWindow(QMainWindow):
         self._fill_shot_table(shots)
         self.append_log("已导入 %d 个分镜：%s" % (len(shots), path))
         self.statusBar().showMessage("分镜 JSON 已导入并替换")
+
+    def copy_storyboard_prompt(self) -> None:
+        premise = self._story_premise_text()
+        if not premise.strip():
+            QMessageBox.information(self, "提示", "请先输入角色、剧情或场景。")
+            return
+        total = max(1, int(self.story_shots.value()))
+        messages = build_storyboard_messages(
+            premise, total,
+            strip_appearance=self._has_character_lora())
+        system = messages[0]["content"]
+        user = messages[1]["content"]
+        text = ("【系统指令】\n%s\n\n【我的分镜要求】\n%s\n\n"
+                "只输出 JSON，不要解释、不要代码块以外的文字。" % (system, user))
+        QApplication.clipboard().setText(text)
+        self.append_log("已复制分镜提示词（%d 镜），粘贴到网页版即可。" % total)
+        self.statusBar().showMessage("分镜提示词已复制到剪贴板")
+
+    @staticmethod
+    def _extract_json_text(text: str) -> str:
+        value = str(text or "").strip()
+        fence = re.search(r"```(?:json)?\s*(.+?)```", value, re.S | re.I)
+        if fence:
+            value = fence.group(1).strip()
+        if value.startswith("{") or value.startswith("["):
+            return value
+        start = min([i for i in (value.find("{"), value.find("[")) if i >= 0],
+                    default=-1)
+        if start < 0:
+            return value
+        opener = value[start]
+        closer = "}" if opener == "{" else "]"
+        depth = 0
+        in_string = False
+        escaped = False
+        for index in range(start, len(value)):
+            ch = value[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch == opener:
+                depth += 1
+            elif ch == closer:
+                depth -= 1
+                if depth == 0:
+                    return value[start:index + 1]
+        return value[start:]
+
+    def import_shots_from_clipboard(self) -> None:
+        text = QApplication.clipboard().text()
+        if not text.strip():
+            QMessageBox.information(self, "提示", "剪贴板是空的。")
+            return
+        payload = self._extract_json_text(text)
+        try:
+            raw = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            QMessageBox.warning(
+                self, "解析失败", "剪贴板里没有可用的 JSON：\n%s" % exc)
+            return
+        try:
+            shots = shots_from_json(raw)
+        except ValueError as exc:
+            QMessageBox.warning(self, "解析失败", str(exc))
+            return
+        if self.shot_table.rowCount():
+            answer = QMessageBox.question(
+                self, "替换分镜", "用粘贴的 %d 个分镜替换当前全部分镜？" % len(shots))
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self._fill_shot_table(shots)
+        self.append_log("已从剪贴板导入 %d 个分镜。" % len(shots))
+        self.statusBar().showMessage("已粘贴导入 %d 个分镜" % len(shots))
+        self._autosave_generated_story()
+        self._save_ui_state()
 
     def _translate_changed_shot_prompts(self, changes: list[tuple[int, str]]) -> None:
         model = self._llm()
@@ -6086,6 +6204,7 @@ class MainWindow(QMainWindow):
         dialog = SettingsDialog(self.cfg, self, models=models)
         if not dialog.exec():
             return
+        snapshot = self._capture_ui_state()
         self.cfg = load_config()
         self.cfg.ensure_dirs()
         self.template_path = resolve_template(self.cfg)
@@ -6094,6 +6213,13 @@ class MainWindow(QMainWindow):
         self._online_tried.clear()
         self.comfy_service = ComfyService(self.cfg)
         self._init_defaults()
+        self._restoring_state = True
+        try:
+            self._apply_ui_state(snapshot)
+        except Exception as exc:
+            self.append_log("界面状态恢复失败：%s" % exc)
+        finally:
+            self._restoring_state = False
         answer = QMessageBox.question(
             self, "应用设置", "设置已保存。是否重启 ComfyUI 以应用新配置（如预览参数）？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
