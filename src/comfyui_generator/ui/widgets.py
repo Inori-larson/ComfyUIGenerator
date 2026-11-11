@@ -2,13 +2,49 @@
 
 from __future__ import annotations
 
+import re
+from html import unescape
 from typing import Any
 
 from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtWidgets import (
-    QButtonGroup, QComboBox, QCompleter, QGridLayout, QPushButton,
-    QSizePolicy, QStackedWidget, QVBoxLayout, QWidget,
+    QButtonGroup, QComboBox, QCompleter, QGridLayout, QPlainTextEdit,
+    QPushButton, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget,
 )
+
+
+class MultiLinePlainTextEdit(QPlainTextEdit):
+    """Plain text box that keeps line breaks when pasting browser content.
+
+    Browsers copy line breaks as ``<div>``/``<br>`` HTML, which Qt flattens
+    into a single line. This converts block boundaries back to newlines.
+    """
+
+    def insertFromMimeData(self, source) -> None:  # noqa: N802
+        if source is not None and source.hasText() and "\n" in source.text():
+            super().insertFromMimeData(source)
+            return
+        if source is not None and source.hasHtml():
+            text = self._html_to_text(source.html())
+            if text:
+                self.insertPlainText(text)
+                return
+        super().insertFromMimeData(source)
+
+    @staticmethod
+    def _html_to_text(html: str) -> str:
+        text = str(html or "")
+        text = re.sub(r"(?is)<(script|style)\b.*?</\1>", "", text)
+        text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+        text = re.sub(
+            r"(?i)</(p|div|li|h[1-6]|tr|blockquote|pre|section|article)>",
+            "\n", text)
+        text = re.sub(r"(?is)<[^>]+>", "", text)
+        text = unescape(text)
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        text = re.sub(r"[ \t]+\n", "\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip("\n")
 
 
 class ClickScrollComboBox(QComboBox):

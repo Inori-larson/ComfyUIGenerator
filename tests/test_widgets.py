@@ -120,3 +120,29 @@ def test_checked_shot_rows_accumulate_for_selected_generation():
     selected = window._collect_shots(True)
     assert [shot["id"] for shot in selected] == ["01", "03"]
     window.close()
+
+
+def test_multiline_paste_keeps_browser_line_breaks():
+    from PySide6.QtCore import QMimeData
+    from comfyui_generator.ui.widgets import MultiLinePlainTextEdit
+
+    app = QApplication.instance() or QApplication([])
+    edit = MultiLinePlainTextEdit()
+    mime = QMimeData()
+    mime.setHtml("<div>第一行</div><div>第二行<br>第三行</div>")
+    mime.setText("第一行第二行第三行")
+    edit.insertFromMimeData(mime)
+    assert edit.toPlainText() == "第一行\n第二行\n第三行"
+
+
+def test_multiline_paste_prefers_text_with_newlines():
+    from PySide6.QtCore import QMimeData
+    from comfyui_generator.ui.widgets import MultiLinePlainTextEdit
+
+    app = QApplication.instance() or QApplication([])
+    edit = MultiLinePlainTextEdit()
+    mime = QMimeData()
+    mime.setHtml("<p>a</p><p>b</p>")
+    mime.setText("a\nb")
+    edit.insertFromMimeData(mime)
+    assert edit.toPlainText() == "a\nb"

@@ -80,7 +80,9 @@ from comfyui_generator.ui.dialogs import (
 from comfyui_generator.ui.settings_dialog import SettingsDialog
 from comfyui_generator.ui.vision_worker import VisionWorker
 from comfyui_generator.ui.wheel_guard import install_wheel_guard
-from comfyui_generator.ui.widgets import SearchComboBox, WrappingTabs
+from comfyui_generator.ui.widgets import (
+    MultiLinePlainTextEdit, SearchComboBox, WrappingTabs,
+)
 from comfyui_generator.ui.workers import (
     AssetsWorker, AutoTranslateWorker, ConnectWorker,
     ExpansionWorker, LoraTagsWorker, PromptWorker, RenderWorker,
@@ -579,20 +581,20 @@ class MainWindow(QMainWindow):
         copy_row.addWidget(self.btn_single_to_story)
         layout.addLayout(copy_row)
         layout.addWidget(_label("角色标签（会拼入提示词）"))
-        self.single_role = QPlainTextEdit()
+        self.single_role = MultiLinePlainTextEdit()
         self.single_role.setPlaceholderText("例：yixuan \\(zenless zone zero\\), solo, hairclip")
         self.single_role.setFixedHeight(52)
         layout.addWidget(self.single_role)
 
         layout.addWidget(_label("外貌 / 身材（全片锁定）"))
-        self.single_appearance = QPlainTextEdit()
+        self.single_appearance = MultiLinePlainTextEdit()
         self.single_appearance.setPlaceholderText(
             "例：silver hair, red eyes, long hair, tall, large breasts")
         self.single_appearance.setFixedHeight(44)
         layout.addWidget(self.single_appearance)
 
         layout.addWidget(_label("初始服装"))
-        self.single_clothing = QPlainTextEdit()
+        self.single_clothing = MultiLinePlainTextEdit()
         self.single_clothing.setPlaceholderText("例：black blazer, black pantyhose")
         self.single_clothing.setFixedHeight(44)
         layout.addWidget(self.single_clothing)
@@ -603,13 +605,13 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.single_scene)
 
         layout.addWidget(_label("画面描述"))
-        self.single_desc = QPlainTextEdit()
+        self.single_desc = MultiLinePlainTextEdit()
         self.single_desc.setPlaceholderText("例：晴天，仪玄在公园长椅上吃冰淇淋，微笑看镜头")
         self.single_desc.setFixedHeight(80)
         layout.addWidget(self.single_desc)
 
         layout.addWidget(_label("其它（可选）"))
-        self.single_extra = QPlainTextEdit()
+        self.single_extra = MultiLinePlainTextEdit()
         self.single_extra.setPlaceholderText("例：夜晚，暖色台灯光")
         self.single_extra.setFixedHeight(44)
         layout.addWidget(self.single_extra)
@@ -631,7 +633,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.btn_single_external)
 
         layout.addWidget(_label("提示词（中文，可手动修改）"))
-        self.single_prompt = QPlainTextEdit()
+        self.single_prompt = MultiLinePlainTextEdit()
         self.single_prompt.setPlaceholderText("模型生成后显示中文，可删改；出图时自动转回英文标签")
         layout.addWidget(self.single_prompt, 1)
         self.single_prompt_stats = _label("英文标签 0 · 约 2 tokens", "Hint")
@@ -686,20 +688,20 @@ class MainWindow(QMainWindow):
         form_layout.setSpacing(3)
 
         form_layout.addWidget(_label("角色标签（会拼入提示词）"))
-        self.story_role = QPlainTextEdit()
+        self.story_role = MultiLinePlainTextEdit()
         self.story_role.setPlaceholderText("例：yixuan \\(zenless zone zero\\), solo, hairclip")
         self.story_role.setFixedHeight(44)
         form_layout.addWidget(self.story_role)
 
         form_layout.addWidget(_label("外貌 / 身材（全片锁定）"))
-        self.story_appearance = QPlainTextEdit()
+        self.story_appearance = MultiLinePlainTextEdit()
         self.story_appearance.setPlaceholderText(
             "例：silver hair, red eyes, long hair, tall, large breasts；多人可写：女主：…；男主：…")
         self.story_appearance.setFixedHeight(44)
         form_layout.addWidget(self.story_appearance)
 
         form_layout.addWidget(_label("初始服装"))
-        self.story_clothing = QPlainTextEdit()
+        self.story_clothing = MultiLinePlainTextEdit()
         self.story_clothing.setPlaceholderText("例：hairclip, puritan collar, black blazer, black pantyhose")
         self.story_clothing.setFixedHeight(40)
         form_layout.addWidget(self.story_clothing)
@@ -710,7 +712,7 @@ class MainWindow(QMainWindow):
         form_layout.addWidget(self.story_scene)
 
         form_layout.addWidget(_label("剧情（可带 01. 02. 编号）"))
-        self.story_premise = QPlainTextEdit()
+        self.story_premise = MultiLinePlainTextEdit()
         self.story_premise.setPlaceholderText("例：01. 她回家…… 02. 她坐在沙发上……")
         self.story_premise.setFixedHeight(76)
         form_layout.addWidget(self.story_premise)
@@ -719,7 +721,7 @@ class MainWindow(QMainWindow):
         form_layout.addWidget(self.btn_plot_history)
 
         form_layout.addWidget(_label("其它（可选）"))
-        self.story_extra = QPlainTextEdit()
+        self.story_extra = MultiLinePlainTextEdit()
         self.story_extra.setPlaceholderText("例：夜晚，暖色台灯光，情绪克制")
         self.story_extra.setFixedHeight(40)
         form_layout.addWidget(self.story_extra)
@@ -953,13 +955,13 @@ class MainWindow(QMainWindow):
         self.btn_scan_loras_char.clicked.connect(self.refresh_loras)
         layout.addWidget(self.btn_scan_loras_char)
         layout.addWidget(_label("激活标签（英文，可编辑）"))
-        self.tags_edit = QPlainTextEdit()
+        self.tags_edit = MultiLinePlainTextEdit()
         self.tags_edit.setFixedHeight(100)
         self.tags_edit.setPlaceholderText("默认为空；输入英文 Booru 标签，中文对照自动生成")
         self.tags_edit.textChanged.connect(self._update_tag_estimate)
         layout.addWidget(self.tags_edit)
         layout.addWidget(_label("中文对照（只读）"))
-        self.tags_zh = QPlainTextEdit()
+        self.tags_zh = MultiLinePlainTextEdit()
         self.tags_zh.setReadOnly(True)
         self.tags_zh.setFixedHeight(80)
         self.tags_zh.setPlaceholderText("英文标签的中文对照")
@@ -1398,12 +1400,12 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(page)
         layout.setSpacing(8)
         layout.addWidget(_label("正向提示词（中文，可编辑）"))
-        self.positive_extra = QPlainTextEdit()
+        self.positive_extra = MultiLinePlainTextEdit()
         self.positive_extra.setFixedHeight(90)
         self.positive_extra.setPlainText(DEFAULT_POSITIVE_EXTRA_ZH)
         layout.addWidget(self.positive_extra)
         layout.addWidget(_label("负向提示词（中文，可编辑）"))
-        self.negative_extra = QPlainTextEdit()
+        self.negative_extra = MultiLinePlainTextEdit()
         self.negative_extra.setFixedHeight(170)
         self.negative_extra.setPlainText(DEFAULT_NEGATIVE_EXTRA_ZH)
         layout.addWidget(self.negative_extra)
@@ -1441,25 +1443,25 @@ class MainWindow(QMainWindow):
         auto_hint.setWordWrap(True)
         layout.addWidget(auto_hint)
         layout.addWidget(_label("角色锚点（补充，英文标签）"))
-        self.continuity_character = QPlainTextEdit()
+        self.continuity_character = MultiLinePlainTextEdit()
         self.continuity_character.setFixedHeight(72)
         self.continuity_character.setPlaceholderText(
             "silver hair, red eyes, tall, large breasts, tattoo；每镜追加，不替代角色标签")
         layout.addWidget(self.continuity_character)
         layout.addWidget(_label("场景锚点（补充，英文标签）"))
-        self.continuity_scene = QPlainTextEdit()
+        self.continuity_scene = MultiLinePlainTextEdit()
         self.continuity_scene.setFixedHeight(58)
         self.continuity_scene.setPlaceholderText(
             "bedroom, night, warm lamp, rain outside；换场景前请手动更新")
         layout.addWidget(self.continuity_scene)
         layout.addWidget(_label("连续性台账（英文标签）"))
-        self.continuity_state = QPlainTextEdit()
+        self.continuity_state = MultiLinePlainTextEdit()
         self.continuity_state.setFixedHeight(86)
         self.continuity_state.setPlaceholderText(
             "torn stockings, sweat, cum on thigh, exhausted；这些会追加到每镜")
         layout.addWidget(self.continuity_state)
         layout.addWidget(_label("禁止变化 / 额外负面词（英文标签）"))
-        self.continuity_negative = QPlainTextEdit()
+        self.continuity_negative = MultiLinePlainTextEdit()
         self.continuity_negative.setFixedHeight(58)
         self.continuity_negative.setPlaceholderText(
             "different hairstyle, different location, extra characters")

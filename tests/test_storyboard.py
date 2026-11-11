@@ -43,6 +43,7 @@ def test_messages_request_shot_count_and_json():
 def test_messages_include_clothing_rules():
     system = build_storyboard_messages("剧情内容", 2)[0]["content"]
     assert "只能使用用户给出的初始服装" in system
+    assert "颜色" in system
     assert "不允许全脱" in system
     assert "禁止跳变" in system
     assert "体液状态" in system
