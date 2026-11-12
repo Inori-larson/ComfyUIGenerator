@@ -22,6 +22,12 @@ def resolve_external_model(configured: Any = None, supplied: str = "") -> str:
     return str(supplied or EXTERNAL_LLM_MODEL).strip() or EXTERNAL_LLM_MODEL
 
 
+def _fixed_temperature_model(model: str) -> bool:
+    """Kimi K2/K3 only accept temperature=1, so omit the parameter entirely."""
+    low = str(model or "").lower()
+    return "kimi-k2" in low or "kimi-k3" in low
+
+
 def _first_json_value(text: str) -> str:
     """Return the first complete JSON object/array, ignoring trailing junk.
 
@@ -137,16 +143,21 @@ class ExternalLLMClient:
         socket_timeout = max(1.0, min(wall_timeout, max(15.0, wall_timeout / 2)))
         last = ""
         finish = ""
+        last_error = ""
         token_budget = max(256, min(32768, int(num_predict or 4096)))
         json_forced = bool(schema)
-        for attempt in range(max(0, int(retries)) + 1):
+        omit_temperature = _fixed_temperature_model(target)
+        param_retries = 2
+        total_attempts = max(0, int(retries)) + 1 + param_retries
+        for attempt in range(total_attempts):
             payload = {
                 "model": target,
                 "messages": messages,
-                "temperature": float(temperature),
                 "max_tokens": token_budget,
                 "stream": False,
             }
+            if not omit_temperature:
+                payload["temperature"] = float(temperature)
             if json_forced:
                 payload["response_format"] = {"type": "json_object"}
             if getattr(self.cfg, "disable_thinking", True):
@@ -160,13 +171,20 @@ class ExternalLLMClient:
                 data = json.loads(raw.decode("utf-8"))
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", "replace")[:2000]
+                last_error = "HTTP %s: %s" % (exc.code, detail)
+                low = detail.lower()
+                if exc.code == 400 and not omit_temperature and (
+                        "temperature" in low and "not supported" in low):
+                    omit_temperature = True
+                    continue
                 if exc.code == 400 and json_forced:
                     json_forced = False
                     continue
-                if exc.code >= 500 and attempt < retries:
+                if exc.code >= 500 and attempt < total_attempts - 1:
                     time.sleep(3 + attempt * 4)
                     continue
-                raise ExternalLLMError("External LLM HTTP %s: %s" % (exc.code, detail)) from exc
+                raise ExternalLLMError(
+                    "External LLM HTTP %s: %s" % (exc.code, detail)) from exc
             except (TimeoutError, socket.timeout) as exc:
                 if attempt < retries:
                     time.sleep(3 + attempt * 4)
@@ -180,6 +198,16 @@ class ExternalLLMClient:
                     continue
                 raise ExternalLLMError("Cannot reach external LLM: %s" % exc.reason) from exc
             choices = data.get("choices") or []
+            if not choices:
+                body_text = json.dumps(data, ensure_ascii=False)[:2000]
+                lowered = body_text.lower()
+                if any(token in lowered for token in (
+                        "inappropriate", "data_inspection", "sensitive",
+                        "content_policy", "content_filter", "risk")):
+                    raise ContentFilterError(
+                        "External provider blocked the request: %s" % body_text)
+                raise ExternalLLMError(
+                    "External LLM returned no choices: %s" % body_text)
             choice = choices[0] if choices else {}
             message = choice.get("message") or {}
             finish = str(choice.get("finish_reason") or "")
@@ -215,6 +243,9 @@ class ExternalLLMClient:
                 messages = list(messages) + [
                     {"role": "user", "content": payload_note}]
                 continue
+        if last_error and not last:
+            raise ExternalLLMError(
+                "External LLM request rejected: %s" % last_error)
         raise ExternalLLMError(
             "External LLM did not return usable JSON (finish=%s): %s" % (
                 finish, last[:1000]))

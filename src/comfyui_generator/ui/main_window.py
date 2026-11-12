@@ -335,6 +335,8 @@ class MainWindow(QMainWindow):
         self.connect_worker: ConnectWorker | None = None
         self.assets_worker: AssetsWorker | None = None
         self.prompt_worker: PromptWorker | None = None
+        self._source_suffix = ""
+        self._project_name = ""
         self.render_worker: RenderWorker | None = None
         self.reference_sheet_worker: RenderWorker | None = None
         self.vision_worker: VisionWorker | None = None
@@ -350,6 +352,7 @@ class MainWindow(QMainWindow):
         self._lora_info_cache: dict[str, dict] = {}
         self._selected_shot_ids: list[str] = []
         self.model_configs = load_model_configs()
+        self._active_model_preset: dict[str, Any] = {}
         self._loading_model_config = False
         self._reference_tags: list[str] = []
         self._lora_paths: dict[str, str] = {}
@@ -1337,6 +1340,8 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(_label("输出名称（可空，自动生成）"))
         self.output_name = QLineEdit()
+        self.output_name.textEdited.connect(
+            lambda _text: setattr(self, "_project_name", ""))
         layout.addWidget(self.output_name)
         self.variants_spin.valueChanged.connect(self._update_generation_count)
         self.expand_spin.valueChanged.connect(self._update_generation_count)
@@ -1781,6 +1786,8 @@ class MainWindow(QMainWindow):
         config = getattr(self, "_model_config_by_id", {}).get(config_id)
         if config:
             self._apply_model_config(config)
+        else:
+            self._active_model_preset = {}
 
     def _apply_model_config(self, config: dict[str, Any]) -> None:
         self._loading_model_config = True
@@ -1813,6 +1820,7 @@ class MainWindow(QMainWindow):
             upscaler = str(config.get("upscaler") or "").strip()
             if upscaler:
                 self.upscaler_combo.selectValue(upscaler)
+            self._active_model_preset = dict(config)
         finally:
             self._loading_model_config = False
         self.append_log("已加载模型配置：%s" % (
@@ -3342,9 +3350,51 @@ class MainWindow(QMainWindow):
             "pose": self._pose_settings(),
         }
 
+    @staticmethod
+    def _model_suffix(model: str) -> str:
+        value = str(model or "").strip()
+        if not value:
+            return ""
+        value = value.split("/")[-1].split(":")[0]
+        value = re.sub(r"[^0-9A-Za-z._-]+", "_", value).strip("_")
+        return value
+
+    def _compose_project_name(self, text: str) -> str:
+        name = slugify(self.output_name.text().strip(), "")
+        if not name:
+            name = slugify("".join(ch for ch in str(text or "") if ch.isascii()), "")
+        if not name:
+            name = time.strftime("story_%Y%m%d_%H%M%S")
+        suffix = str(self._source_suffix or "").strip()
+        if suffix and not name.endswith("_" + suffix):
+            name = "%s_%s" % (name, suffix)
+        return name
+
+    def _resolve_model_preset(self) -> dict[str, Any]:
+        preset = getattr(self, "_active_model_preset", None) or {}
+        if preset:
+            return preset
+        config_id = str(self.model_config_combo.currentData() or "")
+        preset = getattr(self, "_model_config_by_id", {}).get(config_id) or {}
+        if preset:
+            return preset
+        found = find_model_config(self.model_configs, self.ckpt_combo.currentValue())
+        return dict(found) if found else {}
+
     def _build_project(self, mode: str, shots: list[dict[str, Any]], text: str) -> dict[str, Any]:
         data = copy.deepcopy(self.template)
-        data["model"] = self.ckpt_combo.currentValue() or self.template.get("model", "")
+        preset = self._resolve_model_preset()
+        if preset.get("loader"):
+            data["loader"] = str(preset["loader"])
+            for key in ("unet_name", "clip_name", "vae_name", "clip_type",
+                        "clip_device", "weight_dtype"):
+                if preset.get(key):
+                    data[key] = preset[key]
+        if str(data.get("loader") or "") == "unet" and data.get("unet_name"):
+            data["model"] = str(data["unet_name"])
+        else:
+            data["model"] = (self.ckpt_combo.currentValue()
+                             or self.template.get("model", ""))
         data["clip_skip"] = self.clip_skip.value()
         data["loras"] = self._build_loras()
         data.pop("lora", None)
@@ -3392,11 +3442,7 @@ class MainWindow(QMainWindow):
         else:
             data.pop("style_ref", None)
 
-        name = slugify(self.output_name.text().strip(), "")
-        if not name:
-            name = slugify("".join(ch for ch in text if ch.isascii()), "")
-        if not name:
-            name = time.strftime("story_%Y%m%d_%H%M%S")
+        name = self._project_name or self._compose_project_name(text)
         project = new_project(name, text, data, str(self.template_path), mode=mode)
         project["shots"] = shots
         project["prefix"] = "anime_story/" + name
@@ -3430,6 +3476,8 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "提示", "没有可用的 Ollama 模型，请先在设置/模型页选择。")
                 return
         self._render_after_prompt = then_render
+        self._source_suffix = self._model_suffix(
+            self.cfg.external_llm.model if external else self._llm())
         options = SingleOptions(
             model=self._llm(),
             framing=self.framing.currentData(),
@@ -3457,6 +3505,8 @@ class MainWindow(QMainWindow):
         self._single_prompt_en = prompt
         self._single_prompt_zh = prompt_zh or prompt
         self.single_prompt.setPlainText(self._single_prompt_zh)
+        self._project_name = self._compose_project_name(
+            self._single_input_text() or prompt)
         self._update_single_prompt_stats()
         self.btn_single_prompt.setText("① 重新生成提示词")
         self.btn_expand.setEnabled(True)
@@ -3594,6 +3644,8 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "提示", "没有可用的 Ollama 模型，请先在设置/模型页选择。")
                 return
         total = int(self.story_shots.value())
+        self._source_suffix = self._model_suffix(
+            self.cfg.external_llm.model if external else self._llm())
         plot_only = self.story_premise.toPlainText().strip()
         if plot_only:
             try:
@@ -3628,6 +3680,8 @@ class MainWindow(QMainWindow):
         clear_story_partial(self.cfg.root)
         self._update_partial_button()
         self._fill_shot_table(shots)
+        self._project_name = self._compose_project_name(
+            self._story_premise_text() or self._current_text())
         self.append_log("分镜已生成：%d 镜" % len(shots))
         self.statusBar().showMessage("分镜已生成（共 %d 镜），可直接渲染" % len(shots))
         self._autosave_generated_story()
@@ -4260,9 +4314,13 @@ class MainWindow(QMainWindow):
                 return
         if premise:
             self._set_story_fields(self._parse_story_text(premise))
+        self._source_suffix = "外部导入"
         self._fill_shot_table(shots)
+        self._project_name = self._compose_project_name(
+            self._story_premise_text() or self._current_text())
         self.append_log("已导入 %d 个分镜：%s" % (len(shots), path))
         self.statusBar().showMessage("分镜 JSON 已导入并替换")
+        self._autosave_generated_story()
 
     def copy_storyboard_prompt(self) -> None:
         premise = self._story_premise_text()
@@ -4340,7 +4398,10 @@ class MainWindow(QMainWindow):
                 self, "替换分镜", "用粘贴的 %d 个分镜替换当前全部分镜？" % len(shots))
             if answer != QMessageBox.StandardButton.Yes:
                 return
+        self._source_suffix = "外部粘贴"
         self._fill_shot_table(shots)
+        self._project_name = self._compose_project_name(
+            self._story_premise_text() or self._current_text())
         self.append_log("已从剪贴板导入 %d 个分镜。" % len(shots))
         self.statusBar().showMessage("已粘贴导入 %d 个分镜" % len(shots))
         self._autosave_generated_story()
@@ -5474,6 +5535,7 @@ class MainWindow(QMainWindow):
         self.wildcard_check.setChecked(bool(wildcards.get("enabled")))
         self.wildcard_dir.setText(str(wildcards.get("dir", "")))
         self.output_name.setText(project.get("name", ""))
+        self._project_name = str(project.get("name") or "")
 
         self._load_gallery(project)
         self.previews.clear()
@@ -6313,6 +6375,8 @@ class MainWindow(QMainWindow):
             "detailers": detailers,
             "options": {
                 "llm": self.llm_combo.currentValue(),
+                "model_config": self.model_config_combo.currentData() or "",
+                "source_suffix": self._source_suffix,
                 "ckpt": self.ckpt_combo.currentValue(),
                 "clip_skip": self.clip_skip.value(),
                 "width": self.width_spin.value(),
@@ -6488,6 +6552,13 @@ class MainWindow(QMainWindow):
         self.chk_selected.setChecked(bool(story.get("selected_only")))
 
         options = state.get("options") or {}
+        self._source_suffix = str(options.get("source_suffix") or "")
+        config_id = str(options.get("model_config") or "")
+        if config_id:
+            config = getattr(self, "_model_config_by_id", {}).get(config_id)
+            if config:
+                self.model_config_combo.selectValue(config_id)
+                self._active_model_preset = dict(config)
         for combo, key in ((self.llm_combo, "llm"),
                            (self.ckpt_combo, "ckpt"),
                            (self.sampler_combo, "sampler"),

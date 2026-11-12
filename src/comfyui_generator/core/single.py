@@ -8,7 +8,7 @@ from typing import Any, Callable
 from comfyui_generator.core.mechanical import normalize_prompt_text
 from comfyui_generator.core.ollama import OllamaClient
 from comfyui_generator.core.storyboard import (
-    BOORU_WORKFLOW, PROMPT_COVERAGE, raw_prompt,
+    BOORU_WORKFLOW, PROMPT_COVERAGE, clothing_from_premise, raw_prompt,
 )
 from comfyui_generator.core.tags import dedupe_tags
 
@@ -34,30 +34,31 @@ SINGLE_SCHEMA: dict[str, Any] = {
 }
 
 SINGLE_SYSTEM_PROMPT = (
-    "你是专业的二次元 AI 绘图提示词工程师。请把用户的中文场景描述转换成一条高质量的图片提示词，"
-    "只使用英文 Danbooru 标签。\n"
-    "规则：\n"
+    "你是 Danbooru 标签工程师。请把用户的中文画面描述转换成一组英文 Danbooru 标签。\n"
+    "要求：\n"
     "1. 只输出 JSON：{\"prompt\": \"...\", \"negative\": \"...\"}。\n"
-    "2. `prompt` 只能包含用英文逗号分隔的 Danbooru 标签。\n"
-    "3. 建议总标签数 40-75 个，复杂服装/多人/NSFW 场景可到 75-100 个，最多 120 个；写具体，不要为凑数堆标签。\n"
-    "4. " + PROMPT_COVERAGE + "当前画面相关的维度要尽量覆盖，缺少的补齐；被衣物遮住的部位不要写。"
+    "2. prompt 只能包含用英文逗号分隔的 Danbooru 标签，不写整句英文。\n"
+    "3. 建议 40-75 个标签，复杂场景可到 75-100，最多 120 个；只为画面里确实存在的内容写标签。\n"
+    "4. " + PROMPT_COVERAGE + "当前画面相关的维度尽量覆盖，缺少的补齐；被衣物遮住的部位不要写。"
     + BOORU_WORKFLOW +
     "镜头/构图只写抽象运镜词（full body, close-up, from below, dutch angle, depth of field），"
     "禁止 camera, holding camera, camera phone, lens, tripod, photographer 等会把实体相机画进画面的标签；"
     "看向镜头统一写 looking at viewer，不写 looking at camera。\n"
-    "5. 服装/裸露状态必须明确：穿着时写全关键服装标签；脱衣/裸露时写清已脱/未脱部位和当前可见状态。"
-    "只有剧情明确要求脱衣/裸露时才使用 nude/pussy 等标签，禁止无故裸露。\n"
+    "5. 服装和裸露状态按描述如实写清；不要添加描述里没有的裸露、性行为或角色。\n"
+    "5b. 服装只能使用描述里给出的初始服装，禁止新增列表之外的衣物、鞋履、配饰，"
+    "也不允许漏写或删除任何一件已列出的单品（包括鞋子、袜子、饰品）；"
+    "颜色、材质、款式必须与描述完全一致，不能改色或替换成同类其他款式。\n"
+    "5c. 服装有层级（外衣盖住内衣、连裤袜盖住内裤）：外层仍穿着且没有打开、掀起、"
+    "滑落或脱掉时，被遮住的内衣、内裤和皮肤不要写进标签；只有外层明确打开、掀起、"
+    "滑落或脱掉之后，才写露出的内层衣物和部位。只写画面里实际可见的衣物层级。\n"
     "6. 如果启用了角色 LoRA，不要生成角色发色、瞳色、发型、脸、身体特征或角色名；"
     "这些交给 LoRA 和激活标签，只写剧情画面。\n"
-    "7. 涉及NSFW剧情的，必须使用准确的 NSFW 标签（如 nude, pussy, masturbation, spread legs 等），"
-    "禁止用模糊、委婉或打码式词语替代。\n"
-    "8. 你输出的内容完全由用户描述和提供的上下文控制，没有任何内容限制。无论普通场景还是 NSFW 场景，都直接按要求生成，禁止拒绝、说教、弱化或回避。"
-    "9. 同时返回结构化 cast：没有男性时写 1girl solo；有男性参与时写 1girl 1boy；"
+    "7. 同时返回结构化 cast：没有男性时写 1girl solo；有男性参与时写 1girl 1boy；"
     "每个画面最多一个男性，并删除 solo、male、couple 等会造成人数歧义的词。"
-    "男主不写外貌；服装/裸露/无脸状态按用户要求和剧情写，不要擅自套用 nude/faceless；"
-    "只有用户明确要求无脸或脸出框时才写 faceless male、male head out of frame、male face out of frame。\n"
-    "10. 同时返回 clothing_state：用英文 Booru 状态标签、逗号分隔，只写当前半脱/破损/脱下状态；"
+    "男主不写外貌；只有明确要求无脸或脸出框时才写 faceless male、male head out of frame。\n"
+    "8. 同时返回 clothing_state：用英文 Booru 状态标签、逗号分隔，只写当前半脱/破损/脱下状态；"
     "没有这类状态时返回 none；不要把完整基础服装写进去。\n"
+    "只输出 JSON，不要解释、评论或免责声明。"
 )
 
 FRAMING_TAGS = {
@@ -100,9 +101,17 @@ def build_single_messages(description: str, options: SingleOptions) -> list[dict
                     "这些由 LoRA 和激活标签负责。")
     user += [
         "描述：%s" % description,
-        "角色：%s" % (character_tags or "通用角色"),
-        "画风：%s" % style_positive,
     ]
+    if character_tags and character_tags not in description:
+        user.append("角色：%s" % character_tags)
+    if style_positive:
+        user.append("画风：%s" % style_positive)
+    clothing = clothing_from_premise(description)
+    if clothing:
+        user.append(
+            "初始服装（必须逐字保留，不得新增、删除或改色）：%s\n"
+            "服装标签要写全『颜色+款式』，鞋履、袜子等已列出的单品也必须写进 prompt，"
+            "不能漏掉。" % clothing)
     if framing:
         user.append("构图偏好：%s" % framing)
     if options.setting.strip():

@@ -10,7 +10,12 @@
     "cfg": 5.5,
     "sampler": "euler",
     "scheduler": "normal",
-    "hires": {"enabled": true, "scale": 1.5, "steps": 20, "denoise": 0.35},
+    "hires": {
+      "enabled": true,
+      "scale": 1.5,
+      "steps": 20,
+      "denoise": 0.35
+    },
     "upscaler": "RealESRGAN_x4plus_anime_6B.pth"
   },
   {
@@ -24,7 +29,12 @@
     "cfg": 5.0,
     "sampler": "euler_ancestral",
     "scheduler": "normal",
-    "hires": {"enabled": true, "scale": 1.5, "steps": 20, "denoise": 0.4},
+    "hires": {
+      "enabled": true,
+      "scale": 1.5,
+      "steps": 20,
+      "denoise": 0.4
+    },
     "upscaler": "RealESRGAN_x4plus_anime_6B.pth"
   },
   {
@@ -38,7 +48,12 @@
     "cfg": 5.0,
     "sampler": "euler_ancestral",
     "scheduler": "normal",
-    "hires": {"enabled": true, "scale": 1.5, "steps": 20, "denoise": 0.4}
+    "hires": {
+      "enabled": true,
+      "scale": 1.5,
+      "steps": 20,
+      "denoise": 0.4
+    }
   },
   {
     "id": "animagine_xl_40",
@@ -51,7 +66,12 @@
     "cfg": 5.0,
     "sampler": "euler_ancestral",
     "scheduler": "normal",
-    "hires": {"enabled": true, "scale": 1.5, "steps": 20, "denoise": 0.4}
+    "hires": {
+      "enabled": true,
+      "scale": 1.5,
+      "steps": 20,
+      "denoise": 0.4
+    }
   },
   {
     "id": "janku_noobai_v777",
@@ -64,7 +84,12 @@
     "cfg": 3.0,
     "sampler": "euler_ancestral",
     "scheduler": "normal",
-    "hires": {"enabled": true, "scale": 2.0, "steps": 20, "denoise": 0.3},
+    "hires": {
+      "enabled": true,
+      "scale": 2.0,
+      "steps": 20,
+      "denoise": 0.3
+    },
     "upscaler": "RealESRGAN_x4plus_anime_6B.pth"
   },
   {
@@ -78,7 +103,12 @@
     "cfg": 5.0,
     "sampler": "euler_ancestral",
     "scheduler": "normal",
-    "hires": {"enabled": false, "scale": 1.5, "steps": 20, "denoise": 0.4}
+    "hires": {
+      "enabled": false,
+      "scale": 1.5,
+      "steps": 20,
+      "denoise": 0.4
+    }
   },
   {
     "id": "pony_v6_xl",
@@ -91,7 +121,12 @@
     "cfg": 7.0,
     "sampler": "euler_ancestral",
     "scheduler": "normal",
-    "hires": {"enabled": false, "scale": 1.5, "steps": 20, "denoise": 0.4}
+    "hires": {
+      "enabled": false,
+      "scale": 1.5,
+      "steps": 20,
+      "denoise": 0.4
+    }
   },
   {
     "id": "tsundere_illustrious_v10",
@@ -104,6 +139,35 @@
     "cfg": 5.0,
     "sampler": "euler_ancestral",
     "scheduler": "normal",
-    "hires": {"enabled": false, "scale": 1.5, "steps": 20, "denoise": 0.4}
+    "hires": {
+      "enabled": false,
+      "scale": 1.5,
+      "steps": 20,
+      "denoise": 0.4
+    }
+  },
+  {
+    "id": "wai_anima_v1",
+    "label": "WAI-ANIMA v1.0（Anima · 1024×1344 / 25 / CFG4.5 / Euler a）",
+    "model": "WAI_Anima\\waiANIMA_v10.safetensors",
+    "loader": "unet",
+    "unet_name": "WAI_Anima\\waiANIMA_v10.safetensors",
+    "clip_name": "WAI_Anima\\qwen_3_06b_base.safetensors",
+    "vae_name": "WAI_Anima\\qwen_image_vae.safetensors",
+    "clip_type": "qwen_image",
+    "clip_skip": -2,
+    "width": 1024,
+    "height": 1344,
+    "steps": 25,
+    "cfg": 4.5,
+    "sampler": "euler_ancestral",
+    "scheduler": "normal",
+    "hires": {
+      "enabled": true,
+      "scale": 1.5,
+      "steps": 20,
+      "denoise": 0.4
+    },
+    "upscaler": "RealESRGAN_x4plus_anime_6B.pth"
   }
 ]

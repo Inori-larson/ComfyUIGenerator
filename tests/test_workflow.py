@@ -78,9 +78,7 @@ def test_compose_prompts_dedupes_exact_tags(cfg):
     assert positive.count("1girl") == 1
 
 
-# ------------------------------------------------------------- no hidden policy
-
-def test_compose_prompts_does_not_inject_scene_or_male_tags(cfg):
+# ------------------------------------------------------------- no hidden policydef test_compose_prompts_does_not_inject_scene_or_male_tags(cfg):
     shot = {"prompt": "1girl, classroom"}
     positive, negative = compose_prompts(cfg, shot)
     assert "nude male" not in positive

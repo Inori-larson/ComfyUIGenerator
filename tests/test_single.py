@@ -38,7 +38,22 @@ def test_build_messages_contains_framing_and_setting():
     assert "构图偏好：upper body, medium shot" in user
     assert "额外美术方向：park" in user
     assert "yixuan, solo" in user
-    assert "没有任何内容限制" in messages[0]["content"]
+    assert "只输出 JSON，不要解释" in messages[0]["content"]
+
+
+def test_build_messages_keeps_initial_clothing_verbatim():
+    description = ("角色标签：girl\n"
+                   "初始服装：white shirt, black skirt, black platform heels, "
+                   "mary janes\n大场景：教室\n画面：站着看书")
+    options = SingleOptions(model="test-model")
+    messages = build_single_messages(description, options)
+    user = messages[1]["content"]
+    system = messages[0]["content"]
+    assert "初始服装（必须逐字保留" in user
+    assert "mary janes" in user
+    assert "鞋履" in user
+    assert "禁止新增列表之外的衣物" in system
+    assert "服装有层级" in system
 
 
 def test_generate_single_prompt_passes_schema_and_keeps_model_output():

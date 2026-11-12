@@ -86,3 +86,25 @@ def test_show_shot_details_works_with_minimal_fields():
     assert shot["prompt"] == "1girl, solo"
     assert shot["description"] == "女孩独处"
     assert captured["outlines"] == ["女孩独处"]
+
+
+def test_model_suffix():
+    _app, window = _window()
+    assert window._model_suffix("kimi-k3") == "kimi-k3"
+    assert window._model_suffix("glm-5.3") == "glm-5.3"
+    assert window._model_suffix("huihui_ai/qwen2.5-abliterate:14b") == (
+        "qwen2.5-abliterate")
+    assert window._model_suffix("") == ""
+
+
+def test_project_name_ends_with_source_suffix():
+    _app, window = _window()
+    window.output_name.setText("my_story")
+    window._source_suffix = "kimi-k3"
+    project = window._build_project("story", [], "角色：girl")
+    assert project["name"] == "my_story_kimi-k3"
+
+    window._source_suffix = "外部粘贴"
+    project = window._build_project("story", [], "角色：girl")
+    assert project["name"] == "my_story_外部粘贴"
+

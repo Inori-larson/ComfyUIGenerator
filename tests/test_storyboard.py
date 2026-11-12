@@ -44,10 +44,12 @@ def test_messages_include_clothing_rules():
     system = build_storyboard_messages("剧情内容", 2)[0]["content"]
     assert "只能使用用户给出的初始服装" in system
     assert "颜色" in system
-    assert "不允许全脱" in system
+    assert "不允许完全脱掉" in system
     assert "禁止跳变" in system
     assert "逐步脱掉" in system
-    assert "体液状态" in system
+    assert "湿润、液体等状态" in system
+    assert "只生成用户描述里出现的内容" in system
+    assert "服装有层级" in system
 
 
 def test_messages_strip_appearance():

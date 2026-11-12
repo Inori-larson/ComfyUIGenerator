@@ -205,3 +205,64 @@ def test_external_client_accepts_json_with_trailing_braces(monkeypatch):
     assert client.chat_json(
         "test-model", [{"role": "user", "content": "x"}]) == {
             "shots": [{"id": 7}]}
+
+
+def test_kimi_models_omit_temperature(monkeypatch):
+    cfg = SimpleNamespace(base_url="https://example.test/v1", api_key="",
+                          model="kimi-k3.1-pro", timeout=30)
+    client = ExternalLLMClient(cfg)
+    bodies = []
+
+    def fake_urlopen(req, timeout):
+        bodies.append(json.loads(req.data.decode("utf-8")))
+        return FakeResponse({
+            "choices": [{"finish_reason": "stop",
+                         "message": {"content": "{\"prompt\": \"a\"}"}}]
+        })
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    assert client.chat_json("kimi-k3.1-pro",
+                            [{"role": "user", "content": "x"}],
+                            temperature=0.8) == {"prompt": "a"}
+    assert "temperature" not in bodies[0]
+
+
+def test_temperature_rejection_retries_without_temperature(monkeypatch):
+    import urllib.error
+
+    cfg = SimpleNamespace(base_url="https://example.test/v1", api_key="",
+                          model="test-model", timeout=30)
+    client = ExternalLLMClient(cfg)
+    bodies = []
+
+    def fake_urlopen(req, timeout):
+        body = json.loads(req.data.decode("utf-8"))
+        bodies.append(body)
+        if "temperature" in body:
+            raise urllib.error.HTTPError(
+                req.full_url, 400, "Bad Request", {},
+                _BytesIo(json.dumps({"error": {
+                    "message": "Parameter 'temperature'=0.8 is not supported "
+                               "for this model."}}).encode("utf-8")))
+        return FakeResponse({
+            "choices": [{"finish_reason": "stop",
+                         "message": {"content": "{\"prompt\": \"b\"}"}}]
+        })
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    assert client.chat_json("test-model",
+                            [{"role": "user", "content": "x"}],
+                            temperature=0.8) == {"prompt": "b"}
+    assert "temperature" in bodies[0]
+    assert "temperature" not in bodies[-1]
+
+
+class _BytesIo:
+    def __init__(self, data: bytes):
+        self._data = data
+
+    def read(self) -> bytes:
+        return self._data
+
+    def close(self) -> None:
+        self._data = b""
