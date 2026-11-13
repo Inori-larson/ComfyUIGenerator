@@ -169,5 +169,29 @@
       "denoise": 0.4
     },
     "upscaler": "RealESRGAN_x4plus_anime_6B.pth"
+  },
+  {
+    "id": "anima_aesthetic_v11",
+    "label": "Anima Aesthetic v1.1（Anima_Aesthetic · 1024×1344 / 35 / CFG4.5 / Euler a）",
+    "model": "Anima\\anima_aestheticV11.safetensors",
+    "loader": "unet",
+    "unet_name": "Anima_Aesthetic\\anima_aestheticV11.safetensors",
+    "clip_name": "WAI_Anima\\qwen_3_06b_base.safetensors",
+    "vae_name": "WAI_Anima\\qwen_image_vae.safetensors",
+    "clip_type": "qwen_image",
+    "clip_skip": -2,
+    "width": 1024,
+    "height": 1344,
+    "steps": 35,
+    "cfg": 4.5,
+    "sampler": "euler_ancestral",
+    "scheduler": "normal",
+    "hires": {
+      "enabled": true,
+      "scale": 1.5,
+      "steps": 20,
+      "denoise": 0.4
+    },
+    "upscaler": "RealESRGAN_x4plus_anime_6B.pth"
   }
 ]

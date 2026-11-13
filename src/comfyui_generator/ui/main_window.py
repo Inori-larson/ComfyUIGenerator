@@ -56,7 +56,6 @@ from comfyui_generator.core.project import (
     move_to_trash, new_project, save_project,
     save_session, save_story_partial,
 )
-from comfyui_generator.core.quality import check_project, format_report, repair_project
 from comfyui_generator.core.services import ComfyService
 from comfyui_generator.core.single import FRAMING_TAGS, SingleOptions
 from comfyui_generator.core.style_profile import (
@@ -1480,14 +1479,6 @@ class MainWindow(QMainWindow):
         self.continuity_negative.setPlaceholderText(
             "different hairstyle, different location, extra characters")
         layout.addWidget(self.continuity_negative)
-        quality_row = QHBoxLayout()
-        self.btn_quality_check = QPushButton("运行连贯质检")
-        self.btn_quality_check.clicked.connect(self.run_quality_check)
-        quality_row.addWidget(self.btn_quality_check)
-        self.btn_quality_repair = QPushButton("质检并自动修复")
-        self.btn_quality_repair.clicked.connect(self.run_quality_repair)
-        quality_row.addWidget(self.btn_quality_repair)
-        layout.addLayout(quality_row)
         self.contact_sheet_auto = QCheckBox("渲染完成后自动生成联系表")
         self.contact_sheet_auto.setChecked(True)
         layout.addWidget(self.contact_sheet_auto)
@@ -3897,37 +3888,6 @@ class MainWindow(QMainWindow):
             self.shot_table.setCurrentCell(0, 3)
         self._update_shot_stats()
 
-    def _quality_report_for_current(self):
-        mode = self._current_mode()
-        if mode == "single":
-            prompt_zh = self.single_prompt.toPlainText().strip()
-            prompt = self._resolve_single_en()
-            shots = [{"id": "01", "name": "single", "prompt": prompt,
-                      "prompt_zh": prompt_zh or prompt}] if prompt else []
-            text = self._single_input_text() or prompt_zh or prompt
-        else:
-            shots = self._collect_shots(False, allow_empty=True)
-            text = self._story_premise_text() or "quality check"
-        project = self._build_project(mode, shots, text or "quality check")
-        return check_project(project)
-
-    def run_quality_check(self) -> None:
-        try:
-            report = self._quality_report_for_current()
-        except Exception as exc:
-            QMessageBox.warning(self, "质检失败", str(exc))
-            return
-        for line in report.lines():
-            self.append_log("质检 · " + line)
-        if report.critical:
-            QMessageBox.warning(self, "连贯质检", format_report(report))
-        elif report.warnings:
-            QMessageBox.information(self, "连贯质检", format_report(report))
-        else:
-            QMessageBox.information(
-                self, "连贯质检", "未发现连续性问题。\n" + format_report(report))
-        self.statusBar().showMessage("连贯质检完成")
-
     def _resolve_output_image(self, image: Any) -> Path | None:
         text = str(image or "").strip()
         if not text:
@@ -4082,59 +4042,6 @@ class MainWindow(QMainWindow):
     def _on_vision_finished(self) -> None:
         self.vision_worker = None
         self.btn_similarity.setEnabled(True)
-
-    def run_quality_repair(self) -> None:
-        try:
-            project = self._build_project(
-                self._current_mode(),
-                self._collect_shots(False, allow_empty=True)
-                if self._current_mode() == "story"
-                else [{"id": "01", "name": "single",
-                       "prompt": self._resolve_single_en()}],
-                self._current_text() or "quality repair")
-            repaired, changes = repair_project(project)
-        except Exception as exc:
-            QMessageBox.warning(self, "修复失败", str(exc))
-            return
-        if not changes:
-            QMessageBox.information(self, "自动修复", "没有发现可安全自动修复的问题。")
-            return
-        self._apply_repaired_project(repaired)
-        for change in changes:
-            self.append_log("自动修复 · " + change)
-        self.statusBar().showMessage("已自动修复 %d 项" % len(changes))
-        QMessageBox.information(
-            self, "自动修复", "已修复：\n" + "\n".join("- " + item for item in changes))
-
-    def _apply_repaired_project(self, project: dict[str, Any],
-                                replace_table: bool = True) -> None:
-        character = project.get("character") or {}
-        if not character.get("use_ipadapter"):
-            self.char_ref.clear()
-        style_ref = project.get("style_ref") or {}
-        if style_ref.get("enabled") is False:
-            self.style_ref_check.setChecked(False)
-        shots = project.get("shots") or []
-        if replace_table and shots:
-            self._fill_shot_table(shots)
-
-    def _preflight_quality(self, project: dict[str, Any]) -> bool:
-        report = check_project(project)
-        for line in report.lines():
-            if line.startswith("提示："):
-                continue
-            self.append_log("质检 · " + line)
-        if report.warnings and not report.critical:
-            self.statusBar().showMessage(
-                "连贯质检发现 %d 个警告，详见日志" % len(report.warnings))
-        if not report.critical:
-            return True
-        answer = QMessageBox.warning(
-            self, "连贯质检发现严重问题",
-            format_report(report) + "\n\n仍要继续生成吗？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No)
-        return answer == QMessageBox.StandardButton.Yes
 
     def _row_data(self, row: int) -> dict[str, Any]:
         lock_item = self.shot_table.item(row, 0)
@@ -4681,7 +4588,6 @@ class MainWindow(QMainWindow):
         kind_name = {
             "single": "单图提示词",
             "story": "分镜",
-            "story_repair": "修复分镜",
             "rewrite": "改写提示词",
         }.get(self._req_label, "AI 生成")
         self.statusBar().showMessage(
@@ -4828,21 +4734,6 @@ class MainWindow(QMainWindow):
         project = self._build_project(mode, all_shots if mode != "single" else shots, text)
         previous_prefix = str((self.project or {}).get("prefix") or "")
         self._reuse_project_identity(project)
-        if self.auto_continuity_check.isChecked():
-            project, repairs = repair_project(project)
-            if repairs:
-                self._apply_repaired_project(project, replace_table=False)
-                if mode != "single" and selected_only:
-                    ids = {str(shot.get("id") or "") for shot in shots}
-                    shots = [
-                        shot for shot in (project.get("shots") or [])
-                        if str(shot.get("id") or "") in ids]
-                else:
-                    shots = list(project.get("shots") or shots)
-            for change in repairs:
-                self.append_log("自动连贯修复 · " + change)
-        if not self._preflight_quality(project):
-            return
         self._continue_render(mode, project, shots, text, previous_prefix)
 
     def _continue_render(self, mode: str, project: dict[str, Any],

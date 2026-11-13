@@ -117,9 +117,8 @@ class PromptWorker(QThread):
                  instruction: str = "",
                  character_tags: str = "",
                  style_positive: str = "",
-                 strip_appearance: bool = False,
-                 use_external: bool = False,
-                 repair_shots: list[dict[str, Any]] | None = None):
+                  strip_appearance: bool = False,
+                  use_external: bool = False):
         super().__init__()
         self.cfg = cfg
         self.kind = kind
@@ -138,7 +137,6 @@ class PromptWorker(QThread):
         self.style_positive = style_positive
         self.strip_appearance = strip_appearance
         self.use_external = use_external
-        self.repair_shots = repair_shots
 
     def cancel(self) -> None:
         self.requestInterruption()
