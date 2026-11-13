@@ -6,7 +6,7 @@ import re
 from html import unescape
 from typing import Any
 
-from PySide6.QtCore import QEvent, Qt, QTimer
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QButtonGroup, QComboBox, QCompleter, QGridLayout, QPlainTextEdit,
     QPushButton, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget,
@@ -209,6 +209,8 @@ class SearchComboBox(ClickScrollComboBox):
 class WrappingTabs(QWidget):
     """Tab-like selector whose buttons wrap to new rows instead of scrolling."""
 
+    currentChanged = Signal(int)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._buttons = []
@@ -252,13 +254,21 @@ class WrappingTabs(QWidget):
     def setCurrentIndex(self, index):
         if 0 <= index < len(self._buttons):
             self._buttons[index].setChecked(True)
+            changed = self.stack.currentIndex() != index
             self.stack.setCurrentIndex(index)
+            if changed:
+                self.currentChanged.emit(index)
 
     def currentIndex(self):
         return self.stack.currentIndex()
 
     def count(self):
         return self.stack.count()
+
+    def tabText(self, index: int) -> str:
+        if 0 <= index < len(self._buttons):
+            return self._buttons[index].text()
+        return ""
 
     def _relayout(self):
         # A fixed column count avoids stale grid columns shrinking labels when

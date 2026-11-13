@@ -15,7 +15,7 @@ from typing import Any
 from PySide6.QtCore import (
     QByteArray, QFileSystemWatcher, QItemSelectionModel, QSize, Qt, QTimer,
 )
-from PySide6.QtGui import QAction, QBrush, QIcon, QImage, QPixmap
+from PySide6.QtGui import QAction, QBrush, QColor, QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
     QDoubleSpinBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout,
@@ -38,7 +38,9 @@ from comfyui_generator.core.continuity import (
 from comfyui_generator.core.detailers import build_detailer_choices, filter_detector_models, local_detectors
 from comfyui_generator.core.jobs import Task, build_tasks
 from comfyui_generator.core.lora_info import is_style_lora, lora_tag_info
-from comfyui_generator.core.lora_sources import lora_display_label, lora_entries
+from comfyui_generator.core.lora_sources import (
+    lora_base_series, lora_display_label, lora_entries,
+)
 from comfyui_generator.core.model_configs import (
     find_model_config, load_model_configs,
 )
@@ -50,7 +52,8 @@ from comfyui_generator.core.pose import (
 from comfyui_generator.core.project import (
     add_plot_history, clear_story_partial, configure_projects_dir,
     list_projects, load_plot_history, load_project,
-    load_session, load_story_partial, move_to_trash, new_project, save_project,
+    load_session, load_story_partial, migrate_project_filenames,
+    move_to_trash, new_project, save_project,
     save_session, save_story_partial,
 )
 from comfyui_generator.core.quality import check_project, format_report, repair_project
@@ -325,6 +328,10 @@ class MainWindow(QMainWindow):
         self.cfg.ensure_dirs()
         configure_projects_dir(
             self.cfg.root, self.cfg.projects_dir, self.cfg.single_projects_dir)
+        try:
+            migrate_project_filenames(self.cfg.root)
+        except Exception:
+            pass
         self.template_path = resolve_template(self.cfg)
         self.template = load_template(self.cfg)
         self.comfy_service = ComfyService(self.cfg)
@@ -356,6 +363,7 @@ class MainWindow(QMainWindow):
         self._loading_model_config = False
         self._reference_tags: list[str] = []
         self._lora_paths: dict[str, str] = {}
+        self._lora_series_meta: dict[str, str] = {}
         self._online_tried: set[str] = set()
         self.lora_tags_worker: LoraTagsWorker | None = None
         self._lora_label_worker: TagTranslateWorker | None = None
@@ -887,6 +895,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._build_prompt_tab(), "提示词")
         self.tabs.addTab(self._build_continuity_tab(), "连贯")
         self.tabs.addTab(self._build_style_ref_tab(), "参考图")
+        self.tabs.currentChanged.connect(self._on_main_tab_changed)
         layout.addWidget(self.tabs)
         layout.addStretch(1)
         scroll.setWidget(inner)
@@ -2012,27 +2021,92 @@ class MainWindow(QMainWindow):
                          current: dict[str, tuple[bool, float]]) -> None:
         configured = {self._lora_key(key): value for key, value in configured.items()}
         current = {self._lora_key(key): value for key, value in current.items()}
+        state: dict[str, tuple[bool, float]] = {}
+        for name in names:
+            key = self._lora_key(name)
+            state[key] = current.get(
+                key, (key in configured, configured.get(key, 0.9)))
+        self._rebuild_lora_table(table, names, state)
+
+    @staticmethod
+    def _lora_series(name: Any) -> str:
+        base = str(name or "").replace("\\", "/").split("/")[-1].lower()
+        if "anima" in base:
+            return "Anima"
+        if "noob" in base:
+            return "NoobAI"
+        if "illus" in base or re.search(r"(^|[-_. ])il(l)?([-_. ]|$)", base):
+            return "IL"
+        if "pony" in base:
+            return "Pony"
+        return "其他"
+
+    _LORA_SERIES_ORDER = ("Anima", "IL", "NoobAI", "Pony", "其他")
+
+    def _lora_series_for(self, name: Any) -> str:
+        series = self._lora_series(name)
+        path = self._lora_paths.get(self._lora_key(name)) or ""
+        if not path:
+            path = self._resolve_lora_path(str(name or ""))
+        if path.lower().endswith(".safetensors") and Path(path).is_file():
+            if path not in self._lora_series_meta:
+                self._lora_series_meta[path] = lora_base_series(path)
+            detected = self._lora_series_meta.get(path) or ""
+            if detected:
+                return detected
+        return series
+
+    def _append_lora_group_header(self, table: QTableWidget, label: str) -> None:
+        row = table.rowCount()
+        table.insertRow(row)
+        item = QTableWidgetItem("— %s —" % label)
+        item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        font = item.font()
+        font.setBold(True)
+        item.setFont(font)
+        item.setForeground(QBrush(QColor("#5a6b7d")))
+        table.setItem(row, 0, item)
+        table.setSpan(row, 0, 1, 2)
+
+    def _rebuild_lora_table(self, table: QTableWidget, names: list[str],
+                            state: dict[str, tuple[bool, float]]) -> None:
         table.blockSignals(True)
         try:
+            table.clearSpans()
             table.setRowCount(0)
+            groups: dict[str, list[str]] = {}
             for name in names:
-                row = table.rowCount()
-                table.insertRow(row)
-                item = QTableWidgetItem(self._lora_label_text(name))
-                item.setData(Qt.ItemDataRole.UserRole, name)
-                item.setToolTip(name)
-                item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
-                key = self._lora_key(name)
-                checked, strength = current.get(key, (key in configured, configured.get(key, 0.9)))
-                item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
-                table.setItem(row, 0, item)
-                spin = QDoubleSpinBox()
-                spin.setRange(0, 2)
-                spin.setSingleStep(0.05)
-                spin.setValue(strength)
-                table.setCellWidget(row, 1, spin)
+                groups.setdefault(self._lora_series_for(name), []).append(name)
+            order = list(self._LORA_SERIES_ORDER)
+            order += [key for key in groups if key not in order]
+            for series in order:
+                group = groups.get(series)
+                if not group:
+                    continue
+                self._append_lora_group_header(table, series)
+                for name in sorted(
+                        group, key=lambda value: self._lora_label_text(value).lower()):
+                    key = self._lora_key(name)
+                    checked, strength = state.get(key, (False, 0.9))
+                    self._append_lora_row(table, name, strength, checked)
         finally:
             table.blockSignals(False)
+
+    def _reorder_lora_table(self, table: QTableWidget) -> None:
+        names: list[str] = []
+        state: dict[str, tuple[bool, float]] = {}
+        for row in range(table.rowCount()):
+            item = table.item(row, 0)
+            spin = table.cellWidget(row, 1)
+            if not item or not spin:
+                continue
+            name = item.data(Qt.ItemDataRole.UserRole)
+            if not name:
+                continue
+            key = self._lora_key(name)
+            names.append(name)
+            state[key] = (item.checkState() == Qt.CheckState.Checked, spin.value())
+        self._rebuild_lora_table(table, names, state)
 
     def _body_lora_dir(self) -> str:
         folder = self.cfg.lora.body_dir.strip()
@@ -2308,6 +2382,19 @@ class MainWindow(QMainWindow):
                 self.lora_table.rowCount(), self.style_lora_table.rowCount(),
                 self.body_lora_table.rowCount(), self.action_lora_table.rowCount(),
                 self.clothing_lora_table.rowCount()))
+
+    def _on_main_tab_changed(self, index: int) -> None:
+        if index < 0:
+            return
+        title = str(self.tabs.tabText(index) or "")
+        if title in ("角色", "风格", "身体", "动作", "服装"):
+            QTimer.singleShot(0, self._rescan_loras)
+
+    def _rescan_loras(self) -> None:
+        try:
+            self._populate_loras()
+        except Exception as exc:
+            self.append_log("刷新 LoRA 列表失败：%s" % exc)
 
     def _resolve_lora_path(self, name: str) -> str:
         direct = Path(name)
@@ -5392,6 +5479,7 @@ class MainWindow(QMainWindow):
                     spin.setValue(desired[name])
         finally:
             table.blockSignals(False)
+        self._reorder_lora_table(table)
 
     def _apply_loras(self, loras: list[dict[str, Any]]) -> None:
         desired = {item["name"]: float(item.get("strength", 0.9)) for item in loras if item.get("name")}

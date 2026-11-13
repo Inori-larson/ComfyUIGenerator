@@ -15,6 +15,9 @@ from comfyui_generator.core.project import (
     save_project,
     save_session,
     save_story_partial,
+    configure_projects_dir,
+    migrate_project_filenames,
+    project_file,
 )
 
 
@@ -26,6 +29,37 @@ TEMPLATE = {
     "settings": {"width": 832, "height": 1216, "steps": 30, "base_seed": 123},
     "shots": [{"id": "01", "name": "old", "prompt": "old shot"}],
 }
+
+
+def test_project_filename_includes_name_suffix(tmp_path):
+    configure_projects_dir(tmp_path, tmp_path / "story", tmp_path / "single")
+    project = new_project("demo_kimi-k3", "a cat", TEMPLATE)
+    path = save_project(project, tmp_path)
+    assert path.name == "demo_kimi-k3_%s.json" % project["id"]
+    assert path.is_file()
+
+
+def test_save_project_removes_legacy_id_file(tmp_path):
+    configure_projects_dir(tmp_path, tmp_path / "story", tmp_path / "single")
+    project = new_project("demo", "a cat", TEMPLATE)
+    legacy = tmp_path / "story" / ("%s.json" % project["id"])
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(json.dumps(project, ensure_ascii=False), encoding="utf-8")
+    path = save_project(project, tmp_path)
+    assert path.name.startswith("demo_")
+    assert not legacy.exists()
+
+
+def test_migrate_project_filenames(tmp_path):
+    configure_projects_dir(tmp_path, tmp_path / "story", tmp_path / "single")
+    project = new_project("named_kimi", "a cat", TEMPLATE)
+    legacy = tmp_path / "story" / ("%s.json" % project["id"])
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(json.dumps(project, ensure_ascii=False), encoding="utf-8")
+    changes = migrate_project_filenames(tmp_path)
+    assert changes
+    assert not legacy.exists()
+    assert project_file(tmp_path, project).is_file()
 
 
 def test_new_project_clears_shots_and_adds_meta():

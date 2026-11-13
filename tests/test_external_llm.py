@@ -266,3 +266,27 @@ class _BytesIo:
 
     def close(self) -> None:
         self._data = b""
+
+
+def test_input_inspection_maps_to_content_filter(monkeypatch):
+    import urllib.error
+
+    from comfyui_generator.core.external_llm import ContentFilterError
+
+    cfg = SimpleNamespace(base_url="https://example.test/v1", api_key="",
+                          model="test-model", timeout=30)
+    client = ExternalLLMClient(cfg)
+    detail = ('{"error":{"message":"Input text data may contain inappropriate '
+              'content.","type":"data_inspection_failed"}}')
+
+    def fake_urlopen(req, timeout):
+        raise urllib.error.HTTPError(
+            req.full_url, 400, "Bad Request", {},
+            _BytesIo(detail.encode("utf-8")))
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    try:
+        client.chat_json("test-model", [{"role": "user", "content": "x"}])
+        assert False, "expected ContentFilterError"
+    except ContentFilterError as exc:
+        assert "输入审查" in str(exc)

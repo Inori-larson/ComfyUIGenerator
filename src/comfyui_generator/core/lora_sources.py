@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import re
+import struct
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +43,40 @@ def lora_display_label(name: str | Path) -> str:
     ]
     label = " ".join(kept).strip()
     return label or re.sub(r"[_\-\.]+", " ", stem).strip() or base
+
+
+def safetensors_metadata(path: str | Path) -> dict[str, str]:
+    """Read the JSON header of a .safetensors file without loading weights."""
+    try:
+        with open(path, "rb") as handle:
+            size = struct.unpack("<Q", handle.read(8))[0]
+            if size <= 0 or size > 20_000_000:
+                return {}
+            data = json.loads(handle.read(size).decode("utf-8"))
+    except (OSError, ValueError, struct.error, UnicodeDecodeError):
+        return {}
+    meta = data.get("__metadata__") if isinstance(data, dict) else None
+    if not isinstance(meta, dict):
+        return {}
+    return {str(key): str(value) for key, value in meta.items()}
+
+
+def lora_base_series(path: str | Path) -> str:
+    """Best-effort base-model family from safetensors metadata."""
+    meta = safetensors_metadata(path)
+    text = " ".join(str(meta.get(key) or "") for key in (
+        "ss_base_model_version", "modelspec.architecture",
+        "ss_network_module", "modelspec.title", "ss_sd_model_name",
+    )).lower()
+    if "anima" in text:
+        return "Anima"
+    if "noob" in text:
+        return "NoobAI"
+    if "illustrious" in text:
+        return "IL"
+    if "pony" in text:
+        return "Pony"
+    return ""
 
 
 def scan_lora_dir(folder: str | Path | None) -> list[Path]:

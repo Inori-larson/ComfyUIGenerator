@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import time
 import uuid
@@ -59,9 +60,60 @@ def projects_dir(root: Path, mode: str = "") -> Path:
     return path
 
 
+def _safe_project_stem(project: dict[str, Any]) -> str:
+    name = str(project.get("name") or "").strip()
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", name)
+    name = re.sub(r"\s+", "_", name).strip(" ._")
+    return name[:80]
+
+
 def project_file(root: Path, project: dict[str, Any]) -> Path:
-    return projects_dir(root, str(project.get("mode") or "")) / (
-        "%s.json" % project["id"])
+    stem = _safe_project_stem(project)
+    ident = str(project["id"])
+    filename = "%s_%s.json" % (stem, ident) if stem else "%s.json" % ident
+    return projects_dir(root, str(project.get("mode") or "")) / filename
+
+
+def project_files_for_id(root: Path, project: dict[str, Any]) -> list[Path]:
+    folder = projects_dir(root, str(project.get("mode") or ""))
+    ident = str(project.get("id") or "")
+    if not ident:
+        return []
+    return [path for path in folder.glob("*.json")
+            if path.stem == ident or path.stem.endswith("_" + ident)]
+
+
+def migrate_project_filenames(root: Path) -> list[tuple[str, str]]:
+    """Rename legacy `<id>.json` project files to `<name>_<id>.json`."""
+    changes: list[tuple[str, str]] = []
+    for mode in ("story", "single"):
+        folder = projects_dir(root, mode)
+        for path in sorted(folder.glob("*.json")):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(data, dict) or not data.get("id"):
+                continue
+            target = project_file(root, data)
+            if target == path:
+                continue
+            legacy = path.stem == str(data.get("id"))
+            try:
+                if target.exists():
+                    if not legacy:
+                        continue
+                    if path.stat().st_mtime > target.stat().st_mtime:
+                        path.replace(target)
+                        changes.append((path.name, target.name))
+                    else:
+                        path.unlink()
+                    continue
+                path.replace(target)
+            except OSError:
+                continue
+            changes.append((path.name, target.name))
+    return changes
 
 
 def shot_is_ready(shot: Any) -> bool:
@@ -85,6 +137,12 @@ def save_project(project: dict[str, Any], root: Path) -> Path:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(project, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(path)
+    for other in project_files_for_id(root, project):
+        if other != path:
+            try:
+                other.unlink()
+            except OSError:
+                pass
     return path
 
 
@@ -216,9 +274,11 @@ def list_projects(root: Path) -> list[dict[str, Any]]:
 
 
 def delete_project(project: dict[str, Any], root: Path) -> None:
-    path = project_file(root, project)
-    if path.is_file():
-        path.unlink()
+    for path in project_files_for_id(root, project):
+        try:
+            path.unlink()
+        except OSError:
+            pass
     folder = projects_dir(root, str(project.get("mode") or "")) / project["id"]
     if folder.is_dir():
         shutil.rmtree(folder, ignore_errors=True)

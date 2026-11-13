@@ -146,3 +146,31 @@ def test_multiline_paste_prefers_text_with_newlines():
     mime.setText("a\nb")
     edit.insertFromMimeData(mime)
     assert edit.toPlainText() == "a\nb"
+
+
+def test_lora_series_classification():
+    assert MainWindow._lora_series("a\\nuoya-IL.safetensors") == "IL"
+    assert MainWindow._lora_series("a\\kuroinu_v1_IL.safetensors") == "IL"
+    assert MainWindow._lora_series("a\\x_ILL-v2.1.safetensors") == "IL"
+    assert MainWindow._lora_series("a\\suzuki_anima_v1.02.safetensors") == "Anima"
+    assert MainWindow._lora_series("a\\anime-IL-NOOB_v3.safetensors") == "NoobAI"
+    assert MainWindow._lora_series("a\\myPony.safetensors") == "Pony"
+    assert MainWindow._lora_series("a\\plain.safetensors") == "其他"
+
+
+def test_lora_table_groups_by_series():
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    names = [
+        "a\\nuoya-IL.safetensors",
+        "a\\suzuki_anima_v1.safetensors",
+        "a\\plain.safetensors",
+    ]
+    window._fill_lora_table(window.lora_table, names, {}, {})
+    labels = [window.lora_table.item(row, 0).text()
+              for row in range(window.lora_table.rowCount())]
+    assert labels[0].endswith("Anima —")
+    assert any("IL —" in text for text in labels)
+    assert any("其他 —" in text for text in labels)
+    header_has_spin = window.lora_table.cellWidget(0, 1) is not None
+    assert not header_has_spin

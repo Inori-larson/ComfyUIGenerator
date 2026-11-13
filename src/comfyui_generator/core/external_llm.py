@@ -173,6 +173,12 @@ class ExternalLLMClient:
                 detail = exc.read().decode("utf-8", "replace")[:2000]
                 last_error = "HTTP %s: %s" % (exc.code, detail)
                 low = detail.lower()
+                if "data_inspection_failed" in low or (
+                        "inappropriate content" in low):
+                    raise ContentFilterError(
+                        "外部网关的输入审查拒绝了本次请求（不是模型拒绝）。"
+                        "请调整描述措辞，或改用其他模型/网关。详情：%s"
+                        % detail[:300]) from exc
                 if exc.code == 400 and not omit_temperature and (
                         "temperature" in low and "not supported" in low):
                     omit_temperature = True

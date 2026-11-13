@@ -1,8 +1,44 @@
 from pathlib import Path
 
 from comfyui_generator.core.lora_sources import (
-    lora_display_label, lora_entries, match_comfy_name, scan_lora_dir,
+    lora_base_series, lora_display_label, lora_entries, match_comfy_name,
+    safetensors_metadata, scan_lora_dir,
 )
+
+
+def _write_safetensors(path: Path, metadata: dict[str, str]) -> None:
+    import json
+    import struct
+
+    header = json.dumps({"__metadata__": metadata}).encode("utf-8")
+    path.write_bytes(struct.pack("<Q", len(header)) + header)
+
+
+def test_lora_base_series_from_metadata(tmp_path):
+    anima = tmp_path / "BAS 4.5.safetensors"
+    _write_safetensors(anima, {
+        "ss_base_model_version": "anima",
+        "ss_network_module": "networks.lora_anima",
+    })
+    assert lora_base_series(anima) == "Anima"
+    assert safetensors_metadata(anima)["ss_base_model_version"] == "anima"
+
+    illustrious = tmp_path / "x.safetensors"
+    _write_safetensors(illustrious, {
+        "ss_base_model_version": "illustrious",
+    })
+    assert lora_base_series(illustrious) == "IL"
+
+    plain = tmp_path / "y.safetensors"
+    _write_safetensors(plain, {"ss_base_model_version": "sdxl_base_v1-0"})
+    assert lora_base_series(plain) == ""
+
+
+def test_lora_base_series_handles_bad_file(tmp_path):
+    broken = tmp_path / "broken.safetensors"
+    broken.write_bytes(b"\x05\x00")
+    assert lora_base_series(broken) == ""
+    assert safetensors_metadata(broken) == {}
 
 
 def test_scan_lora_dir_recursive(tmp_path):
