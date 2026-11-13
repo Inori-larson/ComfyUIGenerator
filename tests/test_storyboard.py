@@ -50,6 +50,11 @@ def test_messages_include_clothing_rules():
     assert "严格按用户剧情顺序推进" in system
     assert "1girl solo" in system
     assert "1girl 1boy" in system
+    assert "nude male" in system
+    assert "faceless male" in system
+    assert "男主只能完全裸体、无脸" in system
+    assert "胸罩保持半脱" in system
+    assert "nipples / bare breasts / topless" in system
 
 
 def test_messages_strip_appearance():
