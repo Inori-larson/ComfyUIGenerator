@@ -313,6 +313,7 @@ class PromptWorker(QThread):
             shot["prompt_zh"] = "，".join(zh_tags)
         self._annotate_contract_findings(shots)
         self._annotate_stall_findings(shots)
+        self._annotate_fluid_findings(shots)
         self._summarise_tag_findings(shots)
         trace_event(event, shots)
         self.story_ready.emit(shots)
@@ -399,6 +400,19 @@ class PromptWorker(QThread):
                               % len(per_shot))
         except Exception as exc:
             self.log.emit("停滞检测跳过：%s" % str(exc)[:160])
+
+    def _annotate_fluid_findings(self, shots: list[dict[str, Any]]) -> None:
+        try:
+            from comfyui_generator.core.fluid_guard import detect_fluid_discontinuity
+
+            per_shot = detect_fluid_discontinuity(shots)
+            for index, findings in per_shot.items():
+                existing = shots[index].setdefault("findings", [])
+                existing.extend(findings)
+            if per_shot:
+                self.log.emit("体液接续提示：%d 镜体液无故消失。" % len(per_shot))
+        except Exception as exc:
+            self.log.emit("体液接续检测跳过：%s" % str(exc)[:160])
 
     def _summarise_tag_findings(self, shots: list[dict[str, Any]]) -> None:
         blocking = [s for s in shots if s.get("ready") is False]
