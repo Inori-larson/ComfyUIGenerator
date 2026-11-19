@@ -75,7 +75,8 @@ def _cast_findings(state: PromptState) -> list[dict[str, str]]:
     return findings
 
 
-def _layer_findings(state: PromptState) -> list[dict[str, str]]:
+def _layer_findings(state: PromptState, db: TagDatabase,
+                    prompt: str) -> list[dict[str, str]]:
     findings: list[dict[str, str]] = []
     if state.state_conflicts:
         findings.append(_finding(
@@ -111,6 +112,32 @@ def _layer_findings(state: PromptState) -> list[dict[str, str]]:
             "layer_conflict", "P2",
             "下装仍穿在身上且未撩起却出现裸露生殖器标签",
             tokens + ["pussy/vagina/labia"]))
+
+    vocab = db.layer_vocab()
+    prompt_lower = str(prompt or "").lower()
+    claims = [token for token in vocab.get("inner_only_claims", [])
+              if token and re.search(
+                  r"(?<![a-z0-9])" + re.escape(token) + r"(?![a-z0-9])",
+                  prompt_lower)]
+    if claims:
+        non_inner = sorted({
+            g.token for g in state.garments
+            if g.category in set(vocab.get("non_inner_categories", []))
+            and g.state != REMOVED})
+        if non_inner:
+            findings.append(_finding(
+                "layer_claim_conflict", "P2",
+                "写了 only lingerie 一类状态，却仍有非内衣衣物可见",
+                claims + non_inner[:10]))
+
+    if state.aside_legwear_conflict:
+        aside = sorted({
+            g.token for g in state.garments
+            if g.category == "inner_bottom" and g.state in (OPEN, LIFTED)})
+        findings.append(_finding(
+            "layer_panty_under_legwear", "P2",
+            "内裤拨开但覆盖胯部的裤袜/连裤袜仍完整穿着，物理层级难以成立",
+            sorted(set(state.aside_legwear_conflict)) + aside[:4]))
     return findings
 
 
@@ -169,7 +196,7 @@ def validate_prompt(prompt: str, db: TagDatabase,
     tags = split_tags(prompt)
     state = parse_state(prompt, db.layer_vocab())
 
-    findings = _cast_findings(state) + _layer_findings(state)
+    findings = _cast_findings(state) + _layer_findings(state, db, prompt)
     findings += _unknown_findings(db, tags, options)
     alias_findings, mapping = _alias_findings(db, tags, options)
     findings += alias_findings

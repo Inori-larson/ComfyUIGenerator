@@ -5,12 +5,35 @@ os.environ["CUI_NO_AUTOCONNECT"] = "1"
 
 from PySide6.QtWidgets import QApplication
 
+from comfyui_generator.core.jobs import Task
 from comfyui_generator.ui.main_window import MainWindow
 
 
 def _window():
     app = QApplication.instance() or QApplication([])
     return app, MainWindow()
+
+
+def test_output_entries_carry_shot_id():
+    _app, window = _window()
+    window.project = {"mode": "story", "shots": [], "outputs": []}
+    task = Task(shot_id="01", shot_name="shot_01", variant=1, seed=123,
+                shot={"id": "01", "prompt": "1girl"})
+    task.image = "anime_story/task/a/01_shot_01_00001_.png"
+    window._append_project_output(task)
+    entry = window.project["outputs"][0]
+    assert isinstance(entry, dict)
+    assert entry["image"] == task.image
+    assert entry["shot_id"] == "01"
+    assert entry["variant"] == 1
+    assert window._output_value(entry) == task.image
+
+
+def test_output_entry_shot_lookup_uses_shot_id_not_index():
+    _app, window = _window()
+    shots = [{"id": "01", "name": "shot_01"}, {"id": "02", "name": "shot_02"}]
+    entry = {"image": "x.png", "shot_id": "02", "variant": 1}
+    assert window._output_entry_shot(entry, shots, 0)["id"] == "02"
 
 
 def test_plot_label_not_duplicated():

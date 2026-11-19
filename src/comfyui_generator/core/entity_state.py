@@ -29,6 +29,7 @@ class Garment:
 class PromptState:
     garments: list[Garment] = field(default_factory=list)
     state_conflicts: list[str] = field(default_factory=list)
+    aside_legwear_conflict: list[str] = field(default_factory=list)
     skin_top: bool = False
     skin_groin: bool = False
     girls: int = 0
@@ -115,6 +116,12 @@ def parse_state(prompt: str, vocab: dict[str, list[str]]) -> PromptState:
     skin_top_patterns = vocab.get("skin_top", [])
     skin_groin_patterns = vocab.get("skin_groin", [])
     allowlist = vocab.get("skin_feature_allowlist", [])
+    crotch_tokens = [t for t in vocab.get("crotch_covering_legwear", [])
+                     if category_tokens.get(t) == "legwear"]
+    inner_bottom_tokens = [t for t, category in category_tokens.items()
+                           if category == "inner_bottom"]
+    aside_markers = [m for m in vocab.get("open_markers", [])
+                     if "aside" in m] or ["aside"]
 
     for raw_segment in split_tags(prompt):
         text = _segment_core(raw_segment)
@@ -133,6 +140,12 @@ def parse_state(prompt: str, vocab: dict[str, list[str]]) -> PromptState:
             found.setdefault(category_tokens[token], token)
         for category, token in found.items():
             state.garments.append(Garment(category, token, _garment_state(text, vocab)))
+
+        if (any(_pattern(m).search(text) for m in aside_markers)
+                and any(_pattern(t).search(text) for t in inner_bottom_tokens)
+                and not _has_marker(text, vocab.get("removed_markers", []))):
+            state.aside_legwear_conflict.extend(
+                token for token in crotch_tokens if _pattern(token).search(text))
 
         allowed_spans = _match_spans(text, allowlist)
         if any(_pattern(t).search(text) for t in skin_top_patterns):

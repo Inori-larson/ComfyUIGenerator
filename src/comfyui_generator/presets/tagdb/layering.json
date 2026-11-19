@@ -54,6 +54,7 @@
     "pulled open", "off shoulders", "off-shoulder", "off shoulder",
     "slid off", "open shirt", "removing", "taking off", "unfastening",
     "unbuttoning", "undressing", "pulling off", "partially removed",
+    "pulled aside", "pushed aside", "aside",
     "open clothes", "wardrobe malfunction"
   ],
   "lifted_markers": [
@@ -63,7 +64,7 @@
   "removed_markers": [
     "removed", "taken off", "off",
     "on ground", "on the ground", "on floor", "on chair", "on desk",
-    "on table", "on bed", "placed on", "placed down", "put aside",
+    "on table", "on bed", "placed on", "placed down",
     "discarded", "no jacket", "no shirt",
     "no skirt", "no pants", "no dress", "no uniform", "no bra", "no panties",
     "no underwear", "no shoes", "no heels", "bare feet", "barefoot",
@@ -72,5 +73,17 @@
   "skin_feature_allowlist": [
     "medium breasts", "large breasts", "small breasts", "huge breasts",
     "normal breasts", "pussy juice"
+  ],
+  "inner_only_claims": [
+    "only lingerie", "lingerie only", "underwear only",
+    "only underwear", "nothing but lingerie"
+  ],
+  "non_inner_categories": [
+    "outer_top", "outer_bottom", "onepiece", "legwear",
+    "footwear", "accessory"
+  ],
+  "crotch_covering_legwear": [
+    "pantyhose", "black pantyhose", "white pantyhose", "tights",
+    "fishnet pantyhose", "fishnets", "leggings", "stockings"
   ]
 }

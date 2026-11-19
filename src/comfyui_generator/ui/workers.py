@@ -312,6 +312,7 @@ class PromptWorker(QThread):
                        for tag in self._split_tags(shot.get("prompt", ""))]
             shot["prompt_zh"] = "，".join(zh_tags)
         self._annotate_contract_findings(shots)
+        self._annotate_stall_findings(shots)
         self._summarise_tag_findings(shots)
         trace_event(event, shots)
         self.story_ready.emit(shots)
@@ -384,6 +385,20 @@ class PromptWorker(QThread):
                 existing.extend(findings)
         except Exception as exc:
             self.log.emit("剧情契约校验跳过：%s" % str(exc)[:160])
+
+    def _annotate_stall_findings(self, shots: list[dict[str, Any]]) -> None:
+        try:
+            from comfyui_generator.core.stall_guard import detect_stalls
+
+            per_shot = detect_stalls(shots)
+            for index, findings in per_shot.items():
+                existing = shots[index].setdefault("findings", [])
+                existing.extend(findings)
+            if per_shot:
+                self.log.emit("动作停滞提示：%d 镜与上一镜高度重合。"
+                              % len(per_shot))
+        except Exception as exc:
+            self.log.emit("停滞检测跳过：%s" % str(exc)[:160])
 
     def _summarise_tag_findings(self, shots: list[dict[str, Any]]) -> None:
         blocking = [s for s in shots if s.get("ready") is False]

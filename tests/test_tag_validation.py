@@ -53,6 +53,37 @@ def test_footwear_removed_with_bare_feet_is_clean():
     assert not result.findings
 
 
+def test_only_lingerie_with_non_inner_garments_is_advisory():
+    db = load_tag_database()
+    result = validate_prompt(
+        "1girl, only lingerie, white gloves, black pantyhose, platform heels", db)
+    assert any(f["kind"] == "layer_claim_conflict"
+               and f["severity"] == "P2" for f in result.findings)
+
+
+def test_only_lingerie_with_inner_items_only_is_clean():
+    db = load_tag_database()
+    result = validate_prompt(
+        "1girl, only lingerie, black lace bra, black lace panties", db)
+    assert not result.findings
+
+
+def test_panties_aside_under_pantyhose_is_advisory():
+    db = load_tag_database()
+    result = validate_prompt(
+        "1girl 1boy, black lace panties aside under black pantyhose, sex", db)
+    assert any(f["kind"] == "layer_panty_under_legwear"
+               and f["severity"] == "P2" for f in result.findings)
+
+
+def test_panties_aside_with_thighhighs_is_clean():
+    db = load_tag_database()
+    result = validate_prompt(
+        "1girl 1boy, black lace panties aside, black thighhighs, sex", db)
+    assert not [f for f in result.findings
+                if f["kind"] == "layer_panty_under_legwear"]
+
+
 def test_closed_jacket_with_bra_is_blocking():
     db = load_tag_database()
     prompt = "1girl, military uniform, red jacket, white shirt, black bra"

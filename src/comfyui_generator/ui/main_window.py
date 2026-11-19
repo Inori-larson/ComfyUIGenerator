@@ -3920,7 +3920,8 @@ class MainWindow(QMainWindow):
             images = [item.get("image") for item in results
                       if item.get("state") == "done" and item.get("image")]
         else:
-            images = list((self.project or {}).get("outputs") or [])
+            images = [self._output_value(item)
+                      for item in ((self.project or {}).get("outputs") or [])]
         paths: list[Path] = []
         seen: set[str] = set()
         for image in images:
@@ -4065,13 +4066,13 @@ class MainWindow(QMainWindow):
         else:
             items = []
             outputs = list((self.project or {}).get("outputs") or [])
-            for index, image in enumerate(outputs):
-                label = ""
-                shots = (self.project or {}).get("shots") or []
-                if index < len(shots):
-                    shot = shots[index]
-                    label = "%s_%s" % (shot.get("id", ""), shot.get("name", ""))
-                items.append((label, image))
+            shots = (self.project or {}).get("shots") or []
+            for index, entry in enumerate(outputs):
+                shot = self._output_entry_shot(entry, shots, index)
+                label = "%s_%s" % (shot.get("id", ""), shot.get("name", ""))
+                image = self._output_value(entry)
+                if image:
+                    items.append((label, image))
         pairs: list[tuple[str, Path]] = []
         seen: set[str] = set()
         for label, image in items:
@@ -5159,7 +5160,7 @@ class MainWindow(QMainWindow):
         self._set_row_icon(task_id, data)
         self._add_gallery(task, data, local)
         if self.project is not None and task.image:
-            self._append_project_output(task.image)
+            self._append_project_output(task)
             save_project(self.project, self.cfg.root)
         if task_id == self.current_task_id or self.chk_follow.isChecked():
             self._paint(data)
@@ -5221,14 +5222,42 @@ class MainWindow(QMainWindow):
         return "\n".join("%s: %s" % (key, value)
                          for key, value in rows if value)
 
-    def _append_project_output(self, image: str) -> None:
+    @staticmethod
+    def _output_value(entry: Any) -> str:
+        if isinstance(entry, dict):
+            return str(entry.get("image") or "")
+        return str(entry or "")
+
+    def _output_entry_shot(self, entry: Any, shots: list[dict[str, Any]],
+                           index: int) -> dict[str, Any]:
+        if not isinstance(entry, dict):
+            return shots[index] if index < len(shots) else {}
+        shot_id = str(entry.get("shot_id") or "")
+        match = next((shot for shot in shots
+                      if str(shot.get("id") or "") == shot_id), None)
+        if match is not None:
+            return match
+        return shots[index] if index < len(shots) else {}
+
+    def _append_project_output(self, task: Any) -> None:
+        image = str(getattr(task, "image", "") or "").strip()
         if self.project is None or not image:
             return
         outputs = list(self.project.get("outputs") or [])
         normalized = image.replace("\\", "/")
-        if normalized not in {str(item).replace("\\", "/") for item in outputs}:
-            outputs.append(image)
-            self.project["outputs"] = outputs
+        entry = {
+            "image": image,
+            "shot_id": str(getattr(task, "shot_id", "") or ""),
+            "variant": int(getattr(task, "variant", 1) or 1),
+            "seed": int(getattr(task, "seed", 0) or 0),
+        }
+        for index, existing in enumerate(outputs):
+            if self._output_value(existing).replace("\\", "/") == normalized:
+                outputs[index] = entry
+                break
+        else:
+            outputs.append(entry)
+        self.project["outputs"] = outputs
 
     def _make_gallery_item(self, data: bytes, meta: dict[str, Any],
                            task_id: str = "", favorite: bool = False) -> QListWidgetItem:
@@ -5293,8 +5322,9 @@ class MainWindow(QMainWindow):
         prefix = str(project.get("prefix") or "").replace("\\", "/").strip("/")
         prefix_scope = prefix + "/" if prefix else ""
         seen: set[str] = set()
-        for index, image in enumerate(outputs):
-            normalized = str(image).replace("\\", "/")
+        for index, entry in enumerate(outputs):
+            image = self._output_value(entry)
+            normalized = image.replace("\\", "/")
             if prefix_scope and not normalized.startswith(prefix_scope):
                 continue
             if normalized in seen:
@@ -5303,9 +5333,9 @@ class MainWindow(QMainWindow):
             if path is None:
                 continue
             seen.add(normalized)
-            shot = shots[index] if index < len(shots) else {}
+            shot = self._output_entry_shot(entry, shots, index)
             meta = self._gallery_metadata(
-                shot=shot, image=str(image),
+                shot=shot, image=image,
                 label=path.stem or str(shot.get("name") or ""),
                 path=str(path))
             try:
@@ -5947,11 +5977,11 @@ class MainWindow(QMainWindow):
         target_resolved = (str(target_path.resolve()).replace("\\", "/")
                            if target_path.is_file() else "")
 
-        def matches(item: str) -> bool:
-            value = str(item).replace("\\", "/")
+        def matches(item: Any) -> bool:
+            value = self._output_value(item).replace("\\", "/")
             if value == target:
                 return True
-            resolved = self._resolve_output_image(item)
+            resolved = self._resolve_output_image(self._output_value(item))
             return bool(target_resolved and resolved and
                         str(resolved.resolve()).replace("\\", "/") == target_resolved)
 
