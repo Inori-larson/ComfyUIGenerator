@@ -9,7 +9,8 @@ M1 桌面界面已可试用；M0 命令行核心保持可用。
 - **实时预览**：每张图独立显示采样过程中的逐步预览（ComfyUI WebSocket）
 - **托管服务**：自动探测/启动/重启本地 ComfyUI，退出时关闭自己启动的实例
 - 角色 LoRA、风格 LoRA、身体部位 LoRA、参考图（IPAdapter）、ADetailer 重绘、高清修复、通配符、项目/设置存档
-- 默认模板：WAI Illustrious v170 + **仪玄 V2**（0.9）+ 官方推荐参数（1024×1344、30 步、CFG 5、euler_ancestral/normal、高清 1.5× / 20 步 / 0.4、RealESRGAN Anime6B）
+- 默认模板：通用空白模板（仅 WAI Illustrious v170 与采样参数，无角色/LoRA/固定 seed）。角色模板仅作示例保留。
+- 用户创作规则：设置里「用户创作规则」可自由编辑，原样交给 AI 理解；代码不内置题材语义。
 
 ## 状态
 

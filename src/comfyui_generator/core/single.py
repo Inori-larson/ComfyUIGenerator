@@ -44,13 +44,8 @@ SINGLE_SYSTEM_PROMPT = (
     "镜头/构图只写抽象运镜词（full body, close-up, from below, dutch angle, depth of field），"
     "禁止 camera, holding camera, camera phone, lens, tripod, photographer 等会把实体相机画进画面的标签；"
     "看向镜头统一写 looking at viewer，不写 looking at camera。\n"
-    "5. 服装和裸露状态按描述如实写清；不要添加描述里没有的裸露、性行为或角色。\n"
-    "5b. 服装只能使用描述里给出的初始服装，禁止新增列表之外的衣物、鞋履、配饰，"
-    "也不允许漏写或删除任何一件已列出的单品（包括鞋子、袜子、饰品）；"
-    "颜色、材质、款式必须与描述完全一致，不能改色或替换成同类其他款式。\n"
-    "5c. 服装有层级（外衣盖住内衣、连裤袜盖住内裤）：外层仍穿着且没有打开、掀起、"
-    "滑落或脱掉时，被遮住的内衣、内裤和皮肤不要写进标签；只有外层明确打开、掀起、"
-    "滑落或脱掉之后，才写露出的内层衣物和部位。只写画面里实际可见的衣物层级。\n"
+    "5. 服装和裸露状态按描述如实写清；不要添加描述里没有的裸露、性行为或角色。"
+    "具体的服装层级、鞋履、内容边界等若用户在【用户规则】中给出，按规则理解。\n"
     "6. 如果启用了角色 LoRA，不要生成角色发色、瞳色、发型、脸、身体特征或角色名；"
     "这些交给 LoRA 和激活标签，只写剧情画面。\n"
     "7. 同时返回结构化 cast：没有男性时写 1girl solo；有男性参与时写 1girl 1boy；"
@@ -80,6 +75,7 @@ class SingleOptions:
     model: str
     framing: str = "auto"
     setting: str = ""
+    policy: str = ""
     character_tags: str = ""
     style_positive: str = ""
     strip_appearance: bool = False
@@ -95,6 +91,8 @@ def build_single_messages(description: str, options: SingleOptions) -> list[dict
     character_tags = dedupe_tags(options.character_tags)
     style_positive = dedupe_tags(options.style_positive)
     user: list[str] = []
+    if options.policy.strip():
+        user.append("【用户规则】\n%s" % options.policy.strip())
     if options.strip_appearance:
         user.append("已启用角色 LoRA：不要生成角色外貌、发色、瞳色、发型、脸、身体特征或角色名；"
                     "这些由 LoRA 和激活标签负责。")

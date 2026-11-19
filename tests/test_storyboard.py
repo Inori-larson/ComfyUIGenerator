@@ -40,21 +40,36 @@ def test_messages_request_shot_count_and_json():
     assert "目标镜数：4" in msgs[1]["content"]
 
 
-def test_messages_include_clothing_rules():
+def test_system_has_no_hardcoded_story_policy():
     system = build_storyboard_messages("剧情内容", 2)[0]["content"]
-    assert "服装只能使用用户给出的初始列表" in system
-    assert "颜色" in system
-    assert "逐步完全脱掉" in system
-    assert "体液" in system
-    assert "大场景" in system
-    assert "严格按用户剧情顺序推进" in system
-    assert "1girl solo" in system
-    assert "1girl 1boy" in system
-    assert "nude male" in system
-    assert "faceless male" in system
-    assert "男主只能完全裸体、无脸" in system
-    assert "胸罩保持半脱" in system
-    assert "nipples / bare breasts / topless" in system
+    assert "输出规则" in system
+    assert "用户规则" in system
+    assert "nude male" not in system
+    assert "bare feet" not in system
+    assert "胸罩" not in system
+    assert "重口味" not in system
+
+
+def test_policy_is_passed_verbatim():
+    policy = "男主只能裸体无脸；鞋必须保留"
+    msgs = build_storyboard_messages("剧情内容", 2, policy=policy)
+    assert policy in msgs[1]["content"]
+    assert "【用户规则】" in msgs[1]["content"]
+
+
+def test_messages_request_ai_declared_beats():
+    system = build_storyboard_messages("x", 2)[0]["content"]
+    assert "beats" in system
+    assert "beat_id" in system
+    assert "B1" in system
+
+
+def test_normalize_keeps_beat_id_and_description():
+    out = normalize_shots(raw(
+        {"id": "01", "prompt": "1girl, solo, smile",
+         "beat_id": "B1", "description": "中文描述"}), 1)
+    assert out[0]["beat_id"] == "B1"
+    assert out[0]["description"] == "中文描述"
 
 
 def test_messages_strip_appearance():
@@ -198,7 +213,7 @@ def test_scene_is_emphasized_in_user_message():
     premise = "角色：girl\n大场景：电影院\n剧情：自慰"
     msgs = build_storyboard_messages(premise, 3)
     assert "本片大场景固定为『电影院』" in msgs[1]["content"]
-    assert "大场景必须严格使用" in msgs[0]["content"]
+    assert "大场景" in msgs[1]["content"]
 
 
 def test_clothing_colour_is_emphasized_in_user_message():
@@ -208,4 +223,4 @@ def test_clothing_colour_is_emphasized_in_user_message():
     assert "初始服装（逐字使用，不得改色）" in user
     assert "white skirt" in user
     assert "禁止写成 hiked skirt" in user
-    assert "颜色 + 款式" in msgs[0]["content"]
+    assert "颜色+款式" in msgs[1]["content"]

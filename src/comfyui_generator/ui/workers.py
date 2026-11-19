@@ -32,6 +32,9 @@ from comfyui_generator.core.lora_info import lora_tag_info
 from comfyui_generator.core.rewrite import rewrite_shot_prompt
 from comfyui_generator.core.single import SingleOptions, generate_single_prompt
 from comfyui_generator.core.tag_cache import load_tag_cache, update_tag_cache
+from comfyui_generator.core.tag_validation import (
+    annotate_shots, database_from_config, options_from_config,
+)
 from comfyui_generator.core.translate import translate_prompts, translate_tag_list, translate_to_tags
 from comfyui_generator.core.storyboard import (
     StoryboardOptions, generate_storyboard, parse_character_profiles)
@@ -127,8 +130,10 @@ class PromptWorker(QThread):
         self.story_options = story_options
         if self.single_options is not None:
             self.single_options.log = self.log.emit
+            self.single_options.policy = self.cfg.story_policy
         if self.story_options is not None:
             self.story_options.log = self.log.emit
+            self.story_options.policy = self.cfg.story_policy
         self.initial_shots = initial_shots
         self.model = model
         self.current_prompt = current_prompt
@@ -230,7 +235,8 @@ class PromptWorker(QThread):
                 client, model, self.current_prompt, self.instruction,
                 character_tags=self.character_tags,
                 style_positive=self.style_positive,
-                strip_appearance=self.strip_appearance)
+                strip_appearance=self.strip_appearance,
+                policy=self.cfg.story_policy)
             if self._canceled():
                 raise InterruptedError
             if local_model:
@@ -245,6 +251,11 @@ class PromptWorker(QThread):
                 "instruction": self.instruction})
             self.rewritten.emit({"prompt": prompt, "prompt_zh": prompt_zh})
         else:
+            self._attach_fewshot()
+            self._generated_beats = None
+            if self.story_options is not None:
+                self.story_options.on_contract = (
+                    lambda beats: setattr(self, "_generated_beats", beats))
             shots = generate_storyboard(
                 client, self.text, self.story_options,
                 initial_shots=self.initial_shots,
@@ -252,9 +263,43 @@ class PromptWorker(QThread):
             self._finalize_story_shots(
                 shots, local_client, local_model, "story.result")
 
+    def _attach_fewshot(self) -> None:
+        rag = getattr(self.cfg, "rag", None)
+        if rag is None or not bool(getattr(rag, "enabled", False)):
+            return
+        if self.story_options is None or self.story_options.fewshot:
+            return
+        try:
+            from comfyui_generator.core.rag import (
+                render_fewshot_block, retrieve_fewshot)
+
+            queries = str(getattr(rag, "queries", "") or "").strip()
+            if not queries:
+                self.log.emit("图站范例跳过：请先在设置里填写检索词。")
+                return
+            index_dir = rag.index_dir or str(self.cfg.cache_dir / "rag")
+            examples = retrieve_fewshot(
+                queries, index_dir=index_dir,
+                source=getattr(rag, "source", "yande") or "yande",
+                proxy=getattr(rag, "proxy", "") or "",
+                login=rag.login, api_key=rag.api_key,
+                max_examples=int(rag.max_examples or 4),
+                limit=int(rag.limit_per_query or 20),
+                min_score=int(rag.min_score if rag.min_score is not None else 5),
+                cache_hours=float(rag.cache_hours or 24.0),
+                log=self.log.emit)
+            block = render_fewshot_block(examples)
+            if block:
+                self.story_options.fewshot = block
+                self.log.emit("已加入 %d 条 Danbooru 真实范例（仅供学习标签搭配）"
+                              % len(examples))
+        except Exception as exc:
+            self.log.emit("Danbooru 范例跳过（不影响生成）：%s" % exc)
+
     def _finalize_story_shots(self, shots, local_client, local_model, event):
         if self._canceled():
             raise InterruptedError
+        self._auto_repair_story(shots)
         all_tags: list[str] = []
         for shot in shots:
             all_tags += self._split_tags(shot.get("prompt", ""))
@@ -266,8 +311,102 @@ class PromptWorker(QThread):
             zh_tags = [mapping.get(tag, tag)
                        for tag in self._split_tags(shot.get("prompt", ""))]
             shot["prompt_zh"] = "，".join(zh_tags)
+        self._annotate_contract_findings(shots)
+        self._summarise_tag_findings(shots)
         trace_event(event, shots)
         self.story_ready.emit(shots)
+
+    def _auto_repair_story(self, shots: list[dict[str, Any]]) -> None:
+        tagdb_cfg = getattr(self.cfg, "tagdb", None)
+        if tagdb_cfg is not None and not bool(
+                getattr(tagdb_cfg, "enabled", True)):
+            return
+        if not bool(getattr(tagdb_cfg, "auto_repair_story", True)):
+            self._annotate_tag_findings(shots)
+            return
+        try:
+            from comfyui_generator.core.prompt_repair import auto_repair_shots
+
+            db = database_from_config(tagdb_cfg)
+            if self.use_external:
+                client = ExternalLLMClient(self.cfg.external_llm)
+                model = resolve_external_model(self.cfg.external_llm, self.model)
+            else:
+                client = OllamaClient(self.cfg.ollama.base_url)
+                model = self.model or self.cfg.ollama.default_model
+            report = auto_repair_shots(
+                shots, db, client, model,
+                options=options_from_config(tagdb_cfg),
+                max_rounds=2,
+                character_tags=self.character_tags or "",
+                strip_appearance=bool(getattr(self.story_options,
+                                              "strip_appearance", False)),
+                log=self.log.emit)
+            if report.repaired:
+                self.log.emit("自动修复：%s 镜 P1 已修正（%s）。" % (
+                    len(report.repaired), ",".join(report.repaired)))
+                trace_event("tagdb.repaired", {
+                    "repaired": report.repaired,
+                    "unresolved": report.unresolved})
+            if report.unresolved:
+                self.log.emit("仍有 %d 镜 P1 未通过校验，已标记待处理：%s" % (
+                    len(report.unresolved), ",".join(report.unresolved)))
+        except Exception as exc:
+            self.log.emit("自动修复跳过（不影响就绪）：%s" % exc)
+            self._annotate_tag_findings(shots)
+
+    def _annotate_contract_findings(self, shots: list[dict[str, Any]]) -> None:
+        beats = getattr(self, "_generated_beats", None)
+        if not beats:
+            self.log.emit("剧情契约：模型未声明 beat 结构，跳过校验。")
+            return
+        try:
+            from comfyui_generator.core.story_contract import (
+                StoryContract, validate_contract,
+            )
+
+            contract = StoryContract(beats=[b for b in beats
+                                             if isinstance(b, dict)])
+            if not contract.has_beats:
+                self.log.emit("剧情契约：模型声明的 beat 不足 2 个，跳过校验。")
+                return
+            findings = validate_contract(shots, contract)
+            if not findings:
+                self.log.emit("剧情契约校验通过：%d 个 beat 全覆盖且保序。"
+                              % len(contract.beats))
+                return
+            for finding in findings:
+                self.log.emit("剧情契约 · [%s] %s" % (
+                    finding.get("severity"), finding.get("message")))
+            trace_event("contract.check", {"findings": findings})
+            for shot in shots:
+                existing = shot.setdefault("findings", [])
+                existing.extend(findings)
+        except Exception as exc:
+            self.log.emit("剧情契约校验跳过：%s" % str(exc)[:160])
+
+    def _summarise_tag_findings(self, shots: list[dict[str, Any]]) -> None:
+        blocking = [s for s in shots if s.get("ready") is False]
+        flagged = [s for s in shots if s.get("findings")]
+        if blocking:
+            self.log.emit("标签校验：%d 镜存在 P1（已标记待处理），%d 镜有提示。"
+                          % (len(blocking), len(flagged)))
+        elif flagged:
+            self.log.emit("标签校验：%d 镜有 P2/P3 提示（不阻断）。" % len(flagged))
+        else:
+            self.log.emit("分镜标签校验通过：%d 镜全部就绪。" % len(shots))
+
+    def _annotate_tag_findings(self, shots: list[dict[str, Any]]) -> None:
+        tagdb_cfg = getattr(self.cfg, "tagdb", None)
+        if tagdb_cfg is not None and not bool(
+                getattr(tagdb_cfg, "enabled", True)):
+            self.log.emit("分镜标签校验已在设置中关闭。")
+            return
+        try:
+            db = database_from_config(tagdb_cfg)
+            annotate_shots(shots, db, options_from_config(tagdb_cfg))
+        except Exception as exc:
+            self.log.emit("标签校验跳过（不影响就绪）：%s" % exc)
 
     @staticmethod
     def _split_tags(text: str) -> list[str]:
@@ -365,12 +504,15 @@ class RenderWorker(QThread):
     finished_ok = Signal(list)
     failed = Signal(str)
 
-    def __init__(self, cfg: AppConfig, project: dict[str, Any], tasks: list[Task], hires: bool):
+    def __init__(self, cfg: AppConfig, project: dict[str, Any], tasks: list[Task], hires: bool,
+                 verify_model: str = "", verify_external: bool = False):
         super().__init__()
         self.cfg = cfg
         self.project = copy.deepcopy(project)
         self.tasks = tasks
         self.hires = hires
+        self.verify_model = verify_model
+        self.verify_external = verify_external
         self.runner: TaskRunner | None = None
         self._last_preview: dict[str, float] = {}
 
@@ -390,12 +532,14 @@ class RenderWorker(QThread):
         try:
             client = ComfyClient(self.cfg.comfy.base_url)
             self._prepare_refs(client)
+            verifier = self._build_verifier()
             runner = TaskRunner(
                 client, self.project, self.tasks, self.cfg.comfy.ws_url,
                 hires=self.hires,
                 on_update=lambda task: self.task_updated.emit(task.summary()),
                 on_preview=self._on_preview,
                 on_log=self.log.emit,
+                verifier=verifier,
             )
             self.runner = runner
             runner.run()
@@ -419,6 +563,35 @@ class RenderWorker(QThread):
     def cancel(self) -> None:
         if self.runner is not None:
             self.runner.cancel()
+
+    def _build_verifier(self):
+        t = getattr(self.cfg, "tagger", None)
+        if not (t and t.enabled and t.auto_rewrite):
+            return None
+        try:
+            from comfyui_generator.core.render_verify import RenderVerifier
+
+            if self.verify_external:
+                llm_client = ExternalLLMClient(self.cfg.external_llm)
+                model = resolve_external_model(self.cfg.external_llm,
+                                               self.verify_model)
+            else:
+                llm_client = OllamaClient(self.cfg.ollama.base_url)
+                model = self.verify_model or self.cfg.ollama.default_model
+            self.project.setdefault("comfy", {})
+            self.project["comfy"]["output_dir"] = self.cfg.comfy.output_dir
+            return RenderVerifier(
+                python=self.cfg.comfy.python,
+                root=self.cfg.root,
+                base_dir=self.cfg.comfy.base_dir,
+                tagger_config=self.cfg.tagger,
+                tagdb_config=self.cfg.tagdb,
+                llm_client=llm_client,
+                llm_model=model,
+                log=self.log.emit)
+        except Exception as exc:
+            self.log.emit("渲染后验收初始化失败，本次跳过：%s" % exc)
+            return None
 
     def _on_preview(self, task: Task, frame: PreviewFrame) -> None:
         now = time.time()

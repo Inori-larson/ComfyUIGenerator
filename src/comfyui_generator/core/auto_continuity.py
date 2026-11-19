@@ -39,8 +39,7 @@ SYSTEM = (
     "5. ledger.state 写该镜结束时的累积状态：当前服装/裸露、破洞、伤势、"
     "体液、汗水、情绪、NSFW 进度。只能使用输入里已经出现或明确暗示的标签，"
     "禁止凭空增加内衣、伤口、体液或角色。\n"
-    "6. 状态不可逆：已经脱掉的衣服、破洞、伤势、体液不能在后一镜恢复或消失；"
-    "后续镜头只能增加或保持。\n"
+    "6. 后续镜头只能使用输入里已经出现或明确暗示的标签，保持累积状态一致；若用户规则要求某类状态不可逆，按用户规则理解。\n"
     "7. negative 写最需要防止的跨镜变化，例如 different hairstyle, "
     "different location, extra characters，不要重复普通画质负面词。\n"
     "8. 没有把握时保持简短，不要编造。\n"
@@ -64,10 +63,12 @@ def _shot_payload(shot: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_continuity_messages(premise: str, shots: list[dict[str, Any]],
-                              character_tags: str = "") -> list[dict[str, str]]:
+                              character_tags: str = "",
+                              policy: str = "") -> list[dict[str, str]]:
     payload = {
         "premise": str(premise or ""),
         "character_tags": str(character_tags or ""),
+        "user_rules": str(policy or ""),
         "shots": [_shot_payload(shot) for shot in shots],
     }
     return [
@@ -111,14 +112,15 @@ def _clean(data: Any, shots: list[dict[str, Any]]) -> dict[str, Any]:
 
 def extract_continuity(client: Any, model: str, premise: str,
                        shots: list[dict[str, Any]],
-                       character_tags: str = "",
-                       log: Callable[[str], None] | None = None,
-                       timeout: float = 300.0) -> dict[str, Any]:
+                        character_tags: str = "",
+                        policy: str = "",
+                        log: Callable[[str], None] | None = None,
+                        timeout: float = 300.0) -> dict[str, Any]:
     if log:
         log("正在提取角色/场景锚点与每镜连续性台账...")
     raw = client.chat_json(
         model,
-        build_continuity_messages(premise, shots, character_tags),
+        build_continuity_messages(premise, shots, character_tags, policy),
         schema=SCHEMA,
         temperature=0.25,
         num_predict=6144,

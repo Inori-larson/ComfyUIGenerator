@@ -14,7 +14,7 @@ from typing import Any, Callable
 from comfyui_generator.core.comfy import ComfyClient, ComfyError, ComfyEventStream
 from comfyui_generator.core.pose import (
     builtin_pose_json, builtin_pose_reference, generate_pose_json_skeleton,
-    generate_pose_skeleton, pose_preset_for_shot, pose_should_apply,
+    generate_pose_skeleton, resolve_pose_preset,
 )
 from comfyui_generator.core.preview import PreviewFrame
 from comfyui_generator.core.trace import trace_event
@@ -160,6 +160,7 @@ class TaskRunner:
                  on_update: Callable[[Task], None] | None = None,
                  on_preview: Callable[[Task, PreviewFrame], None] | None = None,
                  on_log: Callable[[str], None] | None = None,
+                 verifier: Any | None = None,
                  poll_interval: float = 0.5,
                  task_timeout: float = 1800.0):
         self.client = client
@@ -170,6 +171,7 @@ class TaskRunner:
         self.on_update = on_update
         self.on_preview = on_preview
         self.on_log = on_log
+        self.verifier = verifier
         self.poll_interval = poll_interval
         self.task_timeout = task_timeout
         self._cancel = threading.Event()
@@ -347,7 +349,11 @@ class TaskRunner:
     def _attach_pose(self, task: Task, shot: dict[str, Any],
                      people: tuple[str, ...]) -> None:
         setting = (self.cfg.get("settings") or {}).get("pose") or {}
-        if not setting.get("enabled") or not pose_should_apply(shot):
+        if not setting.get("enabled"):
+            return
+        preset = resolve_pose_preset(
+            shot, str(setting.get("preset") or ""))
+        if not preset:
             return
         controlnet = self._pose_controlnet_name()
         if not controlnet:
@@ -355,7 +361,6 @@ class TaskRunner:
                 self._pose_missing_logged = True
                 self.log("OpenPose enabled but no ControlNet model was found; pose skipped")
             return
-        preset = pose_preset_for_shot(shot, str(setting.get("preset") or "auto"))
         settings = self.cfg.get("settings") or {}
         width = int(settings.get("width", 1024))
         height = int(settings.get("height", 1344))
@@ -551,25 +556,66 @@ class TaskRunner:
         prefix = "%s/%s" % ((self.cfg.get("prefix") or "anime_story").rstrip("/"), task.prefix)
         if task.kind != "expand" and is_double_shot(shot):
             self._attach_pose(task, shot, ("girl", "boy"))
-        positive, negative = compose_prompts(self.cfg, shot)
-        trace_event("render.prompt", {
-            "label": task.label,
-            "shot_id": task.shot_id,
-            "seed": task.seed,
-            "positive": positive,
-            "negative": negative,
-            "shot": shot,
-        })
-        self.log("Task %s prompt ready (%d/%d chars)" % (
-            task.label, len(positive), len(negative)))
-        image = self._execute_workflow(
-            task, shot, positive, negative, prefix, stage="base")
-        if (not image and not self._cancel.is_set()
-                and task.error and "Timed out" not in task.error):
-            self.log("Task %s retrying once after workflow error" % task.label)
-            task.error = ""
+        render_prompt = str(shot.get("prompt") or "")
+        max_rounds = 0
+        if self.verifier is not None and task.kind != "expand":
+            max_rounds = int(getattr(self.verifier, "max_rerender", 0) or 0)
+        image = None
+        findings: list[dict[str, Any]] = []
+        for round_index in range(max_rounds + 1):
+            if self._cancel.is_set():
+                return
+            shot["prompt"] = render_prompt
+            positive, negative = compose_prompts(self.cfg, shot)
+            if round_index == 0:
+                trace_event("render.prompt", {
+                    "label": task.label,
+                    "shot_id": task.shot_id,
+                    "seed": task.seed,
+                    "positive": positive,
+                    "negative": negative,
+                    "shot": shot,
+                })
+                self.log("Task %s prompt ready (%d/%d chars)" % (
+                    task.label, len(positive), len(negative)))
+            else:
+                trace_event("verify.rerender", {
+                    "label": task.label, "shot_id": task.shot_id,
+                    "round": round_index, "positive": positive})
+                self.log("Task %s re-rendering after verify rewrite (%d)" % (
+                    task.label, round_index))
             image = self._execute_workflow(
                 task, shot, positive, negative, prefix, stage="base")
+            if (not image and not self._cancel.is_set()
+                    and task.error and "Timed out" not in task.error):
+                self.log("Task %s retrying once after workflow error" % task.label)
+                task.error = ""
+                image = self._execute_workflow(
+                    task, shot, positive, negative, prefix, stage="base")
+            if not image or self._cancel.is_set():
+                break
+            if self.verifier is None or task.kind == "expand":
+                break
+            image_path = self._verify_image_path(image)
+            if not image_path:
+                break
+            decision = self.verifier.evaluate(str(image_path), render_prompt)
+            findings = decision.findings
+            if decision.accepted:
+                trace_event("render.verify", {
+                    "label": task.label, "shot_id": task.shot_id,
+                    "findings": findings, "device": decision.device})
+                break
+            trace_event("verify.finding", {
+                "label": task.label, "shot_id": task.shot_id,
+                "round": round_index, "findings": findings})
+            self.log("Task %s verify round %d found %d blocking finding(s)" % (
+                task.label, round_index + 1,
+                len([f for f in findings if f.get("severity") == "P1"])))
+            if not decision.new_prompt or round_index >= max_rounds:
+                break
+            render_prompt = decision.new_prompt
+            image = None
         if self._cancel.is_set():
             return
         if image:
@@ -578,6 +624,7 @@ class TaskRunner:
             trace_event("render.done", {
                 "label": task.label, "shot_id": task.shot_id,
                 "seed": task.seed, "image": image,
+                "verify_findings": findings,
             })
             self.log("Task %s done: %s" % (task.label, image))
             return
@@ -588,6 +635,27 @@ class TaskRunner:
             "seed": task.seed, "error": error,
         })
         self.log("Task %s failed: %s" % (task.label, error))
+
+    def _verify_image_path(self, image: str) -> Path | None:
+        output_dir = str((self.cfg.get("comfy") or {}).get("output_dir") or "")
+        candidates = []
+        if output_dir:
+            candidates.append(Path(output_dir) / image)
+        candidates.append(Path(image))
+        for path in candidates:
+            if path.is_file():
+                return path
+        try:
+            data = self.client.view(Path(image).name, Path(image).parent.as_posix())
+        except Exception:
+            return None
+        if not data:
+            return None
+        import tempfile
+        handle = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+        handle.write(data)
+        handle.close()
+        return Path(handle.name)
 
 
 def _saved_images(entry: dict[str, Any]) -> list[str]:

@@ -69,7 +69,11 @@ from comfyui_generator.core.storyboard import (
     premise_from_json, shots_from_json, slugify,
 )
 from comfyui_generator.core.tag_cache import load_tag_cache, update_tag_cache
+from comfyui_generator.core.tagdb import load_tag_database
+from comfyui_generator.core.tagger import tagger_ready
 from comfyui_generator.core.tags import append_tags, estimate_tokens
+from comfyui_generator.core.trace import trace_event, trace_session
+from comfyui_generator.core.verification import VerifyThresholds, verify_render
 from comfyui_generator.core.vision import format_similarity, vision_ready
 from comfyui_generator.core.translate import translate_to_tags
 from comfyui_generator.core.workflow import compose_prompts
@@ -80,6 +84,7 @@ from comfyui_generator.ui.dialogs import (
     CompareDialog, ProjectDialog, ShotDetailsDialog, TagReferenceDialog, TrashDialog,
 )
 from comfyui_generator.ui.settings_dialog import SettingsDialog
+from comfyui_generator.ui.tagger_worker import TaggerWorker
 from comfyui_generator.ui.vision_worker import VisionWorker
 from comfyui_generator.ui.wheel_guard import install_wheel_guard
 from comfyui_generator.ui.widgets import (
@@ -346,6 +351,7 @@ class MainWindow(QMainWindow):
         self.render_worker: RenderWorker | None = None
         self.reference_sheet_worker: RenderWorker | None = None
         self.vision_worker: VisionWorker | None = None
+        self.tagger_worker: TaggerWorker | None = None
         self.continuity_worker: ContinuityWorker | None = None
         self.expansion_worker: ExpansionWorker | None = None
         self._pending_render: tuple[dict[str, Any], list[dict[str, Any]], int] | None = None
@@ -1497,6 +1503,12 @@ class MainWindow(QMainWindow):
         self.btn_similarity = QPushButton("角色/画面相似度（CLIP）")
         self.btn_similarity.clicked.connect(self.run_similarity_check)
         layout.addWidget(self.btn_similarity)
+        self.tagger_auto = QCheckBox("渲染后自动用 WD tagger 复核 cast/服装层级")
+        self.tagger_auto.setChecked(bool(self.cfg.tagger.auto_verify_after_render))
+        layout.addWidget(self.tagger_auto)
+        self.btn_tagger_verify = QPushButton("WD tagger 整批复核")
+        self.btn_tagger_verify.clicked.connect(self.run_tagger_verification)
+        layout.addWidget(self.btn_tagger_verify)
         hint = _label(
             "连续性标签会追加到每镜，不会覆盖剧情提示词；"
             "角色参考表在“角色”页设置。"
@@ -4043,6 +4055,141 @@ class MainWindow(QMainWindow):
         self.vision_worker = None
         self.btn_similarity.setEnabled(True)
 
+    def _tagger_paths(
+            self, results: list[dict[str, Any]] | None = None
+    ) -> list[tuple[str, Path]]:
+        if results is not None:
+            items = [(item.get("label") or "", item.get("image"))
+                     for item in results
+                     if item.get("state") == "done" and item.get("image")]
+        else:
+            items = []
+            outputs = list((self.project or {}).get("outputs") or [])
+            for index, image in enumerate(outputs):
+                label = ""
+                shots = (self.project or {}).get("shots") or []
+                if index < len(shots):
+                    shot = shots[index]
+                    label = "%s_%s" % (shot.get("id", ""), shot.get("name", ""))
+                items.append((label, image))
+        pairs: list[tuple[str, Path]] = []
+        seen: set[str] = set()
+        for label, image in items:
+            path = self._resolve_output_image(image)
+            if path and str(path) not in seen:
+                seen.add(str(path))
+                pairs.append((str(label), path))
+        return pairs
+
+    def run_tagger_verification(self, silent: bool = False,
+                                results: list[dict[str, Any]] | None = None) -> None:
+        if self.tagger_worker and self.tagger_worker.isRunning():
+            if silent:
+                self.append_log("WD tagger 仍在复核上一批，跳过本次自动复核。")
+            return
+        t = self.cfg.tagger
+        pairs = self._tagger_paths(results)
+        if not pairs:
+            if not silent:
+                QMessageBox.information(self, "提示", "当前项目还没有可用的成品图。")
+            return
+        ready, reason = tagger_ready(
+            self.cfg.root, self.cfg.comfy.python, self.cfg.comfy.base_dir,
+            t.model_path or None)
+        if not ready:
+            if not silent:
+                self.append_log("WD tagger 复核不可用：%s" % reason)
+                QMessageBox.warning(self, "无法复核", reason)
+            else:
+                self.append_log("WD tagger 复核跳过：%s" % reason)
+            return
+        self._tagger_pairs = pairs
+        self._tagger_silent = silent
+        self.append_log("WD tagger 开始复核 %d 张（%s）..." % (
+            len(pairs), t.device or "gpu"))
+        worker = TaggerWorker(self.cfg, [path for _, path in pairs],
+                              device=t.device,
+                              meta={"silent": silent, "count": len(pairs)})
+        worker.log.connect(self.append_log)
+        worker.done.connect(
+            lambda tagger_results: self._on_tagger_done(tagger_results, silent))
+        worker.failed.connect(
+            lambda message: self._on_tagger_failed(message, silent))
+        worker.finished.connect(self._on_tagger_finished)
+        self.tagger_worker = worker
+        self.btn_tagger_verify.setEnabled(False)
+        self.statusBar().showMessage("WD tagger 复核中...")
+        worker.start()
+
+    def _on_tagger_done(self, tagger_results: list[dict[str, Any]],
+                        silent: bool) -> None:
+        pairs = getattr(self, "_tagger_pairs", [])
+        shots = {str(s.get("id")): s
+                 for s in ((self.project or {}).get("shots") or [])}
+        db = load_tag_database(self.cfg.tagdb.csv_path or None,
+                               self.cfg.tagdb.alias_path or None)
+        thresholds = VerifyThresholds(
+            cast=self.cfg.tagger.cast_threshold,
+            layer=self.cfg.tagger.layer_threshold,
+            general=self.cfg.tagger.general_threshold)
+        blocked = 0
+        lines = []
+        for index, item in enumerate(tagger_results):
+            if index >= len(pairs) or item.get("error"):
+                continue
+            label, _path = pairs[index]
+            shot_id = label.split("_", 1)[0]
+            shot = shots.get(shot_id)
+            if shot is None:
+                continue
+            findings = verify_render(
+                str(shot.get("prompt") or ""), item, db, thresholds)
+            shot["render_findings"] = findings
+            shot["render_tags"] = sorted(
+                (item.get("general") or {}).keys(),
+                key=lambda name: -float((item.get("general") or {}).get(name, 0.0)))[:40]
+            if any(f.get("severity") == "P1" for f in findings):
+                blocked += 1
+                shot["ready"] = False
+            for finding in findings:
+                lines.append("%s [%s] %s（期望:%s｜实际:%s）" % (
+                    shot_id, finding.get("severity"),
+                    finding.get("message"), finding.get("expected"),
+                    finding.get("actual")))
+        try:
+            save_project(self.project, self.cfg.projects_dir)
+        except Exception as exc:
+            self.append_log("复核结果保存失败：%s" % exc)
+        with trace_session(
+                self.cfg.single_projects_dir.parent / "log", "verify",
+                {"silent": silent, "images": len(tagger_results)}):
+            trace_event("render.verify", {
+                "flagged": len(lines), "blocked": blocked,
+                "findings": lines[:200]})
+        if lines:
+            self.append_log("WD tagger 复核发现 %d 项提示，其中 P1 %d 项：\n%s" % (
+                len(lines), blocked, "\n".join(lines[:60])))
+        else:
+            self.append_log("WD tagger 复核通过，未发现 cast/服装层级冲突。")
+        self.statusBar().showMessage(
+            "WD tagger 复核完成：%d 项提示，P1 %d 项" % (len(lines), blocked))
+        if not silent and lines:
+            QMessageBox.warning(self, "WD tagger 复核",
+                                "\n".join(lines[:20]))
+
+    def _on_tagger_failed(self, message: str, silent: bool) -> None:
+        self.append_log("WD tagger 复核失败：%s" % message)
+        with trace_session(
+                self.cfg.single_projects_dir.parent / "log", "verify",
+                {"silent": silent}):
+            trace_event("verify.ui_failed", {"error": message})
+        if not silent:
+            QMessageBox.warning(self, "WD tagger 复核失败", message)
+
+    def _on_tagger_finished(self) -> None:
+        self.tagger_worker = None
+        self.btn_tagger_verify.setEnabled(True)
+
     def _row_data(self, row: int) -> dict[str, Any]:
         lock_item = self.shot_table.item(row, 0)
         prompt_item = self.shot_table.item(row, 3)
@@ -4844,6 +4991,15 @@ class MainWindow(QMainWindow):
         finally:
             self._syncing_shots = False
 
+    def _verify_llm_model(self) -> str:
+        if getattr(self, "use_external_model", False):
+            return str(getattr(self, "_last_external_model", "")
+                       or self.cfg.external_llm.model)
+        return self._llm() or self.cfg.ollama.default_model
+
+    def _verify_llm_external(self) -> bool:
+        return bool(getattr(self, "use_external_model", False))
+
     def _start_render_tasks(self, project: dict[str, Any],
                             shots: list[dict[str, Any]],
                             expansions: dict[str, list[str]] | None) -> None:
@@ -4888,7 +5044,7 @@ class MainWindow(QMainWindow):
         self.current_task_id = tasks[0].id if tasks else None
 
         hires = bool(settings.get("hires", {}).get("enabled", True))
-        worker = RenderWorker(self.cfg, project, tasks, hires)
+        worker = RenderWorker(self.cfg, project, tasks, hires, verify_model=self._verify_llm_model(), verify_external=self._verify_llm_external())
         worker.task_updated.connect(self._on_task_update)
         worker.preview.connect(self._on_preview)
         worker.log.connect(self.append_log)
@@ -5667,7 +5823,7 @@ class MainWindow(QMainWindow):
             return
         hires = bool((self.project.get("settings") or {}).get(
             "hires", {}).get("enabled", True))
-        worker = RenderWorker(self.cfg, self.project, tasks, hires)
+        worker = RenderWorker(self.cfg, self.project, tasks, hires, verify_model=self._verify_llm_model(), verify_external=self._verify_llm_external())
         worker.log.connect(self.append_log)
         worker.finished_ok.connect(self._on_gallery_redraw_finished)
         worker.failed.connect(self._on_render_failed)
@@ -5707,7 +5863,7 @@ class MainWindow(QMainWindow):
             return
         hires = bool((self.project.get("settings") or {}).get(
             "hires", {}).get("enabled", True))
-        worker = RenderWorker(self.cfg, self.project, tasks, hires)
+        worker = RenderWorker(self.cfg, self.project, tasks, hires, verify_model=self._verify_llm_model(), verify_external=self._verify_llm_external())
         worker.task_updated.connect(self._on_task_update)
         worker.log.connect(self.append_log)
         worker.finished_ok.connect(self._on_gallery_redraw_finished)
@@ -5945,7 +6101,7 @@ class MainWindow(QMainWindow):
         self.queue_table.item(row, 0).setIcon(QIcon())
         self.progress.setValue(0)
         hires = bool((self.project.get("settings") or {}).get("hires", {}).get("enabled", True))
-        worker = RenderWorker(self.cfg, self.project, [task], hires)
+        worker = RenderWorker(self.cfg, self.project, [task], hires, verify_model=self._verify_llm_model(), verify_external=self._verify_llm_external())
         worker.task_updated.connect(self._on_task_update)
         worker.preview.connect(self._on_preview)
         worker.log.connect(self.append_log)
@@ -6052,6 +6208,8 @@ class MainWindow(QMainWindow):
             self._maybe_auto_contact_sheet(results)
             if self.similarity_auto.isChecked():
                 self.run_similarity_check(silent=True, results=results)
+            if self.tagger_auto.isChecked() or self.cfg.tagger.auto_verify_after_render:
+                self.run_tagger_verification(silent=True, results=results)
 
     def _on_render_failed(self, message: str) -> None:
         self.btn_cancel.setEnabled(False)
@@ -6167,7 +6325,7 @@ class MainWindow(QMainWindow):
             project, [shot], 1, "fixed", int(self.seed_spin.value()),
             expansions=0)
         hires = bool(settings.get("hires", {}).get("enabled", True))
-        worker = RenderWorker(self.cfg, project, tasks, hires)
+        worker = RenderWorker(self.cfg, project, tasks, hires, verify_model=self._verify_llm_model(), verify_external=self._verify_llm_external())
         worker.task_updated.connect(self._on_reference_sheet_task)
         worker.log.connect(self.append_log)
         worker.finished_ok.connect(self._on_reference_sheet_finished)

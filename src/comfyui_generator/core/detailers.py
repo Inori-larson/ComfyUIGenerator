@@ -17,15 +17,12 @@ LORA_PREFIXES = ("lora_", "lora.", "diffusion_model.", "emb_params")
 
 # key, detector filename keywords, label, focus prompt, denoise, guide size
 DETECTOR_PRESETS = [
-    ("face", ["face"], "脸部重绘", "detailed face, beautiful detailed eyes, sharp focus", 0.35, 1024),
-    ("eyes", ["eye", "iris"], "眼睛重绘",
-     "beautiful detailed eyes, sharp pupils, detailed iris, sparkling eyes", 0.25, 512),
-    ("mouth", ["mouth", "lip"], "嘴巴重绘",
-     "detailed lips, beautiful mouth, natural expression", 0.25, 512),
-    ("expression", ["expression"], "表情重绘",
-     "expressive face, emotional expression, detailed eyes", 0.45, 768),
-    ("hand", ["hand"], "手部重绘", "detailed hands, perfect hands, five fingers", 0.40, 768),
-    ("person", ["person", "body"], "人物重绘", "detailed body, perfect anatomy", 0.35, 1024),
+    ("face", ["face"], "脸部重绘", "", 0.35, 1024),
+    ("eyes", ["eye", "iris"], "眼睛重绘", "", 0.25, 512),
+    ("mouth", ["mouth", "lip"], "嘴巴重绘", "", 0.25, 512),
+    ("expression", ["expression"], "表情重绘", "", 0.45, 768),
+    ("hand", ["hand"], "手部重绘", "", 0.40, 768),
+    ("person", ["person", "body"], "人物重绘", "", 0.35, 1024),
 ]
 
 
@@ -44,7 +41,7 @@ def _preset_for(detector: str) -> dict[str, Any]:
     return {
         "kind": stem,
         "label": "重绘 · %s" % stem,
-        "prompt": "detailed %s" % stem.replace("_", " ").replace("-", " "),
+        "prompt": "",
         "denoise": 0.35,
         "guide_size": 1024,
     }

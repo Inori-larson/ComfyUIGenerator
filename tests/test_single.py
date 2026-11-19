@@ -52,8 +52,8 @@ def test_build_messages_keeps_initial_clothing_verbatim():
     assert "初始服装（必须逐字保留" in user
     assert "mary janes" in user
     assert "鞋履" in user
-    assert "禁止新增列表之外的衣物" in system
-    assert "服装有层级" in system
+    assert "禁止新增列表之外的衣物" not in system
+    assert "服装有层级" not in system
 
 
 def test_generate_single_prompt_passes_schema_and_keeps_model_output():

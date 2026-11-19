@@ -64,7 +64,7 @@ src/comfyui_generator/
 │  ├─ workers.py         # 连接、LLM、渲染线程
 │  ├─ settings_dialog.py
 │  └─ app.py
-└─ presets/              # 内置模板（仪玄 V1 / V2，默认 V2，官方推荐参数）
+└─ presets/              # 内置模板（通用空白模板为默认；角色模板仅示例）+ story_policy.default.txt
 ```
 
 UI（M1）只订阅 core 事件：任务更新、预览帧、完成、错误；不直接解析 WebSocket。

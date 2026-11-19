@@ -27,14 +27,14 @@ def test_choices_follow_scanned_models():
     assert "face_yolov8n" in by_detector["bbox/face_yolov8n.pt"]["label"]
     assert "眼睛重绘" in by_detector["bbox/eyes_v1.pt"]["label"]
     assert "人物重绘" in by_detector["segm/person_yolov8m-seg.pt"]["label"]
-    assert by_detector["bbox/face_yolov8n.pt"]["prompt"].startswith("detailed face")
+    assert by_detector["bbox/face_yolov8n.pt"]["prompt"] == ""
 
 
 def test_unknown_model_gets_generic_label():
     choices = build_detailer_choices(["bbox/custom_detector.pt"])
     assert len(choices) == 1
     assert choices[0]["label"].startswith("重绘")
-    assert "custom detector" in choices[0]["prompt"]
+    assert choices[0]["prompt"] == ""
 
 
 def test_duplicate_detectors_are_ignored():

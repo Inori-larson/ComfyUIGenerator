@@ -16,120 +16,8 @@ from comfyui_generator.core.mechanical import (
     split_tags,
     strip_cjk_segments,
 )
+from comfyui_generator.core.negative_guard import automatic_negative
 from comfyui_generator.core.style_profile import apply_style_profile
-_BODY_TRIGGER_GROUPS = (
-    (("juice", "cum", "ejaculat", "squirt", "liquid", "orgasm", "drip"), (
-        "pussy juice", "love liquid", "cum", "came", "orgasm", "ejaculation",
-        "squirt", "wet", "dripping", "after sex", "after came",
-        "female ejaculation", "fluid")),
-    (("pussy", "vagina", "vulva", "labia", "clit", "anus", "anal"), (
-        "pussy", "vagina", "vulva", "labia", "clit", "anus", "anal", "nude",
-        "naked", "bottomless", "spread legs", "masturbation", "fingering",
-        "sex", "revealing pussy", "pussy juice", "private parts",
-        "hand on pussy", "finger in pussy", "quick hand movements",
-        "hand movements", "orgasm")),
-    (("nipple", "breast", "areola", "boob"), (
-        "nipples", "breasts", "breast", "areola", "topless", "breasts out",
-        "breast out", "nude", "naked")),
-    (("penis", "cock", "testicle", "phallus"), (
-        "penis", "cock", "testicles", "phallus", "nude", "naked", "sex")),
-    (("ass", "butt"), ("ass", "anus", "anal", "nude", "naked", "bottomless")),
-)
-_ACTION_TRIGGER_GROUPS = (
-    (("missionary",), ("missionary", "lying on back", "on back", "legs up",
-                       "legs spread")),
-    (("doggy", "doggystyle", "from behind"), (
-        "doggystyle", "doggy style", "from behind", "all fours",
-        "on all fours", "sex from behind", "bent over")),
-    (("cowgirl", "girl on top", "woman on top"), (
-        "cowgirl", "girl on top", "woman on top", "straddling",
-        "straddle", "riding")),
-    (("paizuri", "titjob", "titfuck", "breast sex"), (
-        "paizuri", "titjob", "titfuck", "breast sex", "breasts around penis")),
-    (("fellatio", "blowjob", "oral"), (
-        "fellatio", "blowjob", "oral", "penis in mouth", "licking penis")),
-    (("cunnilingus", "oral"), (
-        "cunnilingus", "oral", "licking pussy", "mouth on pussy")),
-    (("handjob", "hand job"), (
-        "handjob", "hand job", "hand on penis", "stroking penis")),
-    (("masturbation", "fingering"), (
-        "masturbation", "fingering", "finger in pussy", "self pleasure")),
-    (("anal", "analsex"), (
-        "anal sex", "penis in anus", "anal penetration")),
-    (("standing", "standing sex"), (
-        "standing sex", "standing", "sex while standing")),
-    (("squatting", "squat"), (
-        "squatting", "squat", "crouching", "sex while squatting")),
-    (("spread legs", "legs spread"), (
-        "spread legs", "legs spread", "legs up", "m legs")),
-    (("all fours", "on all fours"), (
-        "all fours", "on all fours", "hands and knees", "bent over")),
-)
-_CLOTHING_TRIGGER_GROUPS = (
-    (("school uniform", "serafuku"), (
-        "school uniform", "serafuku", "sailor collar", "pleated skirt",
-        "school bag")),
-    (("maid",), ("maid", "maid outfit", "maid uniform", "maid headdress")),
-    (("nurse",), ("nurse", "nurse outfit", "nurse uniform", "nurse cap")),
-    (("qipao", "cheongsam"), ("qipao", "cheongsam", "china dress")),
-    (("kimono",), ("kimono", "japanese clothes", "obi")),
-    (("bunny",), ("bunny girl", "bunny suit", "playboy bunny",
-                  "rabbit ears")),
-    (("wedding dress", "bridal"), ("wedding dress", "bridal", "veil",
-                                   "wedding gown")),
-    (("swimsuit", "bikini"), ("swimsuit", "bikini", "one-piece swimsuit",
-                              "school swimsuit")),
-    (("latex", "leather"), ("latex", "leather", "bodysuit", "catsuit")),
-    (("armor",), ("armor", "armour", "breastplate", "gauntlets")),
-    (("uniform",), ("uniform", "military uniform", "police uniform")),
-)
-_ACTION_TERMS = (
-    "missionary", "cowgirl", "doggy", "doggystyle", "fellatio", "blowjob",
-    "cunnilingus", "handjob", "paizuri", "titjob", "anal", "penetration",
-    "mating", "press", "grab", "exposure", "uterus", "nipple", "nipples",
-    "breast", "breasts", "bouncing", "spread", "grip", "thigh", "thighs",
-    "leg", "legs", "pussy", "penis", "cum", "ejaculation", "orgasm",
-    "riding", "straddling", "squat", "standing", "bent", "fours", "knees",
-    "lick", "mouth", "foot", "feet", "ass",
-)
-_CLOTHING_TERMS = (
-    "skirt", "dress", "shirt", "bra", "panty", "panties", "lingerie",
-    "underwear", "thighhigh", "thighhighs", "stocking", "stockings",
-    "pantyhose", "legwear", "sock", "socks", "shoe", "shoes", "boot",
-    "boots", "heel", "heels", "sneaker", "sneakers", "footwear", "uniform",
-    "serafuku",
-    "leotard", "bodysuit", "catsuit", "swimsuit", "bikini", "apron", "kimono",
-    "qipao", "cheongsam", "hanfu", "yukata", "corset", "garter", "glove",
-    "gloves", "hat", "scarf", "necktie", "belt", "coat", "jacket", "blazer",
-    "sweater", "hoodie", "top", "shorts", "jeans", "pants", "trousers",
-    "vest", "robe", "armor", "choker", "collar", "veil", "mask", "outfit",
-    "clothes", "clothing", "latex", "leather", "sleeve", "sleeves", "strap",
-    "straps",
-)
-_SCOPE_TERMS = {
-    "action": _ACTION_TERMS,
-    "clothing": _CLOTHING_TERMS,
-}
-def _scope_terms_from_values(values: Any, hints: tuple[str, ...]) -> set[str]:
-    terms: set[str] = set()
-    for value in values or ():
-        key = _tag_key(str(value))
-        for hint in hints:
-            if hint in key:
-                terms.add(key)
-                terms.add(hint)
-    return terms
-def _scope_name_terms(lora: dict[str, Any], scope: str) -> set[str]:
-    hints = _SCOPE_TERMS.get(scope, ())
-    if not hints:
-        return set()
-    name = str(lora.get("name") or "").replace("\\", "/").split("/")[-1].lower()
-    return {hint for hint in hints if hint in name}
-def _scope_reference_terms(lora: dict[str, Any], scope: str) -> set[str]:
-    hints = _SCOPE_TERMS.get(scope, ())
-    if not hints:
-        return set()
-    return _scope_terms_from_values(lora.get("reference") or [], hints)
 def _tag_key(tag: str) -> str:
     text = tag.lower().replace("\\", "")
     text = re.sub(r"\((?!.*:\d)[^)]*\)", "", text)
@@ -287,66 +175,15 @@ def add_detailers(wf: dict[str, Any], cfg: dict[str, Any], image: list[Any], mod
         }}
         image = [fd_id, 0]
     return image
-_SCOPE_GROUPS = {
-    "body": _BODY_TRIGGER_GROUPS,
-    "action": _ACTION_TRIGGER_GROUPS,
-    "clothing": _CLOTHING_TRIGGER_GROUPS,
-}
-def _lora_scope(lora: dict[str, Any]) -> str:
-    scope = str(lora.get("scope") or "").strip().lower()
-    if scope in _SCOPE_GROUPS:
-        return scope
-    if lora.get("body") is True:
-        return "body"
-    if lora.get("action") is True:
-        return "action"
-    if lora.get("clothing") is True:
-        return "clothing"
-    name = "\\" + str(lora.get("name") or "").replace("/", "\\").lower() + "\\"
-    if "\\身体部位\\" in name or "\\body\\" in name:
-        return "body"
-    if ("\\动作\\" in name or "\\action\\" in name or "\\actions\\" in name
-            or "\\pose\\" in name or "\\poses\\" in name):
-        return "action"
-    if ("\\服装\\" in name or "\\clothes\\" in name or "\\clothing\\" in name
-            or "\\outfit\\" in name or "\\outfits\\" in name):
-        return "clothing"
-    return ""
 def _is_character_lora(lora: dict[str, Any]) -> bool:
     if lora.get("character") is True:
         return True
     name = "\\" + str(lora.get("name") or "").replace("/", "\\").lower() + "\\"
     return "\\角色\\" in name or "\\characters\\" in name or "\\character\\" in name
-def _is_body_lora(lora: dict[str, Any]) -> bool:
-    return _lora_scope(lora) == "body"
-def _is_action_lora(lora: dict[str, Any]) -> bool:
-    return _lora_scope(lora) == "action"
-def _is_clothing_lora(lora: dict[str, Any]) -> bool:
-    return _lora_scope(lora) == "clothing"
-def _lora_relevant(lora: dict[str, Any], prompt: str, scope: str) -> bool:
-    triggers = [str(tag).strip() for tag in (lora.get("triggers") or [])
-                if str(tag).strip()]
-    if any(_contains_word(prompt, trigger) for trigger in triggers):
-        return True
-    for trigger in triggers:
-        key = _tag_key(trigger)
-        for hints, terms in _SCOPE_GROUPS.get(scope, ()):
-            if any(hint in key for hint in hints):
-                if _contains_any(prompt, terms):
-                    return True
-                break
-    if scope in _SCOPE_TERMS:
-        terms = _scope_reference_terms(lora, scope) | _scope_name_terms(lora, scope)
-        if terms and _contains_any(prompt, tuple(sorted(terms))):
-            return True
-    return False
-def _scope_trigger_tags(cfg: dict[str, Any], shot: dict[str, Any],
-                        scope: str) -> str:
+def _lora_triggers(loras: list[dict[str, Any]]) -> str:
     tags: list[str] = []
     seen: set[str] = set()
-    for lora in lora_chain(cfg, shot):
-        if _lora_scope(lora) != scope:
-            continue
+    for lora in loras:
         for tag in lora.get("triggers") or []:
             text = str(tag).strip()
             key = _tag_key(text)
@@ -354,8 +191,8 @@ def _scope_trigger_tags(cfg: dict[str, Any], shot: dict[str, Any],
                 seen.add(key)
                 tags.append(text)
     return ", ".join(tags)
-def _body_trigger_tags(cfg: dict[str, Any], shot: dict[str, Any]) -> str:
-    return _scope_trigger_tags(cfg, shot, "body")
+
+
 def compose_prompts(cfg: dict[str, Any], shot: dict[str, Any]) -> tuple[str, str]:
     style = apply_style_profile(cfg.get("style") or {},
                                 cfg.get("style_profile") or {})
@@ -369,32 +206,28 @@ def compose_prompts(cfg: dict[str, Any], shot: dict[str, Any]) -> tuple[str, str
                          shot.get("negative", ""),
                          continuity_negative(cfg.get("continuity")))
     chain = lora_chain(cfg, shot)
-    if any(_is_action_lora(lora) for lora in chain):
-        action_source = _scope_trigger_tags(cfg, shot, "action")
-    else:
-        action_source = shot.get("action_tags", action.get("tags", ""))
-    if any(_is_clothing_lora(lora) for lora in chain):
-        clothing_source = _scope_trigger_tags(cfg, shot, "clothing")
-    else:
-        clothing_source = join_tags(
-            shot.get("clothing_tags"), shot.get("clothing"),
-            clothing.get("tags", ""))
+    action_source = shot.get("action_tags", action.get("tags", ""))
+    clothing_source = join_tags(
+        shot.get("clothing_tags"), shot.get("clothing"),
+        clothing.get("tags", ""))
     body_source = join_tags(
-        _body_trigger_tags(cfg, shot),
         shot.get("body_tags", body.get("tags", "")))
+    lora_source = _lora_triggers(chain)
     style_tags = shot.get("style_positive", style.get("positive", ""))
     style_lora = shot.get("style_lora_tags", style.get("lora_tags", ""))
     style_suffix = shot.get("style_suffix", style.get("suffix", ""))
     character_tags = shot.get("character_tags", character.get("tags", ""))
     continuity_tags = continuity_positive(cfg.get("continuity"), shot)
     positive = join_tags(
-        style_tags, style_lora, character_tags, action_source,
+        style_tags, style_lora, lora_source, character_tags, action_source,
         clothing_source, body_source, continuity_tags, render_prompt,
         style_suffix,
     )
     positive = strip_cjk_segments(positive)
     positive = ", ".join(dedupe_tags(split_tags(positive)))
+    negative = automatic_negative(positive, negative)
     return positive, negative
+
 def lora_chain(cfg: dict[str, Any], shot: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     loras = cfg.get("loras")
     if loras is None:
@@ -403,13 +236,9 @@ def lora_chain(cfg: dict[str, Any], shot: dict[str, Any] | None = None) -> list[
     result = [lora for lora in loras if lora.get("name")]
     if shot is None:
         return result
-    prompt = shot.get("prompt", "")
     filtered: list[dict[str, Any]] = []
     for lora in result:
         if shot.get("skip_character_loras") and _is_character_lora(lora):
-            continue
-        scope = _lora_scope(lora)
-        if scope and not _lora_relevant(lora, prompt, scope):
             continue
         filtered.append(lora)
     return filtered

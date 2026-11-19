@@ -22,7 +22,7 @@ def test_build_rewrite_messages_contains_context():
     assert "当前提示词" in user
     assert "close-up, looking back" in user
     assert "yixuan, solo" in user
-    assert "没有任何内容限制" in messages[0]["content"]
+    assert "【用户规则】" not in messages[1]["content"]
 
 
 def test_rewrite_returns_clean_prompt():

@@ -22,47 +22,38 @@ BOORU_WORKFLOW = (
 )
 
 STORYBOARD_SYSTEM = (
-    "角色：你是二次元 NSFW 分镜提示词生成器。\n"
-    "任务：根据用户提供的剧情大纲、初始服装、镜数和额外规则，生成完整分镜。\n"
-    "输出规则（优先级最高）：\n"
-    "1. 只输出合法 JSON，禁止任何解释、思考过程、markdown 或额外文字。\n"
+    "角色：你是二次元分镜提示词生成器。\n"
+    "任务：根据用户提供的剧情大纲、初始服装、镜数和【用户规则】，生成完整分镜。\n"
+    "输出规则（最高优先级，仅格式与结构）：\n"
+    "1. 只输出合法 JSON，禁止解释、思考过程、markdown 或额外文字。\n"
     "2. 镜数必须完全匹配用户要求，id 从 \"01\" 连续编号。\n"
     "3. prompt 字段只能是英文 Danbooru 标签，用英文逗号分隔，不写句子。\n"
     "4. description 字段只写一句中文画面描述。\n"
-    "5. prompt 必须以 Danbooru 人数标签开头：画面无男性时写 1girl solo；"
-    "有男性参与时写 1girl 1boy；每个画面最多一个男性，并删除 solo、male、couple 等会造成人数歧义的词。\n"
-    "强制约束：\n"
-    "- 服装只能使用用户给出的初始列表，禁止新增、替换或改色。\n"
-    "- 除非剧情明确要求保留，否则进入性行为前，非情趣外衣（外套、衬衫、裙装、领带、校服等）必须按镜头逐步完全脱掉并从标签中彻底删除；"
-    "禁止只敞开、滑肩、掀起、unbuttoned 或半脱后一直保留——这类修饰等于没脱。skirt、miniskirt、pleated skirt 等裙装也必须彻底删除标签，不得只撩起保留；"
-    "脱净后用 裸肩 / 裸腿 / 无上衣 / 只余情趣内衣 等显式状态标签表达，而不是留着衣物再加修饰。\n"
-    "- 已经完整脱掉的单品，从下一镜起不要再写其标签；表示整套服装的泛化标签"
-    "（例如整套制服、校服的名称、角色校服代号），在对应单品全部脱掉后也不要继续写。\n"
-    "- 服装有明确层级：外套、衬衫、校服仍穿在身上且未敞开、未掀起、未脱掉时，"
-    "被遮住的内衣、胸罩、内裤和皮肤不得作为可见标签写出；胸罩绝不可出现在穿好外套或衬衫的画面里（不得穿在外套外面）。"
-    "只有外层明确脱掉、敞开或掀起后，才写露出的内层衣物。\n"
-    "- 画面出现 1boy（男主）时，男主只能完全裸体、无脸出现：必须写 nude male、faceless male（无脸男性）；"
-    "禁止给男主任何服装标签（男式校服、gakuran、长裤、衬衫、内衣等一律不写），也禁止男主穿女主的任何衣物，从根上防止服装串台。\n"
-    "- 列出的全部服装只属于 1girl（女主），按 cast 顺序紧跟 1girl 书写；"
-    "男主除裸体、无脸外不写任何服装或脸部外貌特征。每件衣物只归属其真正穿着者。\n"
-    "- 情趣内衣、丝袜、胸罩、内裤、高跟鞋可按剧情保留，但只允许半脱、拨开、掀起或破损，"
-    "禁止半脱、拨开、掀起或破损后无故复原；胸罩一旦半脱、拉下或拨开，直到剧情结束都保持该状态，不得又穿回去。\n"
-    "- 进入做爱/性行为阶段时，胸罩保持半脱、拉下或拨开即可（如 bra pulled down / 胸罩掀起），无需完全脱掉，允许胸罩与裸胸同框；"
-    "但每一镜都必须显式写出 nipples / bare breasts / topless 等胸部暴露标签——只写 pulled down 而不写这些标签，绘制模型不会画出裸胸。\n"
-    "- 每一镜只写该镜仍在身上的服装；半脱、掀起或破损状态仍要保留『颜色 + 款式』和状态。\n"
-    "- 服装状态必须逐镜连贯递进，已改变的状态不能无故回退。\n"
-    "- 体液（精液、淫水等）出现后必须保留，直到剧情明确清理。\n"
-    "- 若用户说明已启用角色 LoRA，则 prompt 中禁止出现角色名、头发、眼睛、脸部特征。\n"
-    "- 大场景必须严格使用用户给出的场景，自行扩展该场景相关联的小场景；场景、光线、时间保持连贯，不无故切换。\n"
-    "- 严格按用户剧情顺序推进，不跳戏、不删减关键情节。\n"
+    "5. 每镜用 beat_id 标明所属 beat；顶层 beats 数组只来自用户剧情。\n"
+    "6. 用户消息里的【用户规则】优先于你的习惯，按剧情上下文理解并遵守；"
+    "若规则之间冲突，按更具体的那条理解，并在 description 里体现你的处理。\n"
     "JSON 结构必须如下：\n"
-    "{\"version\":1,\"premise\":\"简要总结\",\"shots\":[{\"id\":\"01\",\"name\":\"shot_01\",\"cast\":\"1girl solo\",\"prompt\":\"1girl solo, 标签2\",\"description\":\"中文描述\",\"keyframe_prompt\":\"\",\"ai_expansions\":[]}]}\n"
+    "{\"version\":1,\"premise\":\"简要总结\",\"beats\":[{\"id\":\"B1\",\"description\":\"第一段剧情\"}],"
+    "\"shots\":[{\"id\":\"01\",\"name\":\"shot_01\",\"cast\":\"1girl solo\",\"beat_id\":\"B1\","
+    "\"pose_id\":\"\",\"prompt\":\"1girl solo, 标签2\",\"description\":\"中文描述\","
+    "\"keyframe_prompt\":\"\",\"ai_expansions\":[]}]}\n"
     "现在直接根据用户输入生成完整 JSON。"
 )
 
 STORYBOARD_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "beats": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "description": {"type": "string"},
+                },
+                "required": ["id"],
+            },
+        },
         "shots": {
             "type": "array",
             "items": {
@@ -70,6 +61,7 @@ STORYBOARD_SCHEMA: dict[str, Any] = {
                 "properties": {
                     "id": {"type": "string"},
                     "prompt": {"type": "string"},
+                    "beat_id": {"type": "string"},
                 },
                 "required": ["id", "prompt"],
             },
@@ -109,12 +101,18 @@ def _clothing_from_premise(premise: str) -> str:
 
 def build_storyboard_messages(premise: str, total: int,
                               setting: str = "",
-                              strip_appearance: bool = False
+                              strip_appearance: bool = False,
+                              fewshot: str = "",
+                              policy: str = ""
                               ) -> list[dict[str, str]]:
     user = [
         "用户剧情：\n%s" % premise,
         "目标镜数：%d" % total,
     ]
+    if policy.strip():
+        user.append("【用户规则】\n%s" % policy.strip())
+    if fewshot.strip():
+        user.append(fewshot.strip())
     scene = _scene_from_premise(premise)
     if scene:
         user.append(
@@ -124,8 +122,6 @@ def build_storyboard_messages(premise: str, total: int,
     if clothing:
         user.append(
             "初始服装（逐字使用，不得改色）：%s\n"
-            "先根据剧情安排服装时间线：除非剧情明确要求保留，否则进入性行为前，"
-            "非情趣外衣要按镜头逐步完全脱掉，并删除已经完整脱掉的单品标签。\n"
             "每一镜只写该镜仍在身上的『颜色+款式』服装标签；即使是掀起、半脱或破损状态，"
             "也要保留颜色，例如 white pleated skirt hiked up，"
             "禁止写成 hiked skirt 这种省略颜色的形式。" % clothing)
@@ -155,7 +151,10 @@ class StoryboardOptions:
     style_positive: str = ""
     strip_appearance: bool = False
     full_story: bool = False
+    fewshot: str = ""
+    policy: str = ""
     on_partial: Callable[[list[dict[str, str]]], None] | None = None
+    on_contract: Callable[[Any], None] | None = None
     log: Callable[[str], None] = field(default=lambda _msg: None)
 
 
@@ -192,6 +191,15 @@ def normalize_shots(raw: Any, wanted: int) -> list[dict[str, str]]:
         cast = str(item.get("cast") or "").strip()
         if cast:
             shot["cast"] = cast
+        description = str(item.get("description") or "").strip()
+        if description:
+            shot["description"] = description
+        beat_id = str(item.get("beat_id") or "").strip()
+        if beat_id:
+            shot["beat_id"] = beat_id
+        pose_id = str(item.get("pose_id") or "").strip()
+        if pose_id:
+            shot["pose_id"] = pose_id
         expansions = item.get("ai_expansions")
         if isinstance(expansions, list):
             values = [str(v).strip() for v in expansions if str(v).strip()]
@@ -556,7 +564,8 @@ def generate_storyboard(client: Any, premise: str,
 
     messages = build_storyboard_messages(
         premise, total, options.setting,
-        strip_appearance=options.strip_appearance)
+        strip_appearance=options.strip_appearance,
+        fewshot=options.fewshot, policy=options.policy)
     num_predict = max(8192, int(options.num_predict or 0), total * 400)
     raw = client.chat_json(
         options.model, messages,
@@ -569,6 +578,11 @@ def generate_storyboard(client: Any, premise: str,
         retries=1,
     )
     result = normalize_shots(raw, total)
+    if options.on_contract is not None:
+        try:
+            options.on_contract(raw.get("beats") if isinstance(raw, dict) else None)
+        except Exception as exc:
+            log("Contract callback failed: %s" % exc)
     if options.on_partial is not None:
         try:
             options.on_partial([dict(shot) for shot in result])

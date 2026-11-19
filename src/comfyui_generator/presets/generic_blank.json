@@ -1,0 +1,41 @@
+{
+  "loader": "checkpoint",
+  "model": "WAI\\waiIllustriousSDXL_v170.safetensors",
+  "clip_skip": -2,
+  "server": "http://127.0.0.1:8000",
+  "variants": 1,
+  "wildcards": {
+    "enabled": false,
+    "dir": ""
+  },
+  "detailers": [],
+  "shots": [],
+  "prefix": "anime_story/task",
+  "loras": [],
+  "character": {
+    "name": "",
+    "tags": ""
+  },
+  "style": {
+    "positive": "masterpiece, best quality, amazing quality, score_7",
+    "negative": "bad quality, worst quality, worst detail, sketch, censor, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts, lowres"
+  },
+  "settings": {
+    "width": 1024,
+    "height": 1344,
+    "steps": 30,
+    "cfg": 5,
+    "sampler": "euler_ancestral",
+    "scheduler": "normal",
+    "seed_mode": "increment",
+    "base_seed": 0,
+    "hires": {
+      "enabled": true,
+      "scale": 1.5,
+      "steps": 20,
+      "denoise": 0.4,
+      "upscale_model": "RealESRGAN_x4plus_anime_6B.pth",
+      "model_scale": 4.0
+    }
+  }
+}

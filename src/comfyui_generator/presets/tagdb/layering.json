@@ -1,0 +1,76 @@
+{
+  "outer_top": [
+    "jacket", "blazer", "coat", "cardigan", "vest", "waistcoat",
+    "sweater", "pullover", "hoodie", "jersey", "tracksuit", "windbreaker",
+    "parka", "suit", "robe", "kimono", "haori", "dress shirt",
+    "collared shirt", "button-up shirt", "shirt", "blouse", "polo shirt",
+    "turtleneck", "t-shirt", "tshirt", "uniform top", "military uniform",
+    "school uniform", "uniform", "serafuku", "labcoat", "coat dress", "apron",
+    "leotard", "bodysuit", "swimsuit", "bikini top cover"
+  ],
+  "outer_bottom": [
+    "skirt", "miniskirt", "pants", "trousers", "jeans", "shorts",
+    "slacks", "hakama", "culottes", "sweatpants", "leggings",
+    "overalls", "bottoms"
+  ],
+  "onepiece": [
+    "dress", "gown", "one-piece swimsuit", "one piece swimsuit",
+    "school swimsuit", "competition swimsuit", "towel"
+  ],
+  "inner_top": [
+    "bra", "brassiere", "sports bra", "bandeau", "tube top",
+    "bikini top", "camisole"
+  ],
+  "inner_bottom": [
+    "panties", "panty", "underwear", "thong", "bikini bottom",
+    "bloomers", "diaper", "fundoshi"
+  ],
+  "legwear": [
+    "pantyhose", "black pantyhose", "white pantyhose", "thighhighs",
+    "black thighhighs", "white thighhighs", "thigh highs", "leggings",
+    "tights", "fishnet pantyhose", "fishnets", "stockings",
+    "over-kneehighs", "kneehighs", "garter belt", "gaterskirt"
+  ],
+  "footwear": [
+    "shoes", "footwear", "heels", "high heels", "platform heels",
+    "black platform heels", "mary janes", "boots", "ankle boots", "pumps",
+    "sandals", "sneakers", "loafers", "flat shoes", "stiletto heels"
+  ],
+  "accessory": [
+    "cape", "red cape", "belt", "epaulettes", "epaulette", "white gloves",
+    "gloves", "hat", "cap", "ribbon", "hair ribbon", "necklace", "scarf"
+  ],
+  "skin_top": [
+    "nipples", "nipple", "bare breasts", "breasts out", "topless",
+    "areola", "nipple slip", "wardrobe malfunction", "exposed breasts",
+    "breast exposure"
+  ],
+  "skin_groin": [
+    "pussy", "vagina", "labia", "clitoris", "anus", "anal",
+    "vulva", "cervix", "womb", "uterus"
+  ],
+  "open_markers": [
+    "open", "unbuttoned", "unzipped", "undone", "pulled down",
+    "pulled open", "off shoulders", "off-shoulder", "off shoulder",
+    "slid off", "open shirt", "removing", "taking off", "unfastening",
+    "unbuttoning", "undressing", "pulling off", "partially removed",
+    "open clothes", "wardrobe malfunction"
+  ],
+  "lifted_markers": [
+    "hiked up", "lifted", "lift", "raised", "pulled up",
+    "skirt lift", "clothes lift", "clothes pulled up"
+  ],
+  "removed_markers": [
+    "removed", "taken off", "off",
+    "on ground", "on the ground", "on floor", "on chair", "on desk",
+    "on table", "on bed", "placed on", "placed down", "put aside",
+    "discarded", "no jacket", "no shirt",
+    "no skirt", "no pants", "no dress", "no uniform", "no bra", "no panties",
+    "no underwear", "no shoes", "no heels", "bare feet", "barefoot",
+    "stripped"
+  ],
+  "skin_feature_allowlist": [
+    "medium breasts", "large breasts", "small breasts", "huge breasts",
+    "normal breasts", "pussy juice"
+  ]
+}

@@ -233,88 +233,23 @@ def _people(preset: str) -> dict[str, dict[str, tuple[float, float]]]:
     }
 
 
-def pose_should_apply(shot: dict[str, Any]) -> bool:
-    text = " ".join(str(shot.get(key) or "") for key in
-                    ("prompt", "description")).lower()
-    return not bool(re.search(
-        r"only (?:his |her )?(?:hand|hands|arm|arms|chest|shoulder)|"
-        r"hands? only|disembodied|只露(?:出)?手|只露(?:出)?手臂|"
-        r"只露(?:出)?胸|只有手|男(?:主|性)?只露", text))
+def resolve_pose_preset(shot: dict[str, Any], override: str = "") -> str:
+    """Resolve a pose from an explicit user/AI choice only.
 
-
-def pose_preset_for_shot(shot: dict[str, Any], override: str = "auto") -> str:
-    override = str(override or "auto").strip().lower()
-    override = POSE_PRESET_ALIASES.get(override, override)
-    if override in POSE_PRESET_LABELS or override in CLASSIC_POSE_LABELS:
-        return override
-    text = " ".join(str(shot.get(key) or "") for key in
-                    ("prompt", "description")).lower()
-    if re.search(r"\b69\b|sixty[- ]?nine|六九", text):
-        return "classic_69"
-    if re.search(r"facesitting|face sitting|squat.*face|坐在.{0,6}脸上|"
-                 r"骑脸|坐脸|颜面骑乘", text):
-        return "classic_facesitting"
-    if re.search(r"rimming|舔肛", text):
-        return "classic_rimming"
-    if re.search(r"rear oral|oral from behind|后位口交", text):
-        return "classic_rear_oral"
-    if re.search(r"gloryhole|glory[ _]hole|墙上洞|墙壁洞", text):
-        return "classic_missionary_gloryhole"
-    if re.search(r"standing milking|milking.*standing|站立.*桌", text):
-        return "classic_standing_milking"
-    if re.search(r"under[- ]table (?:bj|blowjob|oral)|桌下口交", text):
-        return "classic_under_table_bj"
-    if re.search(r"footjob|足交", text):
-        return "classic_footjob"
-    if re.search(r"milking table|under table|桌下|桌底", text):
-        return "classic_sex_under_table"
-    if re.search(r"front facing doggy|front[- ]facing doggystyle|正面后入", text):
-        return "classic_front_doggy"
-    if re.search(r"virtual sex|pov sex|虚拟性爱|pov 性爱", text):
-        return "classic_virtual_sex"
-    if re.search(r"leaning forward.{0,12}vaginal|前倾.{0,8}插入|前倾.{0,8}性交", text):
-        return "classic_leaning_vaginal"
-    if re.search(r"standing behind|from behind standing|站立身后|站身后", text):
-        return "classic_standing_behind"
-    if re.search(r"big guy|tied[- ]up girl|绑住.{0,8}女孩|束缚.{0,8}抱起", text):
-        return "classic_big_guy"
-    if re.search(r"side (?:bj|blowjob)|侧位口交|侧面口交", text):
-        return "classic_bj_side"
-    if re.search(r"lying cunnilingus|躺姿舔阴|躺着舔阴", text):
-        return "classic_lying_cunnilingus"
-    if re.search(r"cunnilingus|pov oral|舔阴|舔穴", text):
-        return "classic_pov_oral"
-    if re.search(r"fellatio|blowjob|\bbj\b|口交", text):
-        return "classic_bj_front"
-    if re.search(r"handjob|hand job|手交|握手交", text):
-        return "classic_lying_hj"
-    if re.search(r"cowgirl|girl on top|woman on top|straddl|riding|骑乘|骑在|"
-                 r"跨坐|坐在.{0,6}(?:腿|身)上|女上位|女上男下|"
-                 r"男主在下|男性在下|男主.{0,4}(?:下面|下方|下边)|"
-                 r"男性.{0,4}(?:下面|下方|下边)", text):
-        return "cowgirl"
-    if re.search(r"rear[- ]?carry|standing[- ]?carry|suspended|"
-                 r"carry(?:ing)? (?:her|the girl)|lift(?:ing)? (?:her )?legs|"
-                 r"抱起|抱起来|抱起双腿|抱着腿|悬空|托起|站立抱起", text):
-        return "rear_carry"
-    if re.search(r"doggy|doggystyle|from behind|all fours|on all fours|"
-                 r"后入|背后|趴跪", text):
-        return "classic_doggystyle"
-    if re.search(r"missionary|lying on back|on back|legs up|legs spread|"
-                 r"传教士|正常位", text):
-        return "classic_missionary"
-    if re.search(r"stacked|on top of|lying on|pressing|上方|上面|上边|"
-                 r"上下叠|叠在一起|压在身上|趴在身上|男上女下|男主在上|男性在上",
-                 text):
-        return "stacked"
-    if re.search(r"spooning|lying on side|side-by-side|侧躺|侧卧|并排拥抱|"
-                 r"身后抱|从背后抱", text):
-        return "spooning"
-    if re.search(r"kneeling|跪姿|\boral\b", text):
-        return "oral"
-    if re.search(r"\bstanding\b|standing sex|站立", text):
-        return "standing"
-    return "side_by_side"
+    No keyword inference: the semantic choice of pose belongs to the LLM or
+    the user. ``shot["pose_id"]`` is emitted by the storyboard LLM; ``override``
+    is the user-picked preset from the UI. ``auto`` with no declared pose means
+    no pose is applied.
+    """
+    choices = (override, str(shot.get("pose_id") or ""))
+    for choice in choices:
+        key = str(choice or "").strip().lower()
+        if not key or key == "auto":
+            continue
+        key = POSE_PRESET_ALIASES.get(key, key)
+        if key in POSE_PRESET_LABELS or key in CLASSIC_POSE_LABELS:
+            return key
+    return ""
 
 
 def _dot(buf: bytearray, width: int, height: int,

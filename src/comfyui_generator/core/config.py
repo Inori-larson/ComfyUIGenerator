@@ -17,7 +17,7 @@ from comfyui_generator import APP_ID
 
 PACKAGE_DIR = Path(__file__).resolve().parent.parent
 PRESET_DIR = PACKAGE_DIR / "presets"
-DEFAULT_PRESET = PRESET_DIR / "illustrious_yixuan_v2.json"
+DEFAULT_PRESET = PRESET_DIR / "generic_blank.json"
 
 
 def app_data_dir() -> Path:
@@ -223,13 +223,57 @@ class ModelListsConfig:
 
 
 @dataclass
+class TagDbConfig:
+    enabled: bool = True
+    auto_repair_story: bool = True
+    csv_path: str = ""
+    alias_path: str = ""
+    report_unknown: bool = True
+    report_aliases: bool = True
+    auto_canonical_alias: bool = False
+
+
+@dataclass
+class TaggerConfig:
+    enabled: bool = False
+    auto_verify_after_render: bool = False
+    auto_rewrite: bool = False
+    max_rerender: int = 2
+    device: str = "gpu"  # gpu | cpu
+    model_path: str = ""
+    hf_base: str = "https://huggingface.co"
+    general_threshold: float = 0.55
+    cast_threshold: float = 0.6
+    layer_threshold: float = 0.5
+
+
+@dataclass
+class RagConfig:
+    enabled: bool = False
+    queries: str = ""
+    source: str = "yande"  # yande | danbooru
+    proxy: str = ""
+    login: str = ""
+    api_key: str = ""
+    max_examples: int = 4
+    min_score: int = 5
+    limit_per_query: int = 20
+    index_dir: str = ""
+    cache_hours: float = 24.0
+
+
+@dataclass
 class AppConfig:
+    story_policy: str = ""
     comfy: ComfyConfig = field(default_factory=ComfyConfig)
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
     external_llm: ExternalLLMConfig = field(default_factory=ExternalLLMConfig)
     generation: GenerationDefaults = field(default_factory=GenerationDefaults)
     lora: LoraConfig = field(default_factory=LoraConfig)
     models: ModelListsConfig = field(default_factory=ModelListsConfig)
+    tagdb: TagDbConfig = field(default_factory=TagDbConfig)
+    tagger: TaggerConfig = field(default_factory=TaggerConfig)
+    rag: RagConfig = field(default_factory=RagConfig)
     ui: UIConfig = field(default_factory=UIConfig)
     storage_root: str = ""
     projects_root: str = ""
@@ -320,6 +364,11 @@ def default_config() -> AppConfig:
     cfg.generation.template = str(DEFAULT_PRESET)
     cfg.generation.wildcards = {"enabled": False,
                                 "dir": str(Path.cwd() / "wildcards")}
+    policy_path = PRESET_DIR / "story_policy.default.txt"
+    try:
+        cfg.story_policy = policy_path.read_text(encoding="utf-8")
+    except OSError:
+        pass
     return cfg
 
 

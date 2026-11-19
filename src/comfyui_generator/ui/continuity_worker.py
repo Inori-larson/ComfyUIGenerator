@@ -44,7 +44,8 @@ class ContinuityWorker(QThread):
             try:
                 result = extract_continuity(
                     client, model, self.premise, self.shots,
-                    self.character_tags, log=self.log.emit)
+                    self.character_tags, self.cfg.story_policy,
+                    log=self.log.emit)
             except Exception:
                 if not self.use_external or not self.cfg.ollama.default_model:
                     raise
@@ -53,7 +54,8 @@ class ContinuityWorker(QThread):
                 model = self.cfg.ollama.default_model
                 result = extract_continuity(
                     client, model, self.premise, self.shots,
-                    self.character_tags, log=self.log.emit)
+                    self.character_tags, self.cfg.story_policy,
+                    log=self.log.emit)
             self.done.emit(result)
         except Exception as exc:
             self.failed.emit(str(exc))
