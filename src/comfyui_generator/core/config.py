@@ -381,12 +381,26 @@ def load_config(path: Path | None = None) -> AppConfig:
     return cfg
 
 
+def _replace_rule(policy: str, number: int, text: str) -> str:
+    import re
+    pattern = re.compile(r"^%d\..*$" % number, re.M)
+    if pattern.search(policy or ""):
+        return pattern.sub("%d. %s" % (number, text), policy)
+    return (policy or "").rstrip() + "\n%d. %s\n" % (number, text)
+
+
 def _migrate_llama_server(cfg: AppConfig) -> None:
+    cfg.story_policy = _replace_rule(cfg.story_policy, 2,
+        "所有男性角色（男主及任何 1boy）统一写 nude male、faceless male、black hair："
+        "完全裸体、无脸、黑发，禁止任何男装、女主衣物或其他发色，防止服装与外貌串台。")
+    cfg.story_policy = cfg.story_policy.replace(
+        "1boy (nude male, faceless male)",
+        "1boy (nude male, faceless male, black hair)")
     if "圆括号" not in (cfg.story_policy or ""):
         cfg.story_policy += (
             "\n11. 同一角色的外貌和服装/裸露状态标签必须用圆括号包成一组，"
             "紧跟在该角色名后（例如 1girl (long hair, black hair, white pleated skirt), "
-            "1boy (short hair, jacket)）；多人时每个角色各写一组，不要把某角色的"
+            "1boy (nude male, faceless male, black hair)）；多人时每个角色各写一组，不要把某角色的"
             "服装/外貌散落到别的角色或场景标签后面。\n"
         )
     if float(getattr(cfg.external_llm, "timeout", 900) or 0) <= 240:

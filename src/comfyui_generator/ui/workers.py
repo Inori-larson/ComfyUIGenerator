@@ -353,22 +353,28 @@ class PromptWorker(QThread):
         rounds = max(0, min(3, int(getattr(cfg, "max_rounds", 1) or 0)))
         if rounds <= 0 or self.story_options is None:
             return
+        requested = int(getattr(self.story_options, "shots", 0) or 0)
+        actual = len(shots)
+        shortfall = requested - actual if requested > 0 else 0
         blocking = collect_blocking(shots)
-        if not blocking:
+        if not blocking and shortfall <= 0:
             return
 
         client, model = self._story_llm_client()
-        report = new_report(self.text, len(shots), model)
+        report = new_report(self.text, requested or actual, model)
         best = [dict(shot) for shot in shots]
         best_beats = getattr(self, "_generated_beats", None)
         best_blocking = blocking
+        best_shortfall = shortfall
         for round_index in range(1, rounds + 1):
             if self._canceled():
                 raise InterruptedError
             options = copy.copy(self.story_options)
             options.setting = "\n".join(
-                part for part in (options.setting,
-                                  build_heal_requirement(best_blocking, len(best)))
+                part for part in (
+                    options.setting,
+                    build_heal_requirement(best_blocking, requested or len(best),
+                                           len(best) if best_shortfall > 0 else None))
                 if part)
             options.on_contract = lambda beats: setattr(
                 self, "_generated_beats", beats)
@@ -380,9 +386,14 @@ class PromptWorker(QThread):
                 break
             self._prepare_story_shots(candidate)
             remaining = collect_blocking(candidate)
-            accepted = len(remaining) < len(best_blocking)
+            candidate_shortfall = (requested - len(candidate)) if requested > 0 else 0
+            accepted = (len(remaining) < len(best_blocking)
+                        or candidate_shortfall < best_shortfall)
             record_round(report, round_index=round_index, before=best_blocking,
                          after=remaining, accepted=accepted)
+            report["rounds"][-1]["candidate_shots"] = len(candidate)
+            report["rounds"][-1]["shortfall_before"] = best_shortfall
+            report["rounds"][-1]["shortfall_after"] = candidate_shortfall
             self.log.emit(
                 "自动修复第 %d 轮：阻塞项 %d → %d%s。" % (
                     round_index, len(best_blocking), len(remaining),
@@ -397,12 +408,18 @@ class PromptWorker(QThread):
                 best = candidate
                 best_beats = getattr(self, "_generated_beats", None)
                 best_blocking = remaining
+                best_shortfall = candidate_shortfall
             else:
                 self._generated_beats = best_beats
-            if not remaining:
+            if not remaining and best_shortfall <= 0:
                 break
+        if best_shortfall > 0:
+            self.log.emit("镜数不足：请求 %d，实际 %d；请重新生成。"
+                          % (requested or len(best), len(best)))
         shots[:] = best
         self._generated_beats = best_beats
+        report["resolved"] = report["resolved"] and best_shortfall <= 0
+        report["shortfall"] = best_shortfall
         self._heal_report = report
 
     def _finalize_story_shots(self, shots, local_client, local_model, event):

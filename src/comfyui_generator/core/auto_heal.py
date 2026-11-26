@@ -54,10 +54,17 @@ def summarize_findings(findings: list[dict[str, Any]]) -> dict[str, int]:
 
 
 def build_heal_requirement(findings: list[dict[str, Any]],
-                           shot_count: int) -> str:
+                           shot_count: int,
+                           actual_count: int | None = None) -> str:
     lines = [HEAL_INSTRUCTION,
-             "目标镜数：%d，必须完整输出全部镜头。" % shot_count,
-             "校验发现的问题："]
+             "目标镜数：%d，必须完整输出全部镜头。" % shot_count]
+    if actual_count is not None and actual_count != shot_count:
+        lines.append(
+            "上一次只生成了 %d 镜，缺少 %d 镜；这次必须输出恰好 %d 镜，"
+            "id 从 01 连续到 %02d，不能再压缩合并。"
+            % (actual_count, shot_count - actual_count,
+               shot_count, shot_count))
+    lines.append("校验发现的问题：")
     for finding in findings[:50]:
         lines.append("- [%s] 镜 %s：%s（证据：%s）" % (
             finding.get("severity", ""), finding.get("shot_id", ""),

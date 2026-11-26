@@ -73,6 +73,7 @@ class LlamaServerConfig:
     reasoning_effort: str = "low"
     reasoning_budget: int = 1024
     reasoning_preserve: bool = False
+    sleep_idle_seconds: int = 60
     temperature: float = 1.0
     top_p: float = 0.95
     top_k: int = 64
@@ -132,6 +133,8 @@ def llama_server_command(cfg: LlamaServerConfig) -> list[str]:
     ]
     if not r["reasoning_preserve"]:
         cmd.append("--no-reasoning-preserve")
+    if cfg.sleep_idle_seconds >= 0:
+        cmd += ["--sleep-idle-seconds", str(cfg.sleep_idle_seconds)]
     cmd += [
         "--parallel", str(max(1, int(r["parallel"]))),
         "--host", cfg.host, "--port", str(cfg.port),
