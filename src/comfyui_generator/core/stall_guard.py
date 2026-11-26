@@ -39,7 +39,9 @@ def detect_stalls(shots: list[dict[str, Any]], *, min_run: int = 3,
                 findings.setdefault(item, []).append({
                     "kind": "shot_stall",
                     "severity": "P2",
-                    "message": "连续镜头标签几乎未变化，画面可能停滞不推进",
+                    "message": (
+                        "连续镜头标签高度重合（仅作证据，不是剧情结论）；"
+                        "若剧本就是这样设计则完全允许、无需修改。"),
                     "evidence": "与上一镜标签重合 %.2f" % score,
                 })
         previous = current

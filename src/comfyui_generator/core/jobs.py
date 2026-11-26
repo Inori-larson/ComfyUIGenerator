@@ -599,7 +599,9 @@ class TaskRunner:
             image_path = self._verify_image_path(image)
             if not image_path:
                 break
-            decision = self.verifier.evaluate(str(image_path), render_prompt)
+            decision = self.verifier.evaluate(
+                str(image_path), render_prompt,
+                expected_scene=str(shot.get("continuity_scene") or ""))
             findings = decision.findings
             if decision.accepted:
                 trace_event("render.verify", {

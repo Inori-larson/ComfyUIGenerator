@@ -49,7 +49,7 @@ class ContinuityWorker(QThread):
             except Exception:
                 if not self.use_external or not self.cfg.ollama.default_model:
                     raise
-                self.log.emit("外部模型提取失败，改用本地 Ollama。")
+                self.log.emit("外部模型提取失败，改用本地模型。")
                 client = OllamaClient(self.cfg.ollama.base_url)
                 model = self.cfg.ollama.default_model
                 result = extract_continuity(

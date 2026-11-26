@@ -8,11 +8,15 @@ alone (no rendering, no tagger); it never writes semantics itself.
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from comfyui_generator.core.mechanical import dedupe_tags, split_tags
+from comfyui_generator.core.repair_shared import (
+    MINIMAL_FIX_SYSTEM, constrain_to_findings,
+)
 from comfyui_generator.core.rewrite import rewrite_shot_prompt
 from comfyui_generator.core.tag_validation import (
     ValidationOptions,
@@ -21,16 +25,45 @@ from comfyui_generator.core.tag_validation import (
 )
 from comfyui_generator.core.tagdb import TagDatabase
 
-MINIMAL_FIX_SYSTEM = (
-    "You repair one booru storyboard prompt that failed a structural check. "
-    "Output only JSON {\"prompt\": \"...\"} of English comma-separated Danbooru tags. "
-    "Make the MINIMAL change to fix exactly the listed findings (cast/count or clothing "
-    "layering). Keep scene, action, characters, pose, camera, fluids and every correct tag "
-    "unchanged; do not invent new content. "
-    "If inner underwear (bra/panties) is written while outer clothing is still closed and not "
-    "open/removed, either open/remove that outer garment according to the shot's beat OR, when "
-    "the shot is still fully clothed, remove the inner-underwear tag. "
-    "Resolve contradictory count tags (e.g. solo vs 1boy) to match who is actually present.")
+BATCH_FIX_SYSTEM = (
+    "You repair booru storyboard prompts that failed structural checks. "
+    "Output only JSON {\"prompts\":[{\"id\":\"...\",\"prompt\":\"...\"}]}. "
+    "Make the MINIMAL change to fix exactly the listed findings. Keep scene, "
+    "action, characters, camera, fluids and every correct tag unchanged; do not "
+    "invent new content. For panties/legwear conflicts, when panties are exposed "
+    "or pulled aside, put the outer legwear in a visibly torn/ripped/cut/"
+    "pulled-aside/down state; intact legwear hiding the panties is also valid. "
+    "Once a garment is torn/ripped/cut, never restore it later unless new "
+    "clothes are explicitly shown. If non-fetish outerwear or accessories are "
+    "still worn after skin is exposed, remove them and their tags; footwear the "
+    "user explicitly keeps is exempt. Preserve the original tag count closely."
+)
+
+BATCH_REPAIR_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "prompts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "prompt": {"type": "string"},
+                },
+                "required": ["id", "prompt"],
+            },
+        }
+    },
+    "required": ["prompts"],
+}
+
+REPAIRABLE_KINDS = {
+    "layer_panty_under_legwear",
+    "layer_claim_conflict",
+    "removable_garment_during_sex",
+    "fluid_discontinuity",
+    "damage_restored",
+}
 
 
 @dataclass
@@ -42,29 +75,7 @@ class RepairReport:
 
 def constrain_minimal(rewritten: str, original: str,
                       findings: list[dict[str, Any]]) -> str:
-    """Drop tags the LLM added that the findings do not justify.
-
-    No hardcoded label whitelist: a new tag is kept only when the finding
-    explicitly mentions it as expected/evidence.
-    """
-    import re
-
-    orig = {t.strip().lower() for t in split_tags(original)}
-    justification = " ".join(
-        " ".join(str(f.get(key) or "")
-                 for key in ("expected", "actual", "evidence", "message"))
-        for f in findings).lower()
-    kept: list[str] = []
-    for tag in dedupe_tags(split_tags(rewritten)):
-        key = tag.strip().lower()
-        if key in orig:
-            kept.append(tag)
-            continue
-        if key and re.search(
-                r"(?<![a-z0-9])" + re.escape(key) + r"(?![a-z0-9])",
-                justification):
-            kept.append(tag)
-    return ", ".join(kept) or original
+    return constrain_to_findings(rewritten, original, findings)
 
 
 def repair_instruction(findings: list[dict[str, Any]]) -> str:
@@ -137,6 +148,9 @@ def auto_repair_shots(
             if not result.blocking:
                 prompt = rewritten
                 shot["prompt"] = rewritten
+                shot.pop("prompt_zh", None)
+                if shot.get("continuity_state") or shot.get("continuity_scene"):
+                    shot["continuity_stale"] = True
                 current_findings = result.findings
                 fixed = True
                 break
@@ -145,4 +159,95 @@ def auto_repair_shots(
         shot["ready"] = fixed
         (report.repaired if fixed else report.unresolved).append(
             str(shot.get("id") or ""))
+    return report
+
+
+def batch_repair_advisory(
+    shots: list[dict[str, Any]],
+    db: TagDatabase,
+    client: Any,
+    model: str,
+    *,
+    options: ValidationOptions | None = None,
+    log: Callable[[str], None] | None = None,
+) -> RepairReport:
+    options = options or ValidationOptions(
+        report_unknown=False, report_aliases=False)
+    targets: list[dict[str, Any]] = []
+    for shot in shots:
+        findings = [f for f in (shot.get("findings") or [])
+                    if f.get("kind") in REPAIRABLE_KINDS]
+        if not findings:
+            continue
+        targets.append({
+            "id": str(shot.get("id") or ""),
+            "prompt": str(shot.get("prompt") or ""),
+            "findings": findings,
+        })
+    report = RepairReport()
+    if not targets:
+        return report
+    messages = [
+        {"role": "system", "content": BATCH_FIX_SYSTEM},
+        {"role": "user", "content": json.dumps(
+            {"shots": targets}, ensure_ascii=False)},
+    ]
+    try:
+        raw = client.chat_json(
+            model, messages,
+            schema=BATCH_REPAIR_SCHEMA,
+            temperature=0.3,
+            num_predict=32768,
+            num_ctx=32768,
+            keep_alive="5m",
+        )
+        items = raw.get("prompts") if isinstance(raw, dict) else None
+    except Exception as exc:
+        if log:
+            log("批量修复失败：%s" % str(exc)[:160])
+        report.unresolved = [target["id"] for target in targets]
+        return report
+    by_id: dict[str, str] = {}
+    for item in items or []:
+        if isinstance(item, dict):
+            shot_id = str(item.get("id") or "").strip()
+            prompt = str(item.get("prompt") or "").strip()
+            if shot_id and prompt:
+                by_id[shot_id] = prompt
+    for target in targets:
+        shot_id = target["id"]
+        candidate = by_id.get(shot_id, "")
+        original = target["prompt"]
+        if not candidate or candidate == original:
+            report.unresolved.append(shot_id)
+            continue
+        result = validate_prompt(candidate, db, options)
+        structural = {f.get("kind") for f in result.findings}
+        target_kinds = {f.get("kind") for f in target["findings"]}
+        prompt_checks = (target_kinds & set(REPAIRABLE_KINDS)) - {
+            "fluid_discontinuity", "damage_restored",
+        }
+        if prompt_checks & structural:
+            report.unresolved.append(shot_id)
+            continue
+        shot = next((s for s in shots
+                     if str(s.get("id") or "") == shot_id), None)
+        if shot is None:
+            continue
+        preserved = [
+            f for f in (shot.get("findings") or [])
+            if f.get("kind") not in REPAIRABLE_KINDS
+        ]
+        additional = [
+            f for f in result.findings
+            if f.get("kind") not in target_kinds
+        ]
+        shot["prompt"] = candidate
+        shot.pop("prompt_zh", None)
+        if shot.get("continuity_state") or shot.get("continuity_scene"):
+            shot["continuity_stale"] = True
+        shot["findings"] = preserved + additional
+        shot["ready"] = not any(f.get("severity") == "P1"
+                                for f in shot["findings"])
+        report.repaired.append(shot_id)
     return report

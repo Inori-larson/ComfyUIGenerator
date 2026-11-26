@@ -122,6 +122,8 @@ def parse_state(prompt: str, vocab: dict[str, list[str]]) -> PromptState:
                            if category == "inner_bottom"]
     aside_markers = [m for m in vocab.get("open_markers", [])
                      if "aside" in m] or ["aside"]
+    legwear_open_markers = vocab.get("legwear_open_markers", [])
+    crotch_open: set[str] = set()
 
     for raw_segment in split_tags(prompt):
         text = _segment_core(raw_segment)
@@ -140,6 +142,12 @@ def parse_state(prompt: str, vocab: dict[str, list[str]]) -> PromptState:
             found.setdefault(category_tokens[token], token)
         for category, token in found.items():
             state.garments.append(Garment(category, token, _garment_state(text, vocab)))
+
+        for token in crotch_tokens:
+            if (_pattern(token).search(text)
+                    and any(_pattern(m).search(text)
+                            for m in legwear_open_markers)):
+                crotch_open.add(token)
 
         if (any(_pattern(m).search(text) for m in aside_markers)
                 and any(_pattern(t).search(text) for t in inner_bottom_tokens)
@@ -160,6 +168,9 @@ def parse_state(prompt: str, vocab: dict[str, list[str]]) -> PromptState:
         state.girls = max(state.girls, _count_people(text, ("girl", "woman", "female")))
         state.boys = max(state.boys, _count_people(text, ("boy", "man", "male")))
 
+    state.aside_legwear_conflict = [
+        token for token in state.aside_legwear_conflict
+        if token not in crotch_open]
     by_token: dict[str, set[str]] = {}
     for garment in state.garments:
         by_token.setdefault(garment.token, set()).add(garment.state)

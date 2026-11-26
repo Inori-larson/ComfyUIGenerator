@@ -10,9 +10,13 @@ from __future__ import annotations
 import json
 import os
 import sys
+from pathlib import Path
 
 import numpy as np
 from PIL import Image
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from comfyui_generator.core.tagger_device import resolve_device
 
 
 def _add_extra_dll_dirs() -> None:
@@ -100,7 +104,11 @@ def main() -> int:
         device = str(payload.get("device") or "gpu")
         providers, used_device = _providers(device)
         session = ort.InferenceSession(
-            str(payload["model"]), providers=providers)
+            str(payload["model"]),
+            providers=providers)
+        actual_providers = list(session.get_providers())
+        used_device, provider_warning = resolve_device(
+            device, list(providers), actual_providers)
         input_info = session.get_inputs()[0]
         shape = input_info.shape
         size = int(payload.get("size") or 448)
@@ -139,7 +147,8 @@ def main() -> int:
                                 **tags})
             except Exception as exc:
                 results.append({"path": str(path), "error": str(exc)})
-        print(json.dumps({"results": results, "device": used_device},
+        print(json.dumps({"results": results, "device": used_device,
+                          "provider_warning": provider_warning},
                          ensure_ascii=False))
         return 0
     except Exception as exc:

@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable
+
+from comfyui_generator.core.subprocess_util import run_hidden
 
 TAGGER_REPO = "SmilingWolf/wd-eva02-large-tagger-v3"
 TAGGER_FILES = ("model.onnx", "selected_tags.csv")
@@ -77,7 +78,7 @@ def tagger_ready(root: Path, python: str, base_dir: str | Path | None,
         return False, "缺少 tagger 的 selected_tags.csv"
     if (tagger_packages_dir(root) / "onnxruntime").is_dir():
         return True, ""
-    probe = subprocess.run(
+    probe = run_hidden(
         [python, "-c", "import onnxruntime, numpy, PIL"],
         capture_output=True, text=True, timeout=60)
     if probe.returncode == 0:
@@ -100,14 +101,14 @@ def ensure_tagger_packages(python: str, target: str | Path,
         log("首次安装标签反推依赖 %s（仅安装到应用数据目录）..." % package)
     cmd = [python, "-m", "pip", "install", "--target", str(target),
            package, "numpy", "pillow"]
-    proc = subprocess.run(
+    proc = run_hidden(
         cmd, capture_output=True, text=True, encoding="utf-8",
         errors="replace", timeout=timeout)
     if proc.returncode != 0:
         if gpu:
             cmd = [python, "-m", "pip", "install", "--target", str(target),
                    "onnxruntime", "numpy", "pillow"]
-            proc = subprocess.run(
+            proc = run_hidden(
                 cmd, capture_output=True, text=True, encoding="utf-8",
                 errors="replace", timeout=timeout)
         if proc.returncode != 0:
@@ -155,7 +156,7 @@ def run_tagger(python: str, root: Path, base_dir: str | Path | None,
     if tags_csv is None:
         raise RuntimeError("缺少 tagger 的 selected_tags.csv")
     packages = tagger_packages_dir(root)
-    probe = subprocess.run(
+    probe = run_hidden(
         [python or sys.executable, "-c", "import onnxruntime"],
         capture_output=True, text=True, timeout=60)
     if probe.returncode != 0:
@@ -174,8 +175,7 @@ def run_tagger(python: str, root: Path, base_dir: str | Path | None,
     # onnxruntime-gpu needs CUDA cuBLAS; reuse torch's bundled CUDA DLLs when
     # available so a separate CUDA toolkit install is not required.
     try:
-        import subprocess as _sp
-        probe = _sp.run(
+        probe = run_hidden(
             [python, "-c",
              "import importlib.util,os;s=importlib.util.find_spec('torch');"
              "print(os.path.join(os.path.dirname(s.origin),'lib') if s else '')"],
@@ -202,9 +202,9 @@ def run_tagger(python: str, root: Path, base_dir: str | Path | None,
                                  for name, score in bucket.items()}
         return results
 
-    def _invoke(use_device: str) -> list[dict[str, Any]]:
+    def _invoke(use_device: str) -> tuple[list[dict[str, Any]], str, str]:
         payload["device"] = use_device
-        proc = subprocess.run(
+        proc = run_hidden(
             [python or sys.executable, str(runner),
              json.dumps(payload, ensure_ascii=False)],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -226,13 +226,20 @@ def run_tagger(python: str, root: Path, base_dir: str | Path | None,
                 "WD tagger 输出无法解析：%s" % out_lines[-1][:500]) from exc
         if data.get("error"):
             raise RuntimeError(str(data["error"]))
-        return _normalise(data)
+        return (_normalise(data),
+                str(data.get("device") or ""),
+                str(data.get("provider_warning") or ""))
 
     try:
-        return _invoke(device)
+        results, used_device, warning = _invoke(device)
     except RuntimeError as exc:
         if device == "gpu":
             if log:
-                log("GPU 反推失败（%s），改用 CPU 重试一次。" % str(exc)[:200])
-            return _invoke("cpu")
+                log("GPU 反推失败（%s），改用 CPU 重试一次。" % str(exc)[:300])
+            return _invoke("cpu")[0]
         raise
+    if device == "gpu" and used_device and used_device != "gpu":
+        if log:
+            log("WD tagger GPU 未生效：%s（本批结果来自 CPU）"
+                % (warning or "CUDAExecutionProvider 不可用"))
+    return results

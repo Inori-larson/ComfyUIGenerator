@@ -34,8 +34,28 @@ def normalize_weight_syntax(tag: str) -> str:
     return text
 
 
+def _split_top_level(value: str) -> list[str]:
+    parts: list[str] = []
+    buffer: list[str] = []
+    depth = 0
+    for char in str(value or ""):
+        if char == "(":
+            depth += 1
+            buffer.append(char)
+        elif char == ")":
+            depth = max(0, depth - 1)
+            buffer.append(char)
+        elif char == "," and depth == 0:
+            parts.append("".join(buffer))
+            buffer = []
+        else:
+            buffer.append(char)
+    parts.append("".join(buffer))
+    return [part.strip() for part in parts if part.strip()]
+
+
 def split_tags(value: str) -> list[str]:
-    return [part.strip() for part in str(value or "").split(",") if part.strip()]
+    return _split_top_level(value)
 
 
 def join_tags(tags: list[str]) -> str:
@@ -79,8 +99,7 @@ def dedupe_tags(tags: list[str]) -> list[str]:
 
 
 def strip_cjk_segments(value: str) -> str:
-    parts = [part.strip() for part in str(value or "").split(",")]
-    kept = [part for part in parts if part and not _CJK_RE.search(part)]
+    kept = [part for part in _split_top_level(value) if not _CJK_RE.search(part)]
     return ", ".join(kept)
 
 

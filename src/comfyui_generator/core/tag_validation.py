@@ -138,6 +138,19 @@ def _layer_findings(state: PromptState, db: TagDatabase,
             "layer_panty_under_legwear", "P2",
             "内裤拨开但覆盖胯部的裤袜/连裤袜仍完整穿着，物理层级难以成立",
             sorted(set(state.aside_legwear_conflict)) + aside[:4]))
+
+    removable_tokens = set(vocab.get("removable_accessories", []))
+    removable_categories = set(vocab.get("removable_categories", []))
+    remaining = sorted({
+        g.token for g in state.garments
+        if g.state == WORN
+        and (g.category in removable_categories
+             or g.token in removable_tokens)})
+    if (state.skin_top or state.skin_groin) and remaining:
+        findings.append(_finding(
+            "removable_garment_during_sex", "P2",
+            "已进入裸露/性行为阶段，但非情趣外衣或配饰仍完整穿着未脱",
+            remaining[:10]))
     return findings
 
 
@@ -232,8 +245,11 @@ def annotate_shots(shots: list[dict[str, Any]], db: TagDatabase,
         if result.canonical:
             tags = split_tags(str(shot.get("prompt") or ""))
             shot["prompt"] = ", ".join(result.canonical.get(t, t) for t in tags)
+        durable = (list(shot.get("contract_findings") or [])
+                   + list(shot.get("outline_findings") or []))
         findings = list(result.findings)
-        shot["findings"] = findings
-        shot["ready"] = result.ready
+        shot["findings"] = durable + findings
+        shot["ready"] = result.ready and not any(
+            f.get("severity") == "P1" for f in durable)
         per_shot.append(findings)
     return per_shot

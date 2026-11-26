@@ -148,21 +148,7 @@ class ComfyConfig:
         return out
 
 
-@dataclass
-class OllamaConfig:
-    host: str = "127.0.0.1"
-    port: int = 11434
-    exe: str = ""
-    auto_start: bool = True
-    default_model: str = ""
-    keep_alive: str = "5m"
-
-    @property
-    def base_url(self) -> str:
-        host = self.host.strip().rstrip("/")
-        if host.startswith("http://") or host.startswith("https://"):
-            return host
-        return f"http://{host}:{self.port}"
+from comfyui_generator.core.llama_server import LlamaServerConfig as OllamaConfig
 
 
 @dataclass
@@ -170,7 +156,7 @@ class ExternalLLMConfig:
     base_url: str = ""
     api_key: str = ""
     model: str = "doubao-seed-2.1-pro"
-    timeout: float = 240.0
+    timeout: float = 900.0
     disable_thinking: bool = True
 
 
@@ -226,11 +212,19 @@ class ModelListsConfig:
 class TagDbConfig:
     enabled: bool = True
     auto_repair_story: bool = True
+    auto_repair_advisory: bool = True
     csv_path: str = ""
     alias_path: str = ""
     report_unknown: bool = True
     report_aliases: bool = True
     auto_canonical_alias: bool = False
+
+
+@dataclass
+class AutoHealConfig:
+    enabled: bool = True
+    max_rounds: int = 1
+    archive: bool = True
 
 
 @dataclass
@@ -272,6 +266,7 @@ class AppConfig:
     lora: LoraConfig = field(default_factory=LoraConfig)
     models: ModelListsConfig = field(default_factory=ModelListsConfig)
     tagdb: TagDbConfig = field(default_factory=TagDbConfig)
+    auto_heal: AutoHealConfig = field(default_factory=AutoHealConfig)
     tagger: TaggerConfig = field(default_factory=TaggerConfig)
     rag: RagConfig = field(default_factory=RagConfig)
     ui: UIConfig = field(default_factory=UIConfig)
@@ -360,7 +355,8 @@ def default_config() -> AppConfig:
         cfg.lora.body_dir = str(base / "models" / "loras" / "身体部位")
         cfg.lora.action_dir = str(base / "models" / "loras" / "动作")
         cfg.lora.clothing_dir = str(base / "models" / "loras" / "服装")
-    cfg.ollama.exe = str(ollama_exe) if ollama_exe else ""
+    from comfyui_generator.core.llama_server import LLAMA_SERVER_DEFAULT
+    cfg.ollama.exe = LLAMA_SERVER_DEFAULT
     cfg.generation.template = str(DEFAULT_PRESET)
     cfg.generation.wildcards = {"enabled": False,
                                 "dir": str(Path.cwd() / "wildcards")}
@@ -379,9 +375,33 @@ def load_config(path: Path | None = None) -> AppConfig:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             _merge_dataclass(cfg, data)
+            _migrate_llama_server(cfg)
         except (OSError, json.JSONDecodeError) as exc:
             print(f"[config] failed to load {path}: {exc}", file=sys.stderr)
     return cfg
+
+
+def _migrate_llama_server(cfg: AppConfig) -> None:
+    if "圆括号" not in (cfg.story_policy or ""):
+        cfg.story_policy += (
+            "\n11. 同一角色的外貌和服装/裸露状态标签必须用圆括号包成一组，"
+            "紧跟在该角色名后（例如 1girl (long hair, black hair, white pleated skirt), "
+            "1boy (short hair, jacket)）；多人时每个角色各写一组，不要把某角色的"
+            "服装/外貌散落到别的角色或场景标签后面。\n"
+        )
+    if float(getattr(cfg.external_llm, "timeout", 900) or 0) <= 240:
+        cfg.external_llm.timeout = 900.0
+    o = cfg.ollama
+    if getattr(o, "port", None) == 11434:
+        o.port = 8080
+    exe = str(getattr(o, "exe", "") or "").lower()
+    if "ollama" in exe:
+        from comfyui_generator.core.llama_server import LLAMA_SERVER_DEFAULT
+        o.exe = LLAMA_SERVER_DEFAULT
+    if not getattr(o, "model", ""):
+        legacy = str(getattr(o, "default_model", "") or "")
+        if legacy and ("\\" in legacy or "/" in legacy) and legacy.lower().endswith(".gguf"):
+            o.model = legacy
 
 
 def save_config(cfg: AppConfig, path: Path | None = None) -> Path:

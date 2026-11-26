@@ -65,3 +65,17 @@
 - 能否在大纲阶段就避免？能就上移到大纲，而不是加重下游。
 - 去掉这条规则后，符合剧情的合理表达是否反而被拦？是则规则过死。
 - 修后是否检查了最终 PNG node6/node7、做了幂等、跨故事反例与全量测试？
+
+## 7. 模型选择（当前实现）
+
+- 分镜阶段（`STORYBOARD_SYSTEM`）一次调用同时产出 beat、中文 script 与英文 Booru 标签，使用用户在软件中选择的模型（本地 Ollama 或外部 LLM）。
+- 当前没有独立的“script → TAG 转换”阶段，因此“TAG 转换固定 Flash”在单阶段实现下不适用；重写、扩写、大纲、连贯性抽取与渲染后复核同样使用用户当前模型。
+- 若将来拆分出独立 TAG 转换阶段，只为该阶段固定轻量模型，不得把该选择扩散到其他阶段。
+- 中文 `description` 仅用于 UI 展示，不回灌 LLM；扩写与其他 AI 输入只使用 prompt / script / outline。
+
+## 8. 自动修复闭环
+
+- 分镜生成后若仍有阻塞项（P1 或 contract/outline 类 finding），应用侧把结构化 finding 送回 AI，要求按原 premise 重新生成**完整分镜 JSON**；应用侧不代写任何语义。
+- 新候选重新走全部校验；只在阻塞项减少时采用，否则保留上一版。默认 1 轮，`auto_heal.max_rounds` 可配（0–3），`auto_heal.enabled=false` 可关闭。
+- 每轮计数、采用与否、最终是否解决写入 `<output_dir>/review/*_auto_heal_*.json`；`auto_heal.archive=false` 可关闭归档。
+- 渲染后复核的 P1 仍由现有回路自动重写并用同 seed 重渲； WD tagger GPU 不可用时自动降级 CPU，并把真实设备与原因写入日志。

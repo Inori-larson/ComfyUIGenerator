@@ -84,6 +84,35 @@ def test_panties_aside_with_thighhighs_is_clean():
                 if f["kind"] == "layer_panty_under_legwear"]
 
 
+def test_torn_pantyhose_with_panties_aside_is_clean():
+    db = load_tag_database()
+    result = validate_prompt(
+        "1girl 1boy, black pantyhose torn, black lace panties aside, sex", db)
+    assert not [f for f in result.findings
+                if f["kind"] == "layer_panty_under_legwear"]
+
+
+def test_non_fetish_accessories_during_sex_are_advisory():
+    db = load_tag_database()
+    result = validate_prompt(
+        "1girl 1boy, nude male, white gloves, black platform heels, "
+        "nipples, bare breasts, sex", db)
+    kinds = [f["kind"] for f in result.findings]
+    assert "removable_garment_during_sex" in kinds
+    finding = next(f for f in result.findings
+                   if f["kind"] == "removable_garment_during_sex")
+    assert "white gloves" in finding["evidence"]
+    assert "black platform heels" not in finding["evidence"]
+
+
+def test_non_fetish_accessories_before_nudity_are_clean():
+    db = load_tag_database()
+    result = validate_prompt(
+        "1girl solo, uniform, white gloves, black platform heels, sitting", db)
+    assert not [f for f in result.findings
+                if f["kind"] == "removable_garment_during_sex"]
+
+
 def test_closed_jacket_with_bra_is_blocking():
     db = load_tag_database()
     prompt = "1girl, military uniform, red jacket, white shirt, black bra"

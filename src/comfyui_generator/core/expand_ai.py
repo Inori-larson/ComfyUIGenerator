@@ -57,7 +57,6 @@ def _shot_payload(shot: dict[str, Any], next_shot: dict[str, Any] | None,
     payload = {
         "id": str(shot.get("id") or ""),
         "prompt": str(shot.get("prompt") or ""),
-        "description": str(shot.get("description") or ""),
         "prev": None,
         "next": None,
     }

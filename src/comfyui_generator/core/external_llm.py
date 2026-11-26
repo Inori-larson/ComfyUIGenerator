@@ -144,7 +144,7 @@ class ExternalLLMClient:
         last = ""
         finish = ""
         last_error = ""
-        token_budget = max(256, min(32768, int(num_predict or 4096)))
+        token_budget = max(1024, min(32768, int(num_predict or 4096)))
         json_forced = bool(schema)
         omit_temperature = _fixed_temperature_model(target)
         param_retries = 2
@@ -160,7 +160,12 @@ class ExternalLLMClient:
                 payload["temperature"] = float(temperature)
             if json_forced:
                 payload["response_format"] = {"type": "json_object"}
-            if getattr(self.cfg, "disable_thinking", True):
+            base_url = str(getattr(self.cfg, "base_url", "") or "").lower()
+            is_local = any(
+                marker in base_url
+                for marker in ("127.0.0.1", "localhost", "::1"))
+            if (not is_local
+                    and getattr(self.cfg, "disable_thinking", True)):
                 payload["thinking"] = {"type": "disabled"}
             req = urllib.request.Request(
                 self._url(), data=json.dumps(payload).encode("utf-8"),

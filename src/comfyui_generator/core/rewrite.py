@@ -6,7 +6,7 @@ from typing import Any
 
 from comfyui_generator.core.ollama import OllamaClient
 from comfyui_generator.core.storyboard import (
-    BOORU_WORKFLOW, PROMPT_COVERAGE, raw_prompt,
+    BOORU_WORKFLOW, CHARACTER_GROUPING, PROMPT_COVERAGE, raw_prompt,
 )
 from comfyui_generator.core.tags import dedupe_tags
 
@@ -31,7 +31,8 @@ REWRITE_SYSTEM = (
     "5. 服装/裸露状态按当前提示词和修改要求如实写清；不要无故添加或删除语义。\n"
     "6. 如果启用了角色 LoRA，不要生成角色发色、瞳色、发型、脸、身体特征或角色名；"
     "这些交给 LoRA 和激活标签，只写剧情画面。\n"
-    "7. 用户提供的【用户规则】若出现，按规则理解并遵守。\n"
+    "7. " + CHARACTER_GROUPING + "\n"
+    "8. 用户提供的【用户规则】若出现，按规则理解并遵守。\n"
 )
 
 

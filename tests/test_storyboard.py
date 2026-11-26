@@ -8,7 +8,6 @@ from comfyui_generator.core.storyboard import (
     build_storyboard_messages,
     extract_premise_beats,
     generate_storyboard,
-    normalize_shot_casts,
     normalize_shots,
     parse_character_profiles,
     premise_from_json,
@@ -158,12 +157,6 @@ def test_extract_premise_beats():
     beats = extract_premise_beats("1. 第一个\n2. 第二个\n无关")
     assert beats == ["第一个", "第二个"]
     assert extract_premise_beats("没有编号") == []
-
-
-def test_normalize_shot_casts_noop():
-    shots = [{"cast": "1girl"}]
-    assert normalize_shot_casts(shots) is None
-    assert shots[0]["cast"] == "1girl"
 
 
 def test_parse_character_profiles():

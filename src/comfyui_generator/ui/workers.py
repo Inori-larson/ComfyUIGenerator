@@ -7,6 +7,7 @@ Signals cross back to the GUI thread via Qt's queued connections.
 from __future__ import annotations
 
 import copy
+import hashlib
 import os
 import re
 import time
@@ -43,6 +44,26 @@ from comfyui_generator.core.trace import (
 )
 
 
+class LlamaServerWorker(QThread):
+    done = Signal(list)
+    failed = Signal(str)
+    log = Signal(str)
+
+    def __init__(self, cfg: AppConfig):
+        super().__init__()
+        self.cfg = cfg
+
+    def run(self) -> None:
+        try:
+            from comfyui_generator.core.ollama import OllamaClient, OllamaService
+            state = OllamaService(self.cfg).ensure()
+            self.log.emit("本地模型服务：%s" % state)
+            models = OllamaClient(self.cfg.ollama.base_url).model_names()
+            self.done.emit(models)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class ConnectWorker(QThread):
     connected = Signal(dict)
     failed = Signal(str)
@@ -72,7 +93,7 @@ class ConnectWorker(QThread):
                 models = OllamaClient(self.cfg.ollama.base_url).model_names()
                 ollama_ok = True
             except Exception as exc:
-                self.log.emit("Ollama: %s" % exc)
+                self.log.emit("本地模型: %s" % exc)
             self.connected.emit({
                 "state": state,
                 "version": version,
@@ -142,6 +163,8 @@ class PromptWorker(QThread):
         self.style_positive = style_positive
         self.strip_appearance = strip_appearance
         self.use_external = use_external
+        self._heal_report: dict[str, Any] | None = None
+        self._generated_beats: Any = None
 
     def cancel(self) -> None:
         self.requestInterruption()
@@ -296,27 +319,127 @@ class PromptWorker(QThread):
         except Exception as exc:
             self.log.emit("Danbooru 范例跳过（不影响生成）：%s" % exc)
 
+    def _prepare_story_shots(self, shots: list[dict[str, Any]]) -> None:
+        self._auto_repair_story(shots)
+        self._annotate_contract_findings(shots)
+        self._annotate_outline_findings(shots)
+        from comfyui_generator.core.cast_grouping import detect_cast_grouping
+        per_shot = detect_cast_grouping(shots)
+        for index, findings in per_shot.items():
+            if 0 <= index < len(shots):
+                shots[index].setdefault("findings", []).extend(findings)
+        self._annotate_stall_findings(shots)
+        self._annotate_fluid_findings(shots)
+        self._annotate_damage_findings(shots)
+        self._batch_repair_advisory(shots)
+
+    def _story_llm_client(self):
+        if self.use_external:
+            return (ExternalLLMClient(self.cfg.external_llm),
+                    resolve_external_model(self.cfg.external_llm, self.model))
+        return (OllamaClient(self.cfg.ollama.base_url),
+                self.model or self.cfg.ollama.default_model)
+
+    def _auto_heal_story(self, shots: list[dict[str, Any]]) -> None:
+        self._heal_report = None
+        from comfyui_generator.core.auto_heal import (
+            build_heal_requirement, collect_blocking, new_report,
+            record_round, summarize_findings,
+        )
+
+        cfg = getattr(self.cfg, "auto_heal", None)
+        if cfg is None or not bool(getattr(cfg, "enabled", False)):
+            return
+        rounds = max(0, min(3, int(getattr(cfg, "max_rounds", 1) or 0)))
+        if rounds <= 0 or self.story_options is None:
+            return
+        blocking = collect_blocking(shots)
+        if not blocking:
+            return
+
+        client, model = self._story_llm_client()
+        report = new_report(self.text, len(shots), model)
+        best = [dict(shot) for shot in shots]
+        best_beats = getattr(self, "_generated_beats", None)
+        best_blocking = blocking
+        for round_index in range(1, rounds + 1):
+            if self._canceled():
+                raise InterruptedError
+            options = copy.copy(self.story_options)
+            options.setting = "\n".join(
+                part for part in (options.setting,
+                                  build_heal_requirement(best_blocking, len(best)))
+                if part)
+            options.on_contract = lambda beats: setattr(
+                self, "_generated_beats", beats)
+            try:
+                candidate = generate_storyboard(client, self.text, options)
+            except Exception as exc:
+                self.log.emit("自动修复第 %d 轮重写失败：%s"
+                              % (round_index, str(exc)[:200]))
+                break
+            self._prepare_story_shots(candidate)
+            remaining = collect_blocking(candidate)
+            accepted = len(remaining) < len(best_blocking)
+            record_round(report, round_index=round_index, before=best_blocking,
+                         after=remaining, accepted=accepted)
+            self.log.emit(
+                "自动修复第 %d 轮：阻塞项 %d → %d%s。" % (
+                    round_index, len(best_blocking), len(remaining),
+                    "，已采用" if accepted else "，保留上一版"))
+            trace_event("auto_heal.round", {
+                "round": round_index,
+                "before": summarize_findings(best_blocking),
+                "after": summarize_findings(remaining),
+                "accepted": accepted,
+            })
+            if accepted:
+                best = candidate
+                best_beats = getattr(self, "_generated_beats", None)
+                best_blocking = remaining
+            else:
+                self._generated_beats = best_beats
+            if not remaining:
+                break
+        shots[:] = best
+        self._generated_beats = best_beats
+        self._heal_report = report
+
     def _finalize_story_shots(self, shots, local_client, local_model, event):
         if self._canceled():
             raise InterruptedError
-        self._auto_repair_story(shots)
+        self._prepare_story_shots(shots)
+        self._auto_heal_story(shots)
+        if self._canceled():
+            raise InterruptedError
         all_tags: list[str] = []
         for shot in shots:
             all_tags += self._split_tags(shot.get("prompt", ""))
         mapping = (self._translate_map(local_client, local_model, all_tags)
                    if local_model else {})
-        if self._canceled():
-            raise InterruptedError
         for shot in shots:
             zh_tags = [mapping.get(tag, tag)
                        for tag in self._split_tags(shot.get("prompt", ""))]
             shot["prompt_zh"] = "，".join(zh_tags)
-        self._annotate_contract_findings(shots)
-        self._annotate_stall_findings(shots)
-        self._annotate_fluid_findings(shots)
+            shot["prompt_fingerprint"] = self._prompt_fingerprint(shot)
+        heal_cfg = getattr(self.cfg, "auto_heal", None)
+        if (self._heal_report is not None and heal_cfg is not None
+                and bool(getattr(heal_cfg, "archive", True))):
+            from comfyui_generator.core.auto_heal import archive_report
+            output_root = (getattr(self.cfg.comfy, "output_dir", "")
+                           or str(self.cfg.root))
+            path = archive_report(output_root, self._heal_report)
+            self.log.emit("自动修复证据已归档：%s" % path)
+            trace_event("auto_heal.archived", {
+                "path": path, "resolved": self._heal_report.get("resolved")})
         self._summarise_tag_findings(shots)
         trace_event(event, shots)
         self.story_ready.emit(shots)
+
+    @staticmethod
+    def _prompt_fingerprint(shot: dict[str, Any]) -> str:
+        text = str(shot.get("prompt") or "")
+        return hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
 
     def _auto_repair_story(self, shots: list[dict[str, Any]]) -> None:
         tagdb_cfg = getattr(self.cfg, "tagdb", None)
@@ -361,31 +484,74 @@ class PromptWorker(QThread):
         beats = getattr(self, "_generated_beats", None)
         if not beats:
             self.log.emit("剧情契约：模型未声明 beat 结构，跳过校验。")
+            for shot in shots:
+                shot["contract_status"] = "undeclared"
             return
         try:
             from comfyui_generator.core.story_contract import (
-                StoryContract, validate_contract,
+                CONTRACT_SCOPE, StoryContract, validate_contract,
             )
 
             contract = StoryContract(beats=[b for b in beats
                                              if isinstance(b, dict)])
             if not contract.has_beats:
                 self.log.emit("剧情契约：模型声明的 beat 不足 2 个，跳过校验。")
+                for shot in shots:
+                    shot["contract_status"] = "undeclared"
                 return
             findings = validate_contract(shots, contract)
             if not findings:
                 self.log.emit("剧情契约校验通过：%d 个 beat 全覆盖且保序。"
                               % len(contract.beats))
+                for shot in shots:
+                    shot["contract_status"] = "valid"
                 return
             for finding in findings:
                 self.log.emit("剧情契约 · [%s] %s" % (
                     finding.get("severity"), finding.get("message")))
-            trace_event("contract.check", {"findings": findings})
-            for shot in shots:
-                existing = shot.setdefault("findings", [])
-                existing.extend(findings)
+            trace_event("contract.check", {
+                "scope": CONTRACT_SCOPE, "findings": findings})
+            trace_event("contract.rewrite_requested", {
+                "reason": "contract findings require an AI outline rewrite",
+                "beats": contract.beats,
+                "findings": findings,
+            })
+            self.log.emit("剧情契约：未通过校验，需 AI 重出大纲；应用侧不改写提示词。")
+            for finding in findings:
+                index = finding.get("shot_index")
+                if not isinstance(index, int) or not (0 <= index < len(shots)):
+                    index = len(shots) - 1
+                if index < 0:
+                    continue
+                shot = shots[index]
+                shot.setdefault("findings", []).append(finding)
+                shot.setdefault("contract_findings", []).append(finding)
+                shot["contract_status"] = "invalid"
+                if finding.get("severity") == "P1":
+                    shot["ready"] = False
         except Exception as exc:
             self.log.emit("剧情契约校验跳过：%s" % str(exc)[:160])
+
+    def _annotate_outline_findings(self, shots: list[dict[str, Any]]) -> None:
+        try:
+            from comfyui_generator.core.outline_guard import detect_outline_pacing
+
+            per_shot = detect_outline_pacing(shots)
+            if not per_shot:
+                return
+            for index, findings in per_shot.items():
+                if not (0 <= index < len(shots)):
+                    continue
+                shot = shots[index]
+                shot.setdefault("findings", []).extend(findings)
+                shot.setdefault("outline_findings", []).extend(findings)
+                if any(f.get("severity") == "P1" for f in findings):
+                    shot["ready"] = False
+            trace_event("outline.rewrite_requested", {"findings": per_shot})
+            self.log.emit("大纲节奏提示：%d 镜需 AI 在大纲阶段复核，应用侧不改写提示词。"
+                          % len(per_shot))
+        except Exception as exc:
+            self.log.emit("大纲节奏检测跳过：%s" % str(exc)[:160])
 
     def _annotate_stall_findings(self, shots: list[dict[str, Any]]) -> None:
         try:
@@ -413,6 +579,59 @@ class PromptWorker(QThread):
                 self.log.emit("体液接续提示：%d 镜体液无故消失。" % len(per_shot))
         except Exception as exc:
             self.log.emit("体液接续检测跳过：%s" % str(exc)[:160])
+
+    def _annotate_damage_findings(self, shots: list[dict[str, Any]]) -> None:
+        try:
+            from comfyui_generator.core.damage_guard import detect_damage_restored
+
+            per_shot = detect_damage_restored(shots)
+            for index, findings in per_shot.items():
+                existing = shots[index].setdefault("findings", [])
+                existing.extend(findings)
+            if per_shot:
+                self.log.emit("破损复原提示：%d 镜破损衣物无故变回完整。"
+                              % len(per_shot))
+        except Exception as exc:
+            self.log.emit("破损连续性检测跳过：%s" % str(exc)[:160])
+
+    def _batch_repair_advisory(self, shots: list[dict[str, Any]]) -> None:
+        tagdb_cfg = getattr(self.cfg, "tagdb", None)
+        if tagdb_cfg is not None and not bool(
+                getattr(tagdb_cfg, "enabled", True)):
+            return
+        if not bool(getattr(tagdb_cfg, "auto_repair_advisory", True)):
+            return
+        try:
+            from comfyui_generator.core.prompt_repair import batch_repair_advisory
+
+            db = database_from_config(tagdb_cfg)
+            if self.use_external:
+                client = ExternalLLMClient(self.cfg.external_llm)
+                model = resolve_external_model(self.cfg.external_llm, self.model)
+            else:
+                client = OllamaClient(self.cfg.ollama.base_url)
+                model = self.model or self.cfg.ollama.default_model
+            report = batch_repair_advisory(
+                shots, db, client, model,
+                options=options_from_config(tagdb_cfg), log=self.log.emit)
+            if report.repaired:
+                self.log.emit("结构提示已批量修复 %d 镜：%s" % (
+                    len(report.repaired), ",".join(report.repaired[:30])))
+                trace_event("tagdb.advisory_repaired", {
+                    "repaired": report.repaired,
+                    "unresolved": report.unresolved})
+            for shot in shots:
+                shot["findings"] = [
+                    f for f in (shot.get("findings") or [])
+                    if f.get("kind") not in ("fluid_discontinuity",
+                                             "fluid_state_static",
+                                              "damage_restored", "shot_stall")]
+            self._annotate_stall_findings(shots)
+
+        except Exception as exc:
+
+            self.log.emit("结构提示批量修复跳过：%s" % str(exc)[:160])
+
 
     def _summarise_tag_findings(self, shots: list[dict[str, Any]]) -> None:
         blocking = [s for s in shots if s.get("ready") is False]
@@ -768,3 +987,44 @@ class AutoTranslateWorker(QThread):
             client.unload(self.model)
         except Exception:
             pass
+
+
+class AdvisoryRepairWorker(QThread):
+    done = Signal(dict)
+    failed = Signal(str)
+    log = Signal(str)
+
+    def __init__(self, cfg: AppConfig, shots: list[dict[str, Any]],
+                 model: str, use_external: bool):
+        super().__init__()
+        self.cfg = cfg
+        self.shots = shots
+        self.model = model
+        self.use_external = use_external
+
+    def run(self) -> None:
+        try:
+            from comfyui_generator.core.prompt_repair import batch_repair_advisory
+            from comfyui_generator.core.tag_validation import (
+                database_from_config, options_from_config,
+            )
+
+            if self.use_external:
+                client = ExternalLLMClient(self.cfg.external_llm)
+                model = resolve_external_model(self.cfg.external_llm, self.model)
+            else:
+                client = OllamaClient(self.cfg.ollama.base_url)
+                model = self.model or self.cfg.ollama.default_model
+            report = batch_repair_advisory(
+                self.shots,
+                database_from_config(self.cfg.tagdb),
+                client,
+                model,
+                options=options_from_config(self.cfg.tagdb),
+                log=self.log.emit)
+            self.done.emit({
+                "repaired": report.repaired,
+                "unresolved": report.unresolved,
+            })
+        except Exception as exc:
+            self.failed.emit(str(exc))

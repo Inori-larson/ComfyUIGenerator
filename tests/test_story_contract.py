@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from comfyui_generator.core.story_contract import (
-    StoryContract, contract_from_generation, validate_contract,
+    CONTRACT_SCOPE, StoryContract, contract_from_generation, validate_contract,
 )
 
 
@@ -61,3 +61,53 @@ def test_order_violation_and_unknown_beat():
 
 def test_no_beats_declared_means_no_validator_opinion():
     assert validate_contract([{"id": "01"}], StoryContract()) == []
+
+
+def test_contract_scope_declares_its_limits():
+    assert "entity/clothing state" in CONTRACT_SCOPE["not_validated"]
+    assert "fluid timeline" in CONTRACT_SCOPE["not_validated"]
+    assert "request AI outline rewrite" in CONTRACT_SCOPE["on_findings"]
+
+
+def test_findings_are_scoped_to_the_relevant_shot():
+    contract = contract_from_generation(
+        {"beats": [{"id": "B1"}, {"id": "B2"}, {"id": "B3"}]})
+    shots = [
+        {"id": "01", "beat_id": "B2"},
+        {"id": "02", "beat_id": "B1"},
+        {"id": "03", "beat_id": "B1"},
+    ]
+    order = next(f for f in validate_contract(shots, contract)
+                 if f["kind"] == "contract_order_violation")
+    assert order["scope"] == "shot"
+    assert order["shot_index"] == 1
+    assert order["shot_id"] == "02"
+
+
+def test_project_level_and_ending_findings_are_scoped():
+    contract = contract_from_generation(
+        {"beats": [{"id": "B1"}, {"id": "B2"}, {"id": "B3"}]})
+    shots = [
+        {"id": "01", "beat_id": "B1"},
+        {"id": "02", "beat_id": "B1"},
+        {"id": "03", "beat_id": "B1"},
+    ]
+    findings = validate_contract(shots, contract)
+    missing = next(f for f in findings if f["kind"] == "contract_event_missing")
+    assert missing["scope"] == "contract"
+    assert missing["shot_index"] is None
+    ending = next(f for f in findings if f["kind"] == "contract_ending_mismatch")
+    assert ending["scope"] == "shot"
+    assert ending["shot_index"] == 2
+    assert ending["shot_id"] == "03"
+
+
+def test_unknown_beat_finding_points_at_the_offending_shot():
+    contract = contract_from_generation(
+        {"beats": [{"id": "B1"}, {"id": "B2"}]})
+    finding = validate_contract(
+        [{"id": "01", "beat_id": "B1"}, {"id": "02", "beat_id": "B9"}],
+        contract)[0]
+    assert finding["kind"] == "contract_unknown_beat"
+    assert finding["shot_index"] == 1
+    assert finding["shot_id"] == "02"

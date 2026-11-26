@@ -16,8 +16,8 @@ from typing import Any
 
 from comfyui_generator.core.comfy import ComfyClient
 from comfyui_generator.core.config import AppConfig, ComfyConfig
+from comfyui_generator.core.subprocess_util import CREATE_NO_WINDOW, run_hidden
 
-CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 CREATE_NEW_PROCESS_GROUP = 0x00000200 if os.name == "nt" else 0
 
 
@@ -29,8 +29,8 @@ def _pid_on_port(port: int) -> int | None:
     if os.name != "nt":
         return None
     try:
-        out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True,
-                             text=True, timeout=10).stdout
+        out = run_hidden(["netstat", "-ano", "-p", "TCP"], capture_output=True,
+                         text=True, timeout=10).stdout
     except Exception:
         return None
     needle = f":{port}"
@@ -44,8 +44,8 @@ def _pid_on_port(port: int) -> int | None:
 
 def _kill_tree(pid: int) -> None:
     if os.name == "nt":
-        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                       capture_output=True, text=True, timeout=15)
+        run_hidden(["taskkill", "/PID", str(pid), "/T", "/F"],
+                   capture_output=True, text=True, timeout=15)
     else:  # pragma: no cover
         try:
             os.kill(pid, 15)

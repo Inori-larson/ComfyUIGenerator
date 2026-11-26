@@ -12,6 +12,17 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+CONTRACT_SCOPE = {
+    "validates": ["beat coverage", "beat order", "final beat reached"],
+    "declared_by": "AI storyboard beats",
+    "not_validated": [
+        "entity/clothing state", "character presence",
+        "fluid timeline", "scene continuity", "NSFW beat semantics",
+    ],
+    "on_findings": "preserve finding, request AI outline rewrite",
+}
+
+
 @dataclass
 class StoryContract:
     beats: list[dict[str, Any]] = field(default_factory=list)
@@ -43,42 +54,55 @@ def validate_contract(shots: list[dict[str, Any]],
         return []
     declared = contract.beat_ids
     known = set(declared)
-    sequence: list[str] = []
-    for shot in shots:
+    sequence: list[tuple[int, str, str]] = []
+    for index, shot in enumerate(shots):
         beat_id = str(shot.get("beat_id") or "").strip()
         if beat_id and beat_id in known:
-            sequence.append(beat_id)
+            sequence.append((index, str(shot.get("id") or ""), beat_id))
         elif beat_id:
             return [{
                 "kind": "contract_unknown_beat",
                 "severity": "P2",
+                "scope": "shot",
+                "shot_index": index,
+                "shot_id": str(shot.get("id") or ""),
                 "message": "镜头引用了未声明的 beat：%s" % beat_id,
                 "evidence": beat_id,
             }]
     findings: list[dict[str, Any]] = []
-    used = set(sequence)
+    used = {beat_id for _index, _shot_id, beat_id in sequence}
     for beat_id in declared:
         if beat_id not in used:
             findings.append({
                 "kind": "contract_event_missing",
                 "severity": "P1",
+                "scope": "contract",
+                "shot_index": None,
+                "shot_id": "",
                 "message": "AI 声明的 beat 没有对应镜头：%s" % beat_id,
                 "evidence": beat_id,
             })
     ranks = {beat_id: index for index, beat_id in enumerate(declared)}
     for previous, current in zip(sequence, sequence[1:]):
-        if ranks[current] < ranks[previous]:
+        if ranks[current[2]] < ranks[previous[2]]:
             findings.append({
                 "kind": "contract_order_violation",
                 "severity": "P2",
-                "message": "beat 顺序回退：%s → %s" % (previous, current),
+                "scope": "shot",
+                "shot_index": current[0],
+                "shot_id": current[1],
+                "message": "beat 顺序回退：%s → %s" % (previous[2], current[2]),
                 "evidence": "",
             })
             break
-    if sequence and sequence[-1] != declared[-1]:
+    if sequence and sequence[-1][2] != declared[-1]:
+        last_index, last_id, _last_beat = sequence[-1]
         findings.append({
             "kind": "contract_ending_mismatch",
             "severity": "P1",
+            "scope": "shot",
+            "shot_index": last_index,
+            "shot_id": last_id,
             "message": "末镜没有落在最后一个 beat：%s" % declared[-1],
             "evidence": declared[-1],
         })

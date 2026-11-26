@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Callable
+
+from comfyui_generator.core.subprocess_util import run_hidden
 
 WARN_SCORE = 0.55
 BAD_SCORE = 0.40
@@ -63,7 +64,7 @@ def ensure_vision_packages(python: str, target: str | Path,
         python, "-m", "pip", "install", "--no-deps", "--target", str(target),
         "open_clip_torch", "ftfy", "regex", "timm", "wcwidth",
     ]
-    proc = subprocess.run(
+    proc = run_hidden(
         cmd, capture_output=True, text=True, encoding="utf-8",
         errors="replace", timeout=timeout)
     if proc.returncode != 0:
@@ -92,7 +93,7 @@ def run_similarity(python: str, root: Path, base_dir: str | Path | None,
     env["PYTHONPATH"] = str(packages) + (
         os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     env.setdefault("PYTHONIOENCODING", "utf-8")
-    proc = subprocess.run(
+    proc = run_hidden(
         [python or sys.executable, str(runner), json.dumps(payload, ensure_ascii=False)],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
         timeout=timeout, env=env)

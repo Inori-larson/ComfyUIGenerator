@@ -3,6 +3,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ["CUI_NO_AUTOCONNECT"] = "1"
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from comfyui_generator.core.jobs import Task
@@ -12,6 +13,22 @@ from comfyui_generator.ui.main_window import MainWindow
 def _window():
     app = QApplication.instance() or QApplication([])
     return app, MainWindow()
+
+
+def test_select_all_shots_marks_every_row():
+    _app, window = _window()
+    shots = [{"id": "%02d" % i, "name": "shot_%02d" % i,
+              "prompt": "1girl, smile"} for i in range(1, 5)]
+    window._fill_shot_table(shots)
+    window.select_all_shots()
+    rows = sorted({index.row()
+                   for index in window.shot_table.selectedIndexes()})
+    assert rows == [0, 1, 2, 3]
+    assert all(window.shot_table.item(row, 0).checkState() == Qt.CheckState.Checked
+               for row in range(4))
+    assert window._selected_shot_ids == ["01", "02", "03", "04"]
+    assert [s["id"] for s in window._collect_shots(True)] == [
+        "01", "02", "03", "04"]
 
 
 def test_output_entries_carry_shot_id():

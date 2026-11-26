@@ -7,11 +7,12 @@ AI rewrite loop turns them into new prompt wording elsewhere.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from comfyui_generator.core.entity_state import OPEN, WORN, parse_state
-from comfyui_generator.core.tagdb import TagDatabase
+from comfyui_generator.core.mechanical import split_tags
 from comfyui_generator.core.tagdb import TagDatabase
 
 
@@ -50,14 +51,79 @@ def _score(tags: dict[str, float], names: tuple[str, ...]) -> float:
     return best
 
 
+def _has_tag(text: str, token: str) -> bool:
+    return bool(re.search(
+        r"(?<![a-z0-9])" + re.escape(token) + r"(?![a-z0-9])", text))
+
+
+def _state_findings(actual: dict[str, float], shot_prompt: str,
+                    db: TagDatabase, th: VerifyThresholds,
+                    expected_scene: str = "") -> list[RenderFinding]:
+    findings: list[RenderFinding] = []
+    prompt_text = str(shot_prompt or "").lower().replace("_", " ")
+    fluid_tags = [t for t in db.layers.get("fluid_tags", []) if t]
+    declared = {tag for tag in fluid_tags if _has_tag(prompt_text, tag)}
+    detected = {
+        tag for tag in fluid_tags
+        if float(actual.get(tag, 0.0)) >= th.general
+    }
+
+    def related(tag: str, others: set[str]) -> bool:
+        return any(tag in other or other in tag for other in others)
+
+    if declared and not detected:
+        findings.append(RenderFinding(
+            "render_fluid_missing", "P2",
+            "分镜声明的体液均未在成品中检出；若大纲本就没要求可见则属正常",
+            ", ".join(sorted(declared)[:6]), "none", sorted(declared)[:6]))
+    for tag in sorted(detected - declared):
+        if related(tag, declared):
+            continue
+        findings.append(RenderFinding(
+            "render_fluid_unexpected", "P2",
+            "成品检出分镜未声明的体液；若大纲就是这样设计则完全允许、无需修改",
+            "", tag, [tag]))
+
+    scene_tokens = [
+        token.strip().lower() for token in split_tags(expected_scene)
+        if token.strip()
+    ]
+    if scene_tokens and not any(
+            float(actual.get(token, 0.0)) >= th.general
+            for token in scene_tokens):
+        findings.append(RenderFinding(
+            "render_scene_missing", "P2",
+            "成品未检出 continuity 场景锚点；若大纲已换场景则属正常",
+            ", ".join(scene_tokens[:4]), "none", scene_tokens[:4]))
+    return findings
+
+
 def _people_count(tags: dict[str, float], female: bool, threshold: float) -> int:
-    if female:
-        single, multi = "1girl", ("2girls", "3girls", "multiple girls", "6+girls")
-    else:
-        single, multi = "1boy", ("2boys", "3boys", "multiple boys", "6+boys")
-    if _score(tags, multi) >= threshold:
-        return 2
-    return 1 if float(tags.get(single, 0.0)) >= threshold else 0
+    """Highest explicitly tagged person count above threshold.
+
+    Generic booru count tags only (1girl / 2boys / multiple women / 6+girls).
+    Unknown counts return 0 so the caller cannot assume an intended count.
+    """
+    words = ("girl", "woman", "female") if female else ("boy", "man", "male")
+    best = 0
+    for name, score in tags.items():
+        try:
+            if float(score) < threshold:
+                continue
+        except (TypeError, ValueError):
+            continue
+        label = str(name or "").strip().lower().replace("_", " ")
+        if not label:
+            continue
+        for word in words:
+            match = re.fullmatch(r"(\d+)\s*\+?\s*" + word + r"s?", label)
+            if match:
+                best = max(best, int(match.group(1)))
+                break
+            if label == "multiple " + word + "s":
+                best = max(best, 2)
+                break
+    return best
 
 
 def _cast_findings(actual: dict[str, float], state,
@@ -68,7 +134,8 @@ def _cast_findings(actual: dict[str, float], state,
     multiple = _score(actual, ("multiple_views", "duo", "group"))
     wants_boy = state.boys > 0
 
-    if girls == 0:
+    expects_girl = state.girls > 0 or state.solo
+    if expects_girl and girls == 0:
         findings.append(RenderFinding(
             "render_cast_missing_girl", "P1",
             "成品未检出明确女性角色", "1girl", f"girl_score={girls}",
@@ -78,7 +145,18 @@ def _cast_findings(actual: dict[str, float], state,
             "render_cast_missing_boy", "P1",
             "分镜要求男性参与，但成品未检出男性角色",
             "1boy", f"boy_score={boys}", ["1boy"]))
-    if (not wants_boy) and boys >= 1 and (state.solo or state.boys == 0):
+    expected_girls = max(state.girls, 1 if state.solo else 0)
+    if expected_girls > 0 and girls > expected_girls:
+        findings.append(RenderFinding(
+            "render_cast_extra_girl", "P1",
+            "成品检出的女性人数多于分镜要求（疑似串台或多出角色）",
+            f"{expected_girls}girl", f"{girls}girls detected", ["1girl"]))
+    if state.boys > 0 and boys > state.boys:
+        findings.append(RenderFinding(
+            "render_cast_extra_boy", "P1",
+            "成品检出的男性人数多于分镜要求（疑似串台或多出角色）",
+            f"{state.boys}boy", f"{boys}boys detected", ["1boy"]))
+    elif (not wants_boy) and boys >= 1 and (state.solo or state.boys == 0):
         findings.append(RenderFinding(
             "render_cast_extra_boy", "P1",
             "分镜为女主独处，但成品检出男性角色（服装/人物串台）",
@@ -158,8 +236,9 @@ def _layer_findings(actual: dict[str, float], state, db: TagDatabase,
 
 
 def verify_render(shot_prompt: str, tagger_result: dict[str, Any],
-                  db: TagDatabase,
-                  thresholds: VerifyThresholds | None = None) -> list[dict[str, Any]]:
+                   db: TagDatabase,
+                   thresholds: VerifyThresholds | None = None,
+                   expected_scene: str = "") -> list[dict[str, Any]]:
     th = thresholds or VerifyThresholds()
     actual = dict(tagger_result.get("general") or {})
     if not actual:
@@ -167,4 +246,5 @@ def verify_render(shot_prompt: str, tagger_result: dict[str, Any],
     state = parse_state(shot_prompt, db.layer_vocab())
     findings = _cast_findings(actual, state, th)
     findings += _layer_findings(actual, state, db, th)
+    findings += _state_findings(actual, shot_prompt, db, th, expected_scene)
     return [f.as_dict() for f in findings]

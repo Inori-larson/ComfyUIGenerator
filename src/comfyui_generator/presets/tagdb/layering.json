@@ -55,6 +55,7 @@
     "slid off", "open shirt", "removing", "taking off", "unfastening",
     "unbuttoning", "undressing", "pulling off", "partially removed",
     "pulled aside", "pushed aside", "aside",
+    "torn", "ripped", "cut", "pulled down", "down",
     "open clothes", "wardrobe malfunction"
   ],
   "lifted_markers": [
@@ -67,8 +68,8 @@
     "on table", "on bed", "placed on", "placed down",
     "discarded", "no jacket", "no shirt",
     "no skirt", "no pants", "no dress", "no uniform", "no bra", "no panties",
-    "no underwear", "no shoes", "no heels", "bare feet", "barefoot",
-    "stripped"
+    "no underwear", "no shoes", "no heels", "no pantyhose", "no tights",
+    "no stockings", "bare feet", "barefoot", "stripped"
   ],
   "skin_feature_allowlist": [
     "medium breasts", "large breasts", "small breasts", "huge breasts",
@@ -86,6 +87,10 @@
     "pantyhose", "black pantyhose", "white pantyhose", "tights",
     "fishnet pantyhose", "fishnets", "leggings", "stockings"
   ],
+  "legwear_open_markers": [
+    "torn", "ripped", "cut", "pulled aside", "pushed aside",
+    "pulled down", "down", "hiked up", "lifted", "open"
+  ],
   "fluid_tags": [
     "cum", "semen", "ejaculation", "pussy juice", "squirt",
     "female ejaculation", "saliva", "precum", "cum in mouth",
@@ -94,5 +99,25 @@
   "fluid_cleanup_markers": [
     "cleaning", "cleaned", "clean up", "cleanup", "wipe", "wiped",
     "tissue", "shower", "bath", "washing", "washed", "after cleanup"
+  ],
+  "damage_markers": [
+    "torn", "ripped", "cut", "cut off", "slashed", "damaged",
+    "torn clothes", "ripped clothes"
+  ],
+  "replacement_markers": [
+    "new pantyhose", "fresh pantyhose", "new clothes", "fresh clothes",
+    "changed clothes", "changed into", "replaced", "replacement",
+    "put on new", "clean pantyhose"
+  ],
+  "garment_categories": [
+    "outer_top", "outer_bottom", "onepiece", "inner_top",
+    "inner_bottom", "legwear", "footwear", "accessory"
+  ],
+  "removable_categories": [
+    "outer_top", "outer_bottom", "onepiece"
+  ],
+  "removable_accessories": [
+    "white gloves", "gloves", "belt", "epaulettes", "epaulette",
+    "cape", "red cape", "hat", "cap", "scarf"
   ]
 }

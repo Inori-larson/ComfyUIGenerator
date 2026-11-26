@@ -8,11 +8,13 @@ LLM produces the new prompt and the renderer re-runs it with the same seed.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from comfyui_generator.core.repair_shared import (
+    MINIMAL_FIX_SYSTEM, constrain_to_findings,
+)
 from comfyui_generator.core.rewrite import rewrite_shot_prompt
 from comfyui_generator.core.tagdb import load_tag_database
 from comfyui_generator.core.tagger import run_tagger, tagger_ready
@@ -25,19 +27,6 @@ class VerifyDecision:
     findings: list[dict[str, Any]] = field(default_factory=list)
     new_prompt: str = ""
     device: str = ""
-
-
-MINIMAL_FIX_SYSTEM = (
-    "You repair a single booru image prompt that failed an objective render check. "
-    "Output only JSON {\"prompt\": \"...\"} with English comma-separated Danbooru tags. "
-    "Make the MINIMAL change required to fix exactly the listed findings: adjust only the "
-    "cast/count tags or clothing-layer/nudity tags that are wrong. "
-    "Keep every other tag unchanged: do NOT add new actions, poses, camera angles, body "
-    "features, characters, settings, fluids, or extra detail, and do NOT remove correct tags. "
-    "Preserve the original scene, action, characters, and composition. Stay close to the "
-    "original tag count. If a required person/state is missing, add the standard tag for it "
-    "(e.g. 1boy / nude male / faceless male, or nipples / bare breasts); if a tag must not be "
-    "visible under closed outer clothing, remove that inner-wear tag. No prose, no refusal.")
 
 
 class RenderVerifier:
@@ -100,10 +89,11 @@ class RenderVerifier:
             return {}
         return results[0]
 
-    def verify(self, shot_prompt: str, tagger_result: dict[str, Any]
-               ) -> list[dict[str, Any]]:
+    def verify(self, shot_prompt: str, tagger_result: dict[str, Any],
+               expected_scene: str = "") -> list[dict[str, Any]]:
         return verify_render(shot_prompt, tagger_result,
-                             self.database(), self._thresholds())
+                             self.database(), self._thresholds(),
+                             expected_scene=expected_scene)
 
     @staticmethod
     def rewrite_instruction(findings: list[dict[str, Any]]) -> str:
@@ -131,29 +121,10 @@ class RenderVerifier:
 
     def _constrain(self, rewritten: str, original: str,
                    findings: list[dict[str, Any]]) -> str:
-        """Keep only tag changes justified by the finding text.
+        return constrain_to_findings(rewritten, original, findings)
 
-        No vocabulary whitelist: a newly added tag survives only if the
-        finding itself mentioned that tag as missing/expected evidence.
-        """
-        from comfyui_generator.core.mechanical import dedupe_tags, split_tags
-
-        orig = {t.strip().lower() for t in split_tags(original)}
-        justification = " ".join(
-            " ".join(str(f.get(key) or "") for key in ("expected", "actual", "evidence", "message"))
-            for f in findings).lower()
-        kept: list[str] = []
-        for tag in dedupe_tags(split_tags(rewritten)):
-            key = tag.strip().lower()
-            if key in orig:
-                kept.append(tag)
-                continue
-            if key and re.search(r"(?<![a-z0-9])" + re.escape(key) + r"(?![a-z0-9])",
-                                 justification):
-                kept.append(tag)
-        return ", ".join(kept) or original
-
-    def evaluate(self, image_path: str, shot_prompt: str) -> VerifyDecision:
+    def evaluate(self, image_path: str, shot_prompt: str,
+                 expected_scene: str = "") -> VerifyDecision:
         try:
             tagger_result = self.interrogate(image_path)
         except Exception as exc:
@@ -161,7 +132,7 @@ class RenderVerifier:
             return VerifyDecision(accepted=True)
         if not tagger_result or tagger_result.get("error"):
             return VerifyDecision(accepted=True)
-        findings = self.verify(shot_prompt, tagger_result)
+        findings = self.verify(shot_prompt, tagger_result, expected_scene)
         device = str(tagger_result.get("device") or "")
         blocking = [f for f in findings if f.get("severity") == "P1"]
         if not blocking:

@@ -64,8 +64,7 @@ from comfyui_generator.core.style_profile import (
 )
 from comfyui_generator.core.storyboard import (
     StoryboardOptions, build_storyboard_messages,
-    extract_premise_beats,
-    normalize_shot_casts, parse_character_profiles,
+    extract_premise_beats, parse_character_profiles,
     premise_from_json, shots_from_json, slugify,
 )
 from comfyui_generator.core.tag_cache import load_tag_cache, update_tag_cache
@@ -91,7 +90,7 @@ from comfyui_generator.ui.widgets import (
     MultiLinePlainTextEdit, SearchComboBox, WrappingTabs,
 )
 from comfyui_generator.ui.workers import (
-    AssetsWorker, AutoTranslateWorker, ConnectWorker,
+    AdvisoryRepairWorker, AssetsWorker, AutoTranslateWorker, ConnectWorker,
     ExpansionWorker, LoraTagsWorker, PromptWorker, RenderWorker,
     TagTranslateWorker)
 
@@ -346,6 +345,7 @@ class MainWindow(QMainWindow):
         self.connect_worker: ConnectWorker | None = None
         self.assets_worker: AssetsWorker | None = None
         self.prompt_worker: PromptWorker | None = None
+        self.advisory_repair_worker: AdvisoryRepairWorker | None = None
         self._source_suffix = ""
         self._project_name = ""
         self.render_worker: RenderWorker | None = None
@@ -816,6 +816,9 @@ class MainWindow(QMainWindow):
         self.btn_rewrite_shot = QPushButton("改写选中镜…")
         self.btn_rewrite_shot.clicked.connect(self.rewrite_selected_shot)
         layout.addWidget(self.btn_rewrite_shot)
+        self.btn_repair_project = QPushButton("AI 修复当前项目提示词")
+        self.btn_repair_project.clicked.connect(self.repair_current_project)
+        layout.addWidget(self.btn_repair_project)
 
         self.btn_shot_details = QPushButton("查看分镜详情…")
         self.btn_shot_details.clicked.connect(self.show_shot_details)
@@ -912,8 +915,9 @@ class MainWindow(QMainWindow):
         page = QWidget()
         form = QVBoxLayout(page)
         form.setSpacing(8)
-        form.addWidget(_label("Ollama 模型（可替换，可输入）"))
-        self.llm_combo = SearchComboBox(placeholder="选择或输入 Ollama 模型名", allow_free_text=True)
+        form.addWidget(_label("本地模型（llama.cpp，可替换，可输入）"))
+        self.llm_combo = SearchComboBox(placeholder="选择或输入本地模型（配置名 / 标识）", allow_free_text=True)
+        self.llm_combo.currentIndexChanged.connect(self._on_llm_combo_changed)
         form.addWidget(self.llm_combo)
         form.addWidget(_label("底模（Checkpoint，可输入）"))
         self.ckpt_combo = SearchComboBox(placeholder="选择或输入 Checkpoint 名", allow_free_text=True)
@@ -1457,7 +1461,7 @@ class MainWindow(QMainWindow):
             self._on_auto_continuity_toggled)
         layout.addWidget(self.auto_continuity_check)
         auto_hint = _label(
-            "开启后优先使用设置里的外部 OpenAI 兼容模型；没有配置时改用本地 Ollama。",
+            "开启后优先使用设置里的外部 OpenAI 兼容模型；没有配置时改用本地 llama.cpp 模型。",
             "Hint")
         auto_hint.setWordWrap(True)
         layout.addWidget(auto_hint)
@@ -1848,7 +1852,7 @@ class MainWindow(QMainWindow):
 
     def _set_status(self, which: str, text: str, color: str) -> None:
         label = self.comfy_status if which == "comfy" else self.ollama_status
-        prefix = "ComfyUI" if which == "comfy" else "Ollama"
+        prefix = "ComfyUI" if which == "comfy" else "本地模型"
         label.setText('<span style="color:%s">●</span> %s：%s' % (color, prefix, text))
 
     def connect_services(self, restart: bool = False) -> None:
@@ -1891,13 +1895,53 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("ComfyUI 连接失败，请检查设置")
         QMessageBox.warning(self, "连接失败", message)
 
+    def _profile_names(self) -> list[str]:
+        return [
+            str(item.get("name") or "") for item in
+            (getattr(self.cfg.ollama, "profiles", []) or [])
+            if isinstance(item, dict) and item.get("name")
+        ]
+
+    def _on_llm_combo_changed(self, *_args) -> None:
+        if getattr(self, "_restoring_state", False):
+            return
+        value = str(self.llm_combo.currentValue() or "")
+        if not value or value not in self._profile_names():
+            return
+        if value == getattr(self.cfg.ollama, "profile", ""):
+            return
+        self.cfg.ollama.profile = value
+        from comfyui_generator.core.config import save_config
+        save_config(self.cfg)
+        self.append_log("已切换本地模型配置：%s（正在重载服务）" % value)
+        self._reload_llama_server()
+
+    def _reload_llama_server(self) -> None:
+        if getattr(self, "llama_worker", None) and self.llama_worker.isRunning():
+            return
+        from comfyui_generator.ui.workers import LlamaServerWorker
+        worker = LlamaServerWorker(self.cfg)
+        worker.log.connect(self.append_log)
+        worker.done.connect(self._on_llama_ready)
+        worker.failed.connect(
+            lambda msg: self.append_log("本地模型重载失败：%s" % str(msg)[:200]))
+        worker.finished.connect(lambda: setattr(self, "llama_worker", None))
+        self.llama_worker = worker
+        worker.start()
+
+    def _on_llama_ready(self, models: list[str]) -> None:
+        self._populate_from_assets(models)
+
     def _populate_from_assets(self, models: list[str]) -> None:
+        profile = getattr(self.cfg.ollama, "profile", "")
         current_llm = self.llm_combo.currentValue() or self.cfg.ollama.default_model
-        models = self._merge_values(models, [current_llm])
+        if current_llm not in self._profile_names():
+            current_llm = profile or current_llm
+        models = self._merge_values(self._profile_names(), models, [current_llm])
         self.ollama_models = list(models)
         self.llm_combo.setValues(models)
-        if current_llm:
-            self.llm_combo.selectValue(current_llm)
+        if profile or current_llm:
+            self.llm_combo.selectValue(profile or current_llm)
 
         suffixes = {".safetensors", ".ckpt", ".pt", ".pth", ".bin"}
         current_ckpt = self.ckpt_combo.currentValue() or (self.template.get("model") or "")
@@ -3543,7 +3587,19 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------------- prompt generation
 
     def _llm(self) -> str:
-        return self.llm_combo.currentValue() or self.cfg.ollama.default_model
+        value = self.llm_combo.currentValue() or self.cfg.ollama.default_model
+        if value in self._profile_names():
+            client_model = self._loaded_model_identity()
+            return client_model or value
+        return value
+
+    def _loaded_model_identity(self) -> str:
+        try:
+            from comfyui_generator.core.ollama import OllamaClient
+            names = OllamaClient(self.cfg.ollama.base_url).model_names()
+            return names[0] if names else ""
+        except Exception:
+            return ""
 
     def generate_single(self, then_render: bool = False,
                         external: bool = False) -> None:
@@ -3560,10 +3616,10 @@ class MainWindow(QMainWindow):
                 return
         else:
             if not self.connected:
-                QMessageBox.information(self, "提示", "请先连接 ComfyUI / Ollama。")
+                QMessageBox.information(self, "提示", "请先连接 ComfyUI / 本地模型。")
                 return
             if not self._llm():
-                QMessageBox.information(self, "提示", "没有可用的 Ollama 模型，请先在设置/模型页选择。")
+                QMessageBox.information(self, "提示", "没有可用的本地模型，请先在设置/模型页选择。")
                 return
         self._render_after_prompt = then_render
         self._source_suffix = self._model_suffix(
@@ -3586,7 +3642,7 @@ class MainWindow(QMainWindow):
         worker.finished.connect(self._on_prompt_worker_finished)
         self._bind_request_timer(worker)
         self.prompt_worker = worker
-        self.statusBar().showMessage("Ollama 模型正在生成单图提示词…")
+        self.statusBar().showMessage("本地模型正在生成单图提示词…")
         worker.start()
 
     def _on_single_prompt(self, result: dict[str, str]) -> None:
@@ -3728,10 +3784,10 @@ class MainWindow(QMainWindow):
                 return
         else:
             if not self.connected:
-                QMessageBox.information(self, "提示", "请先连接 ComfyUI / Ollama。")
+                QMessageBox.information(self, "提示", "请先连接 ComfyUI / 本地模型。")
                 return
             if not self._llm():
-                QMessageBox.information(self, "提示", "没有可用的 Ollama 模型，请先在设置/模型页选择。")
+                QMessageBox.information(self, "提示", "没有可用的本地模型，请先在设置/模型页选择。")
                 return
         total = int(self.story_shots.value())
         self._source_suffix = self._model_suffix(
@@ -3763,7 +3819,7 @@ class MainWindow(QMainWindow):
         worker.finished.connect(self._on_prompt_worker_finished)
         self._bind_request_timer(worker)
         self.prompt_worker = worker
-        self.statusBar().showMessage("Ollama 模型正在生成分镜…")
+        self.statusBar().showMessage("本地模型正在生成分镜…")
         worker.start()
 
     def _on_story_ready(self, shots: list[dict[str, str]]) -> None:
@@ -3792,7 +3848,7 @@ class MainWindow(QMainWindow):
         use_external = self._external_llm_ready()
         model = self.cfg.external_llm.model if use_external else self._llm()
         if not model:
-            self.append_log("自动连贯跳过：没有可用的外部模型或 Ollama 模型。")
+            self.append_log("自动连贯跳过：没有可用的外部模型或本地模型。")
             return
         worker = ContinuityWorker(
             self.cfg, premise, shots, self._combined_character_tags("story"),
@@ -4144,7 +4200,8 @@ class MainWindow(QMainWindow):
             if shot is None:
                 continue
             findings = verify_render(
-                str(shot.get("prompt") or ""), item, db, thresholds)
+                str(shot.get("prompt") or ""), item, db, thresholds,
+                expected_scene=str(shot.get("continuity_scene") or ""))
             shot["render_findings"] = findings
             shot["render_tags"] = sorted(
                 (item.get("general") or {}).keys(),
@@ -4557,12 +4614,12 @@ class MainWindow(QMainWindow):
         if changes and self._llm():
             self._translate_changed_shot_prompts(changes)
         elif changes:
-            self.append_log("没有可用 Ollama 模型，表格先显示英文标签。")
+            self.append_log("没有可用本地模型，表格先显示英文标签。")
 
     def _translate_changed_shot_prompts(self, changes: list[tuple[int, str]]) -> None:
         model = self._llm()
         if not model:
-            self.append_log("英文提示词已更新；没有可用 Ollama 模型，中文提示词未更新")
+            self.append_log("英文提示词已更新，没有可用本地模型，中文显示未更新")
             return
         tags: list[str] = []
         for _row, prompt in changes:
@@ -4604,9 +4661,22 @@ class MainWindow(QMainWindow):
         return result
 
     def select_all_shots(self) -> None:
-        if self.shot_table.rowCount():
-            self.shot_table.selectAll()
-            self.shot_table.setFocus()
+        count = self.shot_table.rowCount()
+        if not count:
+            return
+        selection = self.shot_table.selectionModel()
+        selection.clearSelection()
+        flags = (QItemSelectionModel.SelectionFlag.Select
+                 | QItemSelectionModel.SelectionFlag.Rows)
+        for row in range(count):
+            selection.select(self.shot_table.model().index(row, 3), flags)
+            lock_item = self.shot_table.item(row, 0)
+            if lock_item is not None:
+                lock_item.setCheckState(Qt.CheckState.Checked)
+        self._remember_shot_selection()
+        self.shot_table.setFocus()
+        self.append_log("已全选 %d 镜" % count)
+        self.statusBar().showMessage("已全选 %d 镜" % count)
 
     def clear_shot_rows(self) -> None:
         count = self.shot_table.rowCount()
@@ -4661,7 +4731,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "提示", "先生成单图提示词。")
             return
         if not self._llm():
-            QMessageBox.information(self, "提示", "没有可用的 Ollama 模型，请先在设置/模型页选择。")
+            QMessageBox.information(self, "提示", "没有可用的本地模型，请先在设置/模型页选择。")
             return
         from PySide6.QtWidgets import QInputDialog
         total, ok = QInputDialog.getInt(self, "扩写成分镜", "分镜数量：", 4, 2, 50)
@@ -4688,7 +4758,7 @@ class MainWindow(QMainWindow):
         worker.finished.connect(self._on_prompt_worker_finished)
         self._bind_request_timer(worker)
         self.prompt_worker = worker
-        self.statusBar().showMessage("Ollama 模型正在扩写分镜…")
+        self.statusBar().showMessage("本地模型正在改写镜头…")
         worker.start()
 
     def _on_expanded(self, shots: list[dict[str, str]]) -> None:
@@ -5590,7 +5660,6 @@ class MainWindow(QMainWindow):
     def _apply_project(self, project: dict[str, Any]) -> None:
         self.project = project
         premise = str(project.get("premise") or "")
-        normalize_shot_casts(project.get("shots") or [])
         profiles = parse_character_profiles(premise)
         self._run_prefix = ""
         self._run_signature = ""
@@ -6145,6 +6214,83 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("正在重试 %s…" % task.label)
         worker.start()
 
+    def repair_current_project(self) -> None:
+        if self.advisory_repair_worker and self.advisory_repair_worker.isRunning():
+            return
+        if not self.project:
+            QMessageBox.information(self, "提示", "请先打开或生成分镜项目。")
+            return
+        shots = list(self.project.get("shots") or [])
+        if not shots:
+            QMessageBox.information(self, "提示", "当前项目没有分镜。")
+            return
+        try:
+            from comfyui_generator.core.fluid_guard import detect_fluid_discontinuity
+            from comfyui_generator.core.prompt_repair import REPAIRABLE_KINDS
+            from comfyui_generator.core.stall_guard import detect_stalls
+            from comfyui_generator.core.damage_guard import detect_damage_restored
+            from comfyui_generator.core.tag_validation import (
+                annotate_shots, database_from_config, options_from_config,
+            )
+
+            db = database_from_config(self.cfg.tagdb)
+            annotate_shots(shots, db, options_from_config(self.cfg.tagdb))
+            for index, findings in detect_stalls(shots).items():
+                shots[index].setdefault("findings", []).extend(findings)
+            for index, findings in detect_fluid_discontinuity(shots).items():
+                shots[index].setdefault("findings", []).extend(findings)
+            for index, findings in detect_damage_restored(shots).items():
+                shots[index].setdefault("findings", []).extend(findings)
+            targets = [
+                shot for shot in shots
+                if any(f.get("kind") in REPAIRABLE_KINDS
+                       for f in (shot.get("findings") or []))]
+        except Exception as exc:
+            self.append_log("结构提示整理失败：%s" % str(exc)[:160])
+            return
+        if not targets:
+            QMessageBox.information(self, "AI 修复", "当前项目没有需要修复的结构提示。")
+            return
+        use_external = bool(getattr(self, "use_external_model", False)
+                            and self._external_llm_ready())
+        if use_external:
+            model = str(self.cfg.external_llm.model or "")
+        else:
+            model = self._llm() or ""
+            if not model:
+                QMessageBox.information(self, "提示", "请先选择本地模型。")
+                return
+        worker = AdvisoryRepairWorker(
+            self.cfg, self.project["shots"], model, use_external)
+        worker.done.connect(self._on_advisory_repair_done)
+        worker.failed.connect(self._on_advisory_repair_failed)
+        worker.log.connect(self.append_log)
+        worker.finished.connect(self._on_advisory_repair_finished)
+        self.advisory_repair_worker = worker
+        self.btn_repair_project.setEnabled(False)
+        self.statusBar().showMessage("AI 正在批量修复当前项目…")
+        worker.start()
+
+    def _on_advisory_repair_done(self, result: dict[str, Any]) -> None:
+        repaired = set(result.get("repaired") or [])
+        if repaired:
+            self._fill_shot_table(self.project["shots"])
+            save_project(self.project, self.cfg.root)
+            self._load_gallery(self.project)
+            self.append_log("AI 已修复 %d 镜，仍有 %d 镜待处理。" % (
+                len(repaired), len(result.get("unresolved") or [])))
+            self.statusBar().showMessage("AI 修复完成")
+        else:
+            QMessageBox.information(self, "AI 修复", "没有镜头被成功修复，请查看日志。")
+
+    def _on_advisory_repair_failed(self, message: str) -> None:
+        self.append_log("AI 修复失败：%s" % message)
+        QMessageBox.warning(self, "AI 修复失败", message)
+
+    def _on_advisory_repair_finished(self) -> None:
+        self.advisory_repair_worker = None
+        self.btn_repair_project.setEnabled(True)
+
     def rewrite_selected_shot(self) -> None:
         row = self.shot_table.currentRow()
         if row < 0:
@@ -6158,7 +6304,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "提示", "该镜头没有提示词。")
             return
         if not self.connected or not self._llm():
-            QMessageBox.information(self, "提示", "请先连接 ComfyUI / Ollama 并选择模型。")
+            QMessageBox.information(self, "提示", "请先连接 ComfyUI / 本地模型并选定模型。")
             return
         instruction, ok = QInputDialog.getText(
             self, "改写镜头", "改写要求（例：半身、回头看镜头、黄昏逆光）")
@@ -6187,7 +6333,7 @@ class MainWindow(QMainWindow):
         self._bind_request_timer(worker)
         self.prompt_worker = worker
         self._set_generation_enabled(False)
-        self.statusBar().showMessage("Ollama 模型正在改写镜头…")
+        self.statusBar().showMessage("本地模型正在改写镜头…")
         worker.start()
 
     def _on_rewritten(self, result: dict[str, str]) -> None:
@@ -6283,7 +6429,8 @@ class MainWindow(QMainWindow):
         for widget in (self.btn_single_prompt, self.btn_single_external,
                        self.btn_single_render, self.btn_story_prompt,
                        self.btn_story_external, self.btn_story_render,
-                       self.btn_rewrite_shot, self.tabs):
+                       self.btn_rewrite_shot, self.btn_repair_project,
+                       self.tabs):
             widget.setEnabled(enabled)
         self.btn_single_render.setEnabled(enabled)
         self.btn_story_render.setEnabled(enabled)
@@ -6460,6 +6607,7 @@ class MainWindow(QMainWindow):
             self.append_log("界面状态恢复失败：%s" % exc)
         finally:
             self._restoring_state = False
+        self._reload_llama_server()
         answer = QMessageBox.question(
             self, "应用设置", "设置已保存。是否重启 ComfyUI 以应用新配置（如预览参数）？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)

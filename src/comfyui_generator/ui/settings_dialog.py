@@ -92,24 +92,51 @@ class SettingsDialog(QDialog):
         comfy_form.addRow("", self.keep_running)
         form.addWidget(comfy_box)
 
-        ollama_box = QGroupBox("Ollama")
-        ollama_form = QFormLayout(ollama_box)
+        llama_box = QGroupBox("本地模型 · llama.cpp llama-server")
+        llama_form = QFormLayout(llama_box)
         self.ollama_host = QLineEdit(cfg.ollama.host)
-        ollama_form.addRow("地址", self.ollama_host)
+        llama_form.addRow("地址", self.ollama_host)
         self.ollama_port = QSpinBox()
         self.ollama_port.setRange(1, 65535)
         self.ollama_port.setValue(cfg.ollama.port)
-        ollama_form.addRow("端口", self.ollama_port)
-        self.ollama_exe = _path_row(ollama_form, "ollama.exe", cfg.ollama.exe)
+        llama_form.addRow("端口", self.ollama_port)
+        self.ollama_exe = _path_row(llama_form, "llama-server.exe", cfg.ollama.exe)
         self.ollama_model = SearchComboBox(
-            placeholder="扫描到的 Ollama 模型，可搜索或直接输入", allow_free_text=True)
+            placeholder="模型标识（可搜索或直接输入）", allow_free_text=True)
         model_names = list(dict.fromkeys(self.models + ([cfg.ollama.default_model]
                                                        if cfg.ollama.default_model else [])))
         self.ollama_model.setItems([("自动（第一个可用）", "")] +
                                    [(name, name) for name in model_names])
         self.ollama_model.selectValue(cfg.ollama.default_model or "")
-        ollama_form.addRow("默认模型", self.ollama_model)
-        form.addWidget(ollama_box)
+        llama_form.addRow("默认模型标识", self.ollama_model)
+        self.llama_profile = QComboBox()
+        profile_names = []
+        for item in getattr(cfg.ollama, "profiles", []) or []:
+            if isinstance(item, dict) and item.get("name"):
+                profile_names.append(str(item["name"]))
+        if not profile_names:
+            profile_names = ["default"]
+        self.llama_profile.addItems(profile_names)
+        self.llama_profile.setCurrentText(
+            getattr(cfg.ollama, "profile", "") or profile_names[0])
+        self.llama_profile.currentTextChanged.connect(self._on_llama_profile_changed)
+        llama_form.addRow("模型配置（选择即加载该模型）", self.llama_profile)
+        self.llama_model_path = _path_row(llama_form, "GGUF 模型", "")
+        self.llama_mmproj_path = _path_row(llama_form, "mmproj（可选）", "")
+        self._load_llama_profile_fields(cfg)
+        self.llama_reasoning = QComboBox()
+        self.llama_reasoning.addItems(["minimal", "low", "medium", "high", "xhigh", "max"])
+        self.llama_reasoning.setCurrentText(
+            getattr(cfg.ollama, "reasoning_effort", "low") or "low")
+        llama_form.addRow("思考强度", self.llama_reasoning)
+        self.llama_gpu_layers = QSpinBox()
+        self.llama_gpu_layers.setRange(0, 999)
+        self.llama_gpu_layers.setValue(int(getattr(cfg.ollama, "gpu_layers", 32)))
+        llama_form.addRow("GPU 层数（显存放不下时调小）", self.llama_gpu_layers)
+        self.llama_auto_start = QCheckBox("未运行时自动启动本地服务")
+        self.llama_auto_start.setChecked(bool(getattr(cfg.ollama, "auto_start", False)))
+        llama_form.addRow("", self.llama_auto_start)
+        form.addWidget(llama_box)
 
         external_box = QGroupBox("外部 OpenAI 兼容 API（提示词生成）")
         external_form = QFormLayout(external_box)
@@ -185,7 +212,7 @@ class SettingsDialog(QDialog):
             models_form, "放大模型目录", cfg.models.upscaler_dir, directory=True)
         models_hint = QLabel(
             "选择模型文件所在目录，保存后会扫描并加入下拉列表。"
-            "Ollama、采样器、调度器由服务自动读取，也可在下拉框直接输入。")
+            "采样器、调度器由服务自动读取，也可在下拉框直接输入。")
         models_hint.setWordWrap(True)
         models_form.addRow("", models_hint)
         form.addWidget(models_box)
@@ -199,6 +226,10 @@ class SettingsDialog(QDialog):
             "发现 P1 自动用当前模型最小修复，修好才标记就绪")
         self.tagdb_auto_repair.setChecked(cfg.tagdb.auto_repair_story)
         tagdb_form.addRow(self.tagdb_auto_repair)
+        self.tagdb_auto_repair_advisory = QCheckBox(
+            "结构类 P2 提示也批量交给 AI 修复（一次调用，不阻断）")
+        self.tagdb_auto_repair_advisory.setChecked(cfg.tagdb.auto_repair_advisory)
+        tagdb_form.addRow(self.tagdb_auto_repair_advisory)
         self.tagdb_csv = _path_row(tagdb_form, "danbooru.csv（可选）", cfg.tagdb.csv_path)
         self.tagdb_alias = _path_row(tagdb_form, "tag_aliases.csv（可选）", cfg.tagdb.alias_path)
         self.tagdb_report_unknown = QCheckBox("报告词表之外的自造/触发词标签")
@@ -322,6 +353,53 @@ class SettingsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
 
+    def _profile_values(self, name: str) -> dict[str, Any]:
+        for item in getattr(self.cfg.ollama, "profiles", []) or []:
+            if isinstance(item, dict) and item.get("name") == name:
+                return item
+        return {}
+
+    def _on_llama_profile_changed(self, name: str) -> None:
+        values = self._profile_values(name)
+        if not values:
+            values = {
+                "model": self.cfg.ollama.model,
+                "mmproj": self.cfg.ollama.mmproj,
+                "gpu_layers": self.cfg.ollama.gpu_layers,
+                "context": self.cfg.ollama.context,
+                "reasoning_effort": self.cfg.ollama.reasoning_effort,
+                "reasoning_budget": self.cfg.ollama.reasoning_budget,
+                "temperature": self.cfg.ollama.temperature,
+                "top_p": self.cfg.ollama.top_p,
+                "top_k": self.cfg.ollama.top_k,
+            }
+        self._apply_profile_values(values)
+
+    def _apply_profile_values(self, values: dict[str, Any]) -> None:
+        self.llama_model_path.setText(str(values.get("model") or ""))
+        self.llama_mmproj_path.setText(str(values.get("mmproj") or ""))
+        if hasattr(self, "llama_gpu_layers"):
+            self.llama_gpu_layers.setValue(int(values.get("gpu_layers") or 0))
+        if hasattr(self, "llama_context"):
+            self.llama_context.setValue(int(values.get("context") or 16384))
+        if hasattr(self, "llama_reasoning"):
+            effort = str(values.get("reasoning_effort") or "low")
+            if self.llama_reasoning.findText(effort) >= 0:
+                self.llama_reasoning.setCurrentText(effort)
+        if hasattr(self, "llama_budget"):
+            self.llama_budget.setValue(int(values.get("reasoning_budget") or 1024))
+
+    def _load_llama_profile_fields(self, cfg: AppConfig) -> None:
+        values = self._profile_values(self.llama_profile.currentText())
+        if not values:
+            values = {
+                "model": cfg.ollama.model, "mmproj": cfg.ollama.mmproj,
+                "gpu_layers": cfg.ollama.gpu_layers, "context": cfg.ollama.context,
+                "reasoning_effort": cfg.ollama.reasoning_effort,
+                "reasoning_budget": cfg.ollama.reasoning_budget,
+            }
+        self._apply_profile_values(values)
+
     def _sync_external_endpoint(self) -> None:
         model = str(self.external_model.currentValue() or "").strip()
         endpoint = endpoint_for_model(model) if model else {}
@@ -349,6 +427,27 @@ class SettingsDialog(QDialog):
         c.ollama.port = self.ollama_port.value()
         c.ollama.exe = self.ollama_exe.text().strip()
         c.ollama.default_model = self.ollama_model.currentValue() or ""
+        c.ollama.auto_start = self.llama_auto_start.isChecked()
+        profile_name = self.llama_profile.currentText() or "default"
+        c.ollama.profile = profile_name
+        values = dict(self._profile_values(profile_name))
+        values.update({
+            "name": profile_name,
+            "model": self.llama_model_path.text().strip(),
+            "mmproj": self.llama_mmproj_path.text().strip(),
+            "gpu_layers": self.llama_gpu_layers.value(),
+            "reasoning_effort": self.llama_reasoning.currentText(),
+        })
+        profiles = [
+            item for item in (getattr(c.ollama, "profiles", []) or [])
+            if isinstance(item, dict) and item.get("name") != profile_name
+        ]
+        profiles.append(values)
+        c.ollama.profiles = profiles
+        c.ollama.model = values["model"]
+        c.ollama.mmproj = values["mmproj"]
+        c.ollama.gpu_layers = values["gpu_layers"]
+        c.ollama.reasoning_effort = values["reasoning_effort"]
         c.external_llm.model = str(
             self.external_model.currentValue() or "").strip() or EXTERNAL_LLM_MODEL
         endpoint = endpoint_for_model(c.external_llm.model)
@@ -369,6 +468,7 @@ class SettingsDialog(QDialog):
         c.story_policy = self.story_policy.toPlainText()
         c.tagdb.enabled = self.tagdb_enabled.isChecked()
         c.tagdb.auto_repair_story = self.tagdb_auto_repair.isChecked()
+        c.tagdb.auto_repair_advisory = self.tagdb_auto_repair_advisory.isChecked()
         c.tagdb.csv_path = self.tagdb_csv.text().strip()
         c.tagdb.alias_path = self.tagdb_alias.text().strip()
         c.tagdb.report_unknown = self.tagdb_report_unknown.isChecked()

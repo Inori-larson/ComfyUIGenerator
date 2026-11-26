@@ -257,7 +257,7 @@ class TagReferenceDialog(QDialog):
             self.worker = worker
             worker.start()
         else:
-            self.translate_status.setText("未连接 Ollama，参考标签暂不翻译。")
+            self.translate_status.setText("未连接本地模型，参考标签暂不翻译。")
 
     def _apply_translations(self, mapping: dict[str, str]) -> None:
         for index in range(self.list.count()):

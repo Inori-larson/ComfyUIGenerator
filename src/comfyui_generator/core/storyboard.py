@@ -16,6 +16,17 @@ PROMPT_COVERAGE = (
     "场景/地点、镜头景别、机位/角度、构图、光线/时间、NSFW 状态。"
 )
 
+CHARACTER_GROUPING = (
+    "同一角色的外貌与服装/裸露状态标签必须用圆括号包成一个整体，紧跟在该角色的 "
+    "cast 标签后面；例如 "
+    "\"1girl (long hair, black hair, white pleated skirt, black thighhighs), "
+    "1boy (short hair, jacket, pants)\"。"
+    "多人时每个角色各写一组，不要把外貌/服装散落到别的角色或场景标签后面；"
+    "圆括号内可以再用英文逗号分隔多个标签，解析时不会拆开。"
+    "若已启用角色 LoRA 且不写外貌，组内只写该镜仍可见的服装/状态标签。"
+)
+
+
 BOORU_WORKFLOW = (
     "按 cast -> 服装/裸露 -> 姿势 -> 动作 -> 表情 -> NSFW -> 场景 -> 光线 -> 镜头"
     "的顺序组装标签；已经脱掉的服装标签必须删除；每镜换姿势和互动，不连续重复。"
@@ -32,10 +43,12 @@ STORYBOARD_SYSTEM = (
     "5. 每镜用 beat_id 标明所属 beat；顶层 beats 数组只来自用户剧情。\n"
     "6. 用户消息里的【用户规则】优先于你的习惯，按剧情上下文理解并遵守；"
     "若规则之间冲突，按更具体的那条理解，并在 description 里体现你的处理。\n"
+    "7. " + CHARACTER_GROUPING + "\n"
     "JSON 结构必须如下：\n"
     "{\"version\":1,\"premise\":\"简要总结\",\"beats\":[{\"id\":\"B1\",\"description\":\"第一段剧情\"}],"
     "\"shots\":[{\"id\":\"01\",\"name\":\"shot_01\",\"cast\":\"1girl solo\",\"beat_id\":\"B1\","
-    "\"pose_id\":\"\",\"prompt\":\"1girl solo, 标签2\",\"description\":\"中文描述\","
+    "\"pose_id\":\"\",\"prompt\":\"1girl (long hair, white shirt), 1boy (short hair, jacket), classroom\","
+    "\"description\":\"中文描述\","
     "\"keyframe_prompt\":\"\",\"ai_expansions\":[]}]}\n"
     "现在直接根据用户输入生成完整 JSON。"
 )
@@ -220,10 +233,6 @@ def renumber_shots(shots: list[dict[str, Any]]) -> None:
         if isinstance(shot, dict):
             shot["id"] = "%02d" % index
             shot["name"] = "shot_%02d" % index
-
-
-def normalize_shot_casts(shots: list[dict[str, Any]]) -> None:
-    return None
 
 
 def extract_premise_beats(premise: str) -> list[str]:

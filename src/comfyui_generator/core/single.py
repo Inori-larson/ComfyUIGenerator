@@ -8,7 +8,8 @@ from typing import Any, Callable
 from comfyui_generator.core.mechanical import normalize_prompt_text
 from comfyui_generator.core.ollama import OllamaClient
 from comfyui_generator.core.storyboard import (
-    BOORU_WORKFLOW, PROMPT_COVERAGE, clothing_from_premise, raw_prompt,
+    BOORU_WORKFLOW, CHARACTER_GROUPING, PROMPT_COVERAGE, clothing_from_premise,
+    raw_prompt,
 )
 from comfyui_generator.core.tags import dedupe_tags
 
@@ -52,6 +53,7 @@ SINGLE_SYSTEM_PROMPT = (
     "每个画面最多一个男性，并删除 solo、male、couple 等会造成人数歧义的词。\n"
     "8. 同时返回 clothing_state：用英文 Booru 状态标签、逗号分隔，只写当前半脱/破损/脱下状态；"
     "没有这类状态时返回 none；不要把完整基础服装写进去。\n"
+    "9. " + CHARACTER_GROUPING + "\n"
     "只输出 JSON，不要解释、评论或免责声明。"
 )
 
@@ -80,7 +82,7 @@ class SingleOptions:
     style_positive: str = ""
     strip_appearance: bool = False
     temperature: float = 0.8
-    num_predict: int = 8192
+    num_predict: int = 2048
     num_ctx: int = 32768
     keep_alive: str = "5m"
     log: Callable[[str], None] = field(default=lambda _msg: None)
