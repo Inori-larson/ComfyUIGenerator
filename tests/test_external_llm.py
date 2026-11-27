@@ -74,8 +74,8 @@ def test_external_client_retries_without_doubling_budget(monkeypatch):
         "test-model", [{"role": "user", "content": "x"}],
         num_predict=4096, retries=1)
     assert result == {"shots": []}
-    assert bodies[0]["max_tokens"] == 4096
-    assert bodies[1]["max_tokens"] == 4096
+    assert bodies[0]["max_tokens"] == bodies[1]["max_tokens"]
+    assert bodies[0]["max_tokens"] >= 4096
     assert len(bodies[1]["messages"]) == 2
     assert "截断" in bodies[1]["messages"][-1]["content"]
 

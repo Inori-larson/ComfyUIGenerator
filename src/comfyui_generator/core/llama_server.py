@@ -73,7 +73,7 @@ class LlamaServerConfig:
     reasoning_effort: str = "medium"
     reasoning_budget: int = 2048
     reasoning_preserve: bool = False
-    sleep_idle_seconds: int = 60
+    sleep_idle_seconds: int = -1  # -1 禁用：sleep 会释放端口导致无法唤醒
     temperature: float = 0.6
     top_p: float = 0.9
     top_k: int = 40
