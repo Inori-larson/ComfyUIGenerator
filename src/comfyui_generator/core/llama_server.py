@@ -67,42 +67,32 @@ class LlamaServerConfig:
     )
     host: str = "127.0.0.1"
     port: int = 8080
-    context: int = 16384
-    gpu_layers: int = 32
+    context: int = 32768
+    gpu_layers: int = 999
     parallel: int = 1
-    reasoning_effort: str = "low"
-    reasoning_budget: int = 1024
+    reasoning_effort: str = "medium"
+    reasoning_budget: int = 2048
     reasoning_preserve: bool = False
     sleep_idle_seconds: int = 60
-    temperature: float = 1.0
-    top_p: float = 0.95
-    top_k: int = 64
+    temperature: float = 0.6
+    top_p: float = 0.9
+    top_k: int = 40
     auto_start: bool = False
     timeout: float = 900.0
     default_model: str = "local-model"
     keep_alive: str = "5m"
-    profile: str = "muse"
-    profiles: list[dict[str, Any]] = field(default_factory=list)
-
-    _PROFILE_FIELDS = (
-        "model", "mmproj", "context", "gpu_layers", "parallel",
-        "reasoning_effort", "reasoning_budget", "reasoning_preserve",
-        "temperature", "top_p", "top_k",
-    )
-
-    def active_profile(self) -> dict[str, Any]:
-        for item in self.profiles:
-            if isinstance(item, dict) and item.get("name") == self.profile:
-                return item
-        return {}
 
     def resolved(self) -> dict[str, Any]:
-        values = {key: getattr(self, key) for key in self._PROFILE_FIELDS}
-        values.update({
-            key: value for key, value in self.active_profile().items()
-            if key in self._PROFILE_FIELDS and value is not None
-        })
-        return values
+        return {
+            "model": self.model, "mmproj": self.mmproj,
+            "context": self.context, "gpu_layers": self.gpu_layers,
+            "parallel": self.parallel,
+            "reasoning_effort": self.reasoning_effort,
+            "reasoning_budget": self.reasoning_budget,
+            "reasoning_preserve": self.reasoning_preserve,
+            "temperature": self.temperature, "top_p": self.top_p,
+            "top_k": self.top_k,
+        }
 
     @property
     def base_url(self) -> str:
@@ -263,13 +253,15 @@ class LlamaServerClient:
              schema: dict[str, Any] | None = None,
              temperature: float = 0.8, top_p: float = 0.9,
              num_predict: int = 2048, num_ctx: int = 32768,
-             keep_alive: str = "", timeout: float = 900.0,
-             reasoning_effort: str = "") -> str:
+              keep_alive: str = "", timeout: float = 900.0,
+              reasoning_effort: str = "",
+              max_tokens_floor: int = 4096) -> str:
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "stream": False,
-            "max_tokens": max(4096, int(num_predict)),
+            "max_tokens": max(max_tokens_floor, int(num_predict)),
+
             "temperature": float(temperature),
             "top_p": float(top_p),
         }

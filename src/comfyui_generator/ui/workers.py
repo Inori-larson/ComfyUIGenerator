@@ -685,7 +685,8 @@ class PromptWorker(QThread):
         cache_path = str(self.cfg.root / "cache" / "tag_translation.json")
         try:
             return translate_tag_list(
-                client, model, tags, cache_path, timeout=30.0)
+                client, model, tags, cache_path,
+                batch_size=12, timeout=300.0)
         except Exception as exc:
             self.log.emit("中文标签翻译跳过（不影响就绪）：%s" % exc)
             return {}

@@ -69,10 +69,12 @@ def translate_prompts(client: OllamaClient, model: str, prompts: list[str],
             build_messages(batch),
             schema=TRANSLATE_SCHEMA,
             temperature=temperature,
-            num_predict=8192,
-            num_ctx=32768,
+            num_predict=1024,
+            num_ctx=4096,
             keep_alive=keep_alive,
             timeout=timeout,
+            reasoning_effort="low",
+            max_tokens_floor=1024,
         )
         items = raw.get("translations") if isinstance(raw, dict) else None
         if not isinstance(items, list):
@@ -103,10 +105,12 @@ def translate_to_tags(client: OllamaClient, model: str, prompts: list[str],
             build_to_tags_messages(batch),
             schema=TO_TAGS_SCHEMA,
             temperature=temperature,
-            num_predict=8192,
-            num_ctx=32768,
+            num_predict=1024,
+            num_ctx=4096,
             keep_alive=keep_alive,
             timeout=timeout,
+            reasoning_effort="low",
+            max_tokens_floor=1024,
         )
         items = raw.get("prompts") if isinstance(raw, dict) else None
         if not isinstance(items, list):

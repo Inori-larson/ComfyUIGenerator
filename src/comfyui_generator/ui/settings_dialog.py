@@ -109,21 +109,8 @@ class SettingsDialog(QDialog):
                                    [(name, name) for name in model_names])
         self.ollama_model.selectValue(cfg.ollama.default_model or "")
         llama_form.addRow("默认模型标识", self.ollama_model)
-        self.llama_profile = QComboBox()
-        profile_names = []
-        for item in getattr(cfg.ollama, "profiles", []) or []:
-            if isinstance(item, dict) and item.get("name"):
-                profile_names.append(str(item["name"]))
-        if not profile_names:
-            profile_names = ["default"]
-        self.llama_profile.addItems(profile_names)
-        self.llama_profile.setCurrentText(
-            getattr(cfg.ollama, "profile", "") or profile_names[0])
-        self.llama_profile.currentTextChanged.connect(self._on_llama_profile_changed)
-        llama_form.addRow("模型配置（选择即加载该模型）", self.llama_profile)
-        self.llama_model_path = _path_row(llama_form, "GGUF 模型", "")
-        self.llama_mmproj_path = _path_row(llama_form, "mmproj（可选）", "")
-        self._load_llama_profile_fields(cfg)
+        self.llama_model_path = _path_row(llama_form, "GGUF 模型", cfg.ollama.model)
+        self.llama_mmproj_path = _path_row(llama_form, "mmproj（可选）", cfg.ollama.mmproj)
         self.llama_reasoning = QComboBox()
         self.llama_reasoning.addItems(["minimal", "low", "medium", "high", "xhigh", "max"])
         self.llama_reasoning.setCurrentText(
@@ -353,53 +340,6 @@ class SettingsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
 
-    def _profile_values(self, name: str) -> dict[str, Any]:
-        for item in getattr(self.cfg.ollama, "profiles", []) or []:
-            if isinstance(item, dict) and item.get("name") == name:
-                return item
-        return {}
-
-    def _on_llama_profile_changed(self, name: str) -> None:
-        values = self._profile_values(name)
-        if not values:
-            values = {
-                "model": self.cfg.ollama.model,
-                "mmproj": self.cfg.ollama.mmproj,
-                "gpu_layers": self.cfg.ollama.gpu_layers,
-                "context": self.cfg.ollama.context,
-                "reasoning_effort": self.cfg.ollama.reasoning_effort,
-                "reasoning_budget": self.cfg.ollama.reasoning_budget,
-                "temperature": self.cfg.ollama.temperature,
-                "top_p": self.cfg.ollama.top_p,
-                "top_k": self.cfg.ollama.top_k,
-            }
-        self._apply_profile_values(values)
-
-    def _apply_profile_values(self, values: dict[str, Any]) -> None:
-        self.llama_model_path.setText(str(values.get("model") or ""))
-        self.llama_mmproj_path.setText(str(values.get("mmproj") or ""))
-        if hasattr(self, "llama_gpu_layers"):
-            self.llama_gpu_layers.setValue(int(values.get("gpu_layers") or 0))
-        if hasattr(self, "llama_context"):
-            self.llama_context.setValue(int(values.get("context") or 16384))
-        if hasattr(self, "llama_reasoning"):
-            effort = str(values.get("reasoning_effort") or "low")
-            if self.llama_reasoning.findText(effort) >= 0:
-                self.llama_reasoning.setCurrentText(effort)
-        if hasattr(self, "llama_budget"):
-            self.llama_budget.setValue(int(values.get("reasoning_budget") or 1024))
-
-    def _load_llama_profile_fields(self, cfg: AppConfig) -> None:
-        values = self._profile_values(self.llama_profile.currentText())
-        if not values:
-            values = {
-                "model": cfg.ollama.model, "mmproj": cfg.ollama.mmproj,
-                "gpu_layers": cfg.ollama.gpu_layers, "context": cfg.ollama.context,
-                "reasoning_effort": cfg.ollama.reasoning_effort,
-                "reasoning_budget": cfg.ollama.reasoning_budget,
-            }
-        self._apply_profile_values(values)
-
     def _sync_external_endpoint(self) -> None:
         model = str(self.external_model.currentValue() or "").strip()
         endpoint = endpoint_for_model(model) if model else {}
@@ -428,26 +368,10 @@ class SettingsDialog(QDialog):
         c.ollama.exe = self.ollama_exe.text().strip()
         c.ollama.default_model = self.ollama_model.currentValue() or ""
         c.ollama.auto_start = self.llama_auto_start.isChecked()
-        profile_name = self.llama_profile.currentText() or "default"
-        c.ollama.profile = profile_name
-        values = dict(self._profile_values(profile_name))
-        values.update({
-            "name": profile_name,
-            "model": self.llama_model_path.text().strip(),
-            "mmproj": self.llama_mmproj_path.text().strip(),
-            "gpu_layers": self.llama_gpu_layers.value(),
-            "reasoning_effort": self.llama_reasoning.currentText(),
-        })
-        profiles = [
-            item for item in (getattr(c.ollama, "profiles", []) or [])
-            if isinstance(item, dict) and item.get("name") != profile_name
-        ]
-        profiles.append(values)
-        c.ollama.profiles = profiles
-        c.ollama.model = values["model"]
-        c.ollama.mmproj = values["mmproj"]
-        c.ollama.gpu_layers = values["gpu_layers"]
-        c.ollama.reasoning_effort = values["reasoning_effort"]
+        c.ollama.model = self.llama_model_path.text().strip()
+        c.ollama.mmproj = self.llama_mmproj_path.text().strip()
+        c.ollama.gpu_layers = self.llama_gpu_layers.value()
+        c.ollama.reasoning_effort = self.llama_reasoning.currentText()
         c.external_llm.model = str(
             self.external_model.currentValue() or "").strip() or EXTERNAL_LLM_MODEL
         endpoint = endpoint_for_model(c.external_llm.model)

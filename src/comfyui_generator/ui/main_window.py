@@ -749,11 +749,15 @@ class MainWindow(QMainWindow):
         self.story_shots.setValue(6)
         row.addWidget(self.story_shots)
         self.btn_story_prompt = QPushButton("生成分镜")
-        self.btn_story_prompt.clicked.connect(lambda: self.generate_story())
+        self.btn_story_prompt.clicked.connect(
+            lambda: (setattr(self, "_story_mode_explicit_local", True),
+                     self.generate_story()))
         row.addWidget(self.btn_story_prompt, 1)
         form_layout.addLayout(row)
         self.btn_story_external = QPushButton("外部 AI 生成分镜")
-        self.btn_story_external.clicked.connect(lambda: self.generate_story(True))
+        self.btn_story_external.clicked.connect(
+            lambda: (setattr(self, "_story_mode_explicit_local", False),
+                     self.generate_story(True)))
         form_layout.addWidget(self.btn_story_external)
         self.btn_restore_partial = QPushButton("恢复上次未完成分镜")
         self.btn_restore_partial.clicked.connect(self.restore_partial_story)
@@ -915,9 +919,8 @@ class MainWindow(QMainWindow):
         page = QWidget()
         form = QVBoxLayout(page)
         form.setSpacing(8)
-        form.addWidget(_label("本地模型（llama.cpp，可替换，可输入）"))
-        self.llm_combo = SearchComboBox(placeholder="选择或输入本地模型（配置名 / 标识）", allow_free_text=True)
-        self.llm_combo.currentIndexChanged.connect(self._on_llm_combo_changed)
+        form.addWidget(_label("本地模型（llama.cpp，固定配置）"))
+        self.llm_combo = SearchComboBox(placeholder="本地模型标识", allow_free_text=True)
         form.addWidget(self.llm_combo)
         form.addWidget(_label("底模（Checkpoint，可输入）"))
         self.ckpt_combo = SearchComboBox(placeholder="选择或输入 Checkpoint 名", allow_free_text=True)
@@ -1895,27 +1898,6 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("ComfyUI 连接失败，请检查设置")
         QMessageBox.warning(self, "连接失败", message)
 
-    def _profile_names(self) -> list[str]:
-        return [
-            str(item.get("name") or "") for item in
-            (getattr(self.cfg.ollama, "profiles", []) or [])
-            if isinstance(item, dict) and item.get("name")
-        ]
-
-    def _on_llm_combo_changed(self, *_args) -> None:
-        if getattr(self, "_restoring_state", False):
-            return
-        value = str(self.llm_combo.currentValue() or "")
-        if not value or value not in self._profile_names():
-            return
-        if value == getattr(self.cfg.ollama, "profile", ""):
-            return
-        self.cfg.ollama.profile = value
-        from comfyui_generator.core.config import save_config
-        save_config(self.cfg)
-        self.append_log("已切换本地模型配置：%s（正在重载服务）" % value)
-        self._reload_llama_server()
-
     def _reload_llama_server(self) -> None:
         if getattr(self, "llama_worker", None) and self.llama_worker.isRunning():
             return
@@ -1933,15 +1915,12 @@ class MainWindow(QMainWindow):
         self._populate_from_assets(models)
 
     def _populate_from_assets(self, models: list[str]) -> None:
-        profile = getattr(self.cfg.ollama, "profile", "")
         current_llm = self.llm_combo.currentValue() or self.cfg.ollama.default_model
-        if current_llm not in self._profile_names():
-            current_llm = profile or current_llm
-        models = self._merge_values(self._profile_names(), models, [current_llm])
+        models = self._merge_values(models, [current_llm])
         self.ollama_models = list(models)
         self.llm_combo.setValues(models)
-        if profile or current_llm:
-            self.llm_combo.selectValue(profile or current_llm)
+        if current_llm:
+            self.llm_combo.selectValue(current_llm)
 
         suffixes = {".safetensors", ".ckpt", ".pt", ".pth", ".bin"}
         current_ckpt = self.ckpt_combo.currentValue() or (self.template.get("model") or "")
@@ -3587,19 +3566,7 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------------- prompt generation
 
     def _llm(self) -> str:
-        value = self.llm_combo.currentValue() or self.cfg.ollama.default_model
-        if value in self._profile_names():
-            client_model = self._loaded_model_identity()
-            return client_model or value
-        return value
-
-    def _loaded_model_identity(self) -> str:
-        try:
-            from comfyui_generator.core.ollama import OllamaClient
-            names = OllamaClient(self.cfg.ollama.base_url).model_names()
-            return names[0] if names else ""
-        except Exception:
-            return ""
+        return self.llm_combo.currentValue() or self.cfg.ollama.default_model
 
     def generate_single(self, then_render: bool = False,
                         external: bool = False) -> None:
@@ -3774,7 +3741,11 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "提示", "请先输入角色、剧情或场景。")
             return
         if (not external and self.auto_continuity_check.isChecked()
-                and self._external_llm_ready()):
+                and self._external_llm_ready()
+                and getattr(self, "_story_mode_explicit_local", False)):
+            self.append_log("已显式选择本地模型，自动连贯不切换到外部 API。")
+        elif not external and self.auto_continuity_check.isChecked() \
+                and self._external_llm_ready():
             external = True
             self.append_log("自动连贯模式：优先使用外部模型生成分镜。")
         if external:
